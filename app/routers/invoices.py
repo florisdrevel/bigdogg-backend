@@ -181,3 +181,22 @@ async def send_reminder(invoice_id: str, request: Request):
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+@router.delete("/{invoice_id}")
+async def delete_invoice(invoice_id: str, request: Request):
+    user_id = get_user_id(request)
+    try:
+        invoice = supabase.table("invoices")\
+            .select("status")\
+            .eq("id", invoice_id)\
+            .eq("user_id", user_id)\
+            .single()\
+            .execute()
+        if not invoice.data:
+            raise HTTPException(status_code=404, detail="Invoice not found")
+        if invoice.data["status"] != "draft":
+            raise HTTPException(status_code=400, detail="Only draft invoices can be deleted")
+        supabase.table("invoice_lines").delete().eq("invoice_id", invoice_id).execute()
+        supabase.table("invoices").delete().eq("id", invoice_id).eq("user_id", user_id).execute()
+        return {"message": "Invoice deleted"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
