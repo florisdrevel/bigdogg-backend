@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, products, clients, invoices, ai, expenses, overview
+from app.routers import auth, products, clients, invoices, ai, expenses, overview, profile
 
 app = FastAPI(
     title="Bigdogg API",
@@ -24,6 +24,7 @@ app.include_router(invoices.router, prefix="/api/v1/invoices", tags=["invoices"]
 app.include_router(ai.router, prefix="/api/v1/ai", tags=["ai"])
 app.include_router(expenses.router, prefix="/api/v1/expenses", tags=["expenses"])
 app.include_router(overview.router, prefix="/api/v1/overview", tags=["overview"])
+app.include_router(profile.router, prefix="/api/v1/profile", tags=["profile"])
 
 @app.get("/")
 async def root():
