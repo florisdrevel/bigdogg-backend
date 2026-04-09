@@ -11,5 +11,5 @@ class Settings:
     secret_key: str = os.getenv("SECRET_KEY", "fallback_secret")
     algorithm: str = os.getenv("ALGORITHM", "HS256")
     access_token_expire_minutes: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))
-
+    anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
 settings = Settings()
