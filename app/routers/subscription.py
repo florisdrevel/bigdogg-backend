@@ -133,6 +133,7 @@ async def stripe_webhook(request: Request):
         if event["type"] == "checkout.session.completed":
             session = event["data"]["object"]
             user_id = session.get("metadata", {}).get("user_id")
+            print(f"Webhook received for user_id: {user_id}")
 
             if user_id:
                 ends_at = datetime.now(timezone.utc) + timedelta(days=30)
@@ -141,21 +142,24 @@ async def stripe_webhook(request: Request):
                     .eq("user_id", user_id)\
                     .execute()
 
+                print(f"Existing subscription: {existing.data}")
+
                 if existing.data:
-                    supabase.table("subscriptions")\
+                    result = supabase.table("subscriptions")\
                         .update({
                             "status": "active",
                             "subscription_ends_at": ends_at.isoformat(),
-                            "updated_at": datetime.now(timezone.utc).isoformat()
                         })\
                         .eq("user_id", user_id)\
                         .execute()
+                    print(f"Update result: {result.data}")
                 else:
-                    supabase.table("subscriptions").insert({
+                    result = supabase.table("subscriptions").insert({
                         "user_id": user_id,
                         "status": "active",
                         "subscription_ends_at": ends_at.isoformat(),
                     }).execute()
+                    print(f"Insert result: {result.data}")
     except Exception as e:
         print(f"Webhook processing error: {str(e)}")
 
