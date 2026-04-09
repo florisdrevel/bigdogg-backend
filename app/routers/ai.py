@@ -66,28 +66,15 @@ The user has these clients:
 {clients_list}
 
 When the user describes an invoice, extract:
-1. Which client it is for (match by name, partial match is fine)
+1. Which client it is for (match by name, partial match is fine). If no client is mentioned pick the first one.
 2. Which line items (match to products where possible, create custom lines if needed)
 3. Quantities for each line item
 
-Return ONLY valid JSON in this exact format, nothing else:
-{{
-  "client_id": "uuid of matched client or null",
-  "client_name": "name of matched client",
-  "lines": [
-    {{
-      "description": "line description",
-      "quantity": 1,
-      "unit_price_ex_btw": 0.00,
-      "btw_rate": 21
-    }}
-  ],
-  "confidence": "high/medium/low",
-  "notes": "any notes or clarifications"
-}}
+You MUST return ONLY a raw JSON object. No markdown. No code blocks. No explanation. No text before or after.
+Start your response with {{ and end with }}
 
-If you cannot confidently match a client or product, use your best guess and set confidence to low.
-Always return valid JSON. Never return anything other than JSON."""
+Use this exact format:
+{{"client_id": "uuid", "client_name": "name", "lines": [{{"description": "text", "quantity": 1, "unit_price_ex_btw": 0.00, "btw_rate": 21}}], "confidence": "high", "notes": ""}}"""
 
     try:
         message = client.messages.create(
@@ -98,15 +85,24 @@ Always return valid JSON. Never return anything other than JSON."""
             ],
             system=system_prompt
         )
-        response_text = message.content[0].text
+        response_text = message.content[0].text.strip()
+        print(f"RAW RESPONSE: {repr(response_text)}")
+
+        if response_text.startswith("```"):
+            response_text = response_text.split("```")[1]
+            if response_text.startswith("json"):
+                response_text = response_text[4:]
+            response_text = response_text.strip()
+
         parsed = json.loads(response_text)
         return {
             "success": True,
             "parsed": parsed,
             "original_prompt": data.prompt
         }
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Failed to parse AI response")
+    except json.JSONDecodeError as e:
+        print(f"JSON ERROR: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Failed to parse AI response: {str(e)}")
     except Exception as e:
         print(f"AI ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
