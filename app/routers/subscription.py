@@ -1,4 +1,6 @@
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
+from typing import Optional
 from app.database import supabase
 from app.config import settings
 from datetime import datetime, timezone, timedelta
@@ -12,6 +14,10 @@ PRICE_AMOUNT = 1200
 PRICE_CURRENCY = "eur"
 
 
+class CheckoutRequest(BaseModel):
+    email: Optional[str] = None
+
+
 def get_user_id(request: Request) -> str:
     auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
     if not auth_header:
@@ -22,14 +28,6 @@ def get_user_id(request: Request) -> str:
         return user.user.id
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-
-def get_user_email(user_id: str) -> str:
-    try:
-        user = supabase.auth.admin.get_user_by_id(user_id)
-        return user.user.email
-    except Exception:
-        return ""
 
 
 @router.get("/status")
@@ -79,14 +77,14 @@ async def get_subscription_status(request: Request):
 
 
 @router.post("/checkout")
-async def create_checkout(request: Request):
+async def create_checkout(request: Request, data: CheckoutRequest = None):
     user_id = get_user_id(request)
     try:
-        email = get_user_email(user_id)
+        email = data.email if data and data.email else None
 
-        session = stripe.checkout.Session.create(
-            payment_method_types=["card", "ideal"],
-            line_items=[{
+        session_params = {
+            "payment_method_types": ["card", "ideal"],
+            "line_items": [{
                 "price_data": {
                     "currency": PRICE_CURRENCY,
                     "product_data": {
@@ -98,12 +96,16 @@ async def create_checkout(request: Request):
                 },
                 "quantity": 1,
             }],
-            mode="subscription",
-            customer_email=email,
-            success_url=f"{APP_URL}/#/dashboard?payment=success",
-            cancel_url=f"{APP_URL}/#/dashboard",
-            metadata={"user_id": user_id},
-        )
+            "mode": "subscription",
+            "success_url": f"{APP_URL}/#/dashboard?payment=success",
+            "cancel_url": f"{APP_URL}/#/dashboard",
+            "metadata": {"user_id": user_id},
+        }
+
+        if email:
+            session_params["customer_email"] = email
+
+        session = stripe.checkout.Session.create(**session_params)
 
         return {"checkout_url": session.url, "session_id": session.id}
     except Exception as e:
