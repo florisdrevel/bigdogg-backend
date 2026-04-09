@@ -11,4 +11,4 @@ anthropic
 weasyprint
 sendgrid
 python-multipart
-mollie-api-python
+stripe

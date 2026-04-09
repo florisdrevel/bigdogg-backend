@@ -12,5 +12,7 @@ class Settings:
     algorithm: str = os.getenv("ALGORITHM", "HS256")
     access_token_expire_minutes: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
-    mollie_api_key: str = os.getenv("MOLLIE_API_KEY", "")
+    stripe_secret_key: str = os.getenv("STRIPE_SECRET_KEY", "")
+    stripe_webhook_secret: str = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+
 settings = Settings()

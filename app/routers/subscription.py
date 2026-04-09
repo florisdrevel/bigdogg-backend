@@ -1,16 +1,15 @@
 from fastapi import APIRouter, HTTPException, Request
 from app.database import supabase
 from app.config import settings
-from datetime import datetime, timezone
-from mollie.api.client import Client as MollieClient
+from datetime import datetime, timezone, timedelta
+import stripe
 
 router = APIRouter()
-mollie = MollieClient()
-mollie.set_api_key(settings.mollie_api_key)
+stripe.api_key = settings.stripe_secret_key
 
-SUBSCRIPTION_PRICE = "12.00"
-SUBSCRIPTION_CURRENCY = "EUR"
 APP_URL = "https://bigdogg.nl"
+PRICE_AMOUNT = 1200
+PRICE_CURRENCY = "eur"
 
 
 def get_user_id(request: Request) -> str:
@@ -85,67 +84,69 @@ async def create_checkout(request: Request):
     try:
         email = get_user_email(user_id)
 
-        payment = mollie.payments.create({
-            "amount": {
-                "currency": SUBSCRIPTION_CURRENCY,
-                "value": SUBSCRIPTION_PRICE
-            },
-            "description": "Bigdogg — Monthly subscription",
-            "redirectUrl": f"{APP_URL}/#/dashboard?payment=success",
-            "webhookUrl": f"https://bigdogg-production.up.railway.app/api/v1/subscription/webhook",
-            "metadata": {
-                "user_id": user_id,
-                "email": email,
-            }
-        })
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card", "ideal"],
+            line_items=[{
+                "price_data": {
+                    "currency": PRICE_CURRENCY,
+                    "product_data": {
+                        "name": "Bigdogg Pro",
+                        "description": "Monthly subscription — unlimited invoices, AI, expenses and more",
+                    },
+                    "unit_amount": PRICE_AMOUNT,
+                    "recurring": {"interval": "month"},
+                },
+                "quantity": 1,
+            }],
+            mode="subscription",
+            customer_email=email,
+            success_url=f"{APP_URL}/#/dashboard?payment=success",
+            cancel_url=f"{APP_URL}/#/dashboard",
+            metadata={"user_id": user_id},
+        )
 
-        return {
-            "checkout_url": payment.checkout_url,
-            "payment_id": payment.id
-        }
+        return {"checkout_url": session.url, "session_id": session.id}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/webhook")
-async def mollie_webhook(request: Request):
+async def stripe_webhook(request: Request):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+
     try:
-        body = await request.form()
-        payment_id = body.get("id")
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, settings.stripe_webhook_secret
+        )
+    except Exception:
+        return {"status": "ok"}
 
-        if not payment_id:
-            return {"status": "ok"}
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        user_id = session.get("metadata", {}).get("user_id")
 
-        payment = mollie.payments.get(payment_id)
+        if user_id:
+            ends_at = datetime.now(timezone.utc) + timedelta(days=30)
+            existing = supabase.table("subscriptions")\
+                .select("id")\
+                .eq("user_id", user_id)\
+                .execute()
 
-        if payment.is_paid():
-            user_id = payment.metadata.get("user_id")
-            if user_id:
-                from datetime import timedelta
-                ends_at = datetime.now(timezone.utc) + timedelta(days=30)
-
-                existing = supabase.table("subscriptions")\
-                    .select("id")\
-                    .eq("user_id", user_id)\
-                    .execute()
-
-                if existing.data:
-                    supabase.table("subscriptions")\
-                        .update({
-                            "status": "active",
-                            "subscription_ends_at": ends_at.isoformat(),
-                            "updated_at": datetime.now(timezone.utc).isoformat()
-                        })\
-                        .eq("user_id", user_id)\
-                        .execute()
-                else:
-                    supabase.table("subscriptions").insert({
-                        "user_id": user_id,
+            if existing.data:
+                supabase.table("subscriptions")\
+                    .update({
                         "status": "active",
                         "subscription_ends_at": ends_at.isoformat(),
-                    }).execute()
+                        "updated_at": datetime.now(timezone.utc).isoformat()
+                    })\
+                    .eq("user_id", user_id)\
+                    .execute()
+            else:
+                supabase.table("subscriptions").insert({
+                    "user_id": user_id,
+                    "status": "active",
+                    "subscription_ends_at": ends_at.isoformat(),
+                }).execute()
 
-        return {"status": "ok"}
-    except Exception as e:
-        print(f"Webhook error: {str(e)}")
-        return {"status": "ok"}
+    return {"status": "ok"}
