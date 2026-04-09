@@ -10,3 +10,4 @@ pydantic-settings==2.13.1
 anthropic
 weasyprint
 sendgrid
+python-multipart
