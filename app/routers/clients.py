@@ -97,12 +97,13 @@ async def delete_client(client_id: str, request: Request):
 @router.get("/onboarding/{token}")
 async def get_onboarding_info(token: str):
     try:
-        response = supabase.table("clients")\
-            .select("user_id")\
-            .eq("onboarding_token", token)\
+        result = supabase.table("client_invites")\
+            .select("*")\
+            .eq("token", token)\
+            .eq("used", False)\
             .execute()
-        if response.data:
-            return {"valid": False, "message": "Token already used"}
+        if not result.data:
+            return {"valid": False, "message": "Invalid or expired invite link"}
         return {"valid": True, "token": token}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -111,25 +112,16 @@ async def get_onboarding_info(token: str):
 @router.post("/onboarding/{token}")
 async def complete_onboarding(token: str, client: ClientOnboarding):
     try:
-        # Get the user_id from the token
-        response = supabase.table("clients")\
-            .select("user_id")\
-            .eq("onboarding_token", token)\
-            .execute()
-
-        # Find which user owns this token by checking pending invites
-        # For now we store the user_id in a separate invites approach
-        # The token IS the onboarding_token on a pre-created stub record
         stub = supabase.table("client_invites")\
             .select("*")\
             .eq("token", token)\
-            .single()\
+            .eq("used", False)\
             .execute()
 
         if not stub.data:
             raise HTTPException(status_code=404, detail="Invalid or expired invite link")
 
-        user_id = stub.data['user_id']
+        user_id = stub.data[0]['user_id']
 
         result = supabase.table("clients").insert({
             "user_id": user_id,
@@ -145,7 +137,6 @@ async def complete_onboarding(token: str, client: ClientOnboarding):
             "kvk_number": client.kvk_number,
         }).execute()
 
-        # Mark invite as used
         supabase.table("client_invites")\
             .update({"used": True})\
             .eq("token", token)\
@@ -164,6 +155,9 @@ async def create_invite(request: Request):
             "user_id": user_id,
         }).execute()
         token = response.data[0]['token']
-        return {"invite_url": f"https://bigdogg-production.up.railway.app/onboard/{token}", "token": token}
+        return {
+            "invite_url": f"https://bigdogg.nl/#/onboard/{token}",
+            "token": token
+        }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
