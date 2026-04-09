@@ -132,7 +132,14 @@ async def stripe_webhook(request: Request):
     try:
         if event["type"] == "checkout.session.completed":
             session = event["data"]["object"]
-            user_id = session.get("metadata", {}).get("user_id")
+
+            if hasattr(session, 'to_dict'):
+                session = session.to_dict()
+            elif not isinstance(session, dict):
+                session = dict(session)
+
+            metadata = session.get("metadata") or {}
+            user_id = metadata.get("user_id")
             print(f"Webhook received for user_id: {user_id}")
 
             if user_id:
