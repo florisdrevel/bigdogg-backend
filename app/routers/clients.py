@@ -19,6 +19,19 @@ class ClientCreate(BaseModel):
     kvk_number: Optional[str] = None
 
 
+class ClientUpdate(BaseModel):
+    company_name: Optional[str] = None
+    contact_name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+    postcode: Optional[str] = None
+    city: Optional[str] = None
+    country: Optional[str] = None
+    btw_number: Optional[str] = None
+    kvk_number: Optional[str] = None
+
+
 class ClientOnboarding(BaseModel):
     company_name: Optional[str] = None
     contact_name: str
@@ -75,6 +88,21 @@ async def create_client(client: ClientCreate, request: Request):
             "btw_number": client.btw_number,
             "kvk_number": client.kvk_number,
         }).execute()
+        return {"client": response.data[0]}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.put("/{client_id}")
+async def update_client(client_id: str, client: ClientUpdate, request: Request):
+    user_id = get_user_id(request)
+    try:
+        update_data = {k: v for k, v in client.model_dump().items() if v is not None}
+        response = supabase.table("clients")\
+            .update(update_data)\
+            .eq("id", client_id)\
+            .eq("user_id", user_id)\
+            .execute()
         return {"client": response.data[0]}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

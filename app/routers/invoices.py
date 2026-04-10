@@ -1,11 +1,13 @@
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional, List
-from datetime import date, timedelta
 from app.database import supabase
+from app.config import settings
+from datetime import date, timedelta
+import resend
 
 router = APIRouter()
+resend.api_key = settings.resend_api_key
 
 
 class InvoiceLine(BaseModel):
@@ -35,20 +37,19 @@ def get_user_id(request: Request) -> str:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 
-def get_next_invoice_number(user_id: str) -> str:
+def generate_invoice_number(user_id: str) -> str:
     year = date.today().year
     result = supabase.table("invoices")\
         .select("invoice_number")\
         .eq("user_id", user_id)\
         .like("invoice_number", f"{year}-%")\
-        .order("created_at", desc=True)\
+        .order("invoice_number", desc=True)\
         .limit(1)\
         .execute()
-    if not result.data:
-        return f"{year}-000001"
-    last = result.data[0]['invoice_number']
-    last_num = int(last.split("-")[1])
-    return f"{year}-{str(last_num + 1).zfill(6)}"
+    if result.data:
+        last_num = int(result.data[0]["invoice_number"].split("-")[1])
+        return f"{year}-{str(last_num + 1).zfill(6)}"
+    return f"{year}-000001"
 
 
 @router.get("/")
@@ -88,15 +89,12 @@ async def get_invoice(invoice_id: str, request: Request):
 async def create_invoice(invoice: InvoiceCreate, request: Request):
     user_id = get_user_id(request)
     try:
-        invoice_number = get_next_invoice_number(user_id)
-        invoice_date = invoice.invoice_date or str(date.today())
-        due_date = invoice.due_date or str(date.today() + timedelta(days=30))
+        invoice_number = generate_invoice_number(user_id)
+        invoice_date = invoice.invoice_date or date.today().isoformat()
+        due_date = invoice.due_date or (date.today() + timedelta(days=30)).isoformat()
 
         subtotal = sum(l.quantity * l.unit_price_ex_btw for l in invoice.lines)
-        btw_amount = sum(
-            l.quantity * l.unit_price_ex_btw * l.btw_rate / 100
-            for l in invoice.lines
-        )
+        btw_amount = sum(l.quantity * l.unit_price_ex_btw * l.btw_rate / 100 for l in invoice.lines)
         total = subtotal + btw_amount
 
         invoice_response = supabase.table("invoices").insert({
@@ -111,9 +109,7 @@ async def create_invoice(invoice: InvoiceCreate, request: Request):
             "total_incl_btw": round(total, 2),
             "notes": invoice.notes,
         }).execute()
-
         invoice_id = invoice_response.data[0]['id']
-
         lines_data = [{
             "invoice_id": invoice_id,
             "description": l.description,
@@ -122,9 +118,7 @@ async def create_invoice(invoice: InvoiceCreate, request: Request):
             "btw_rate": l.btw_rate,
             "line_total_ex_btw": round(l.quantity * l.unit_price_ex_btw, 2),
         } for l in invoice.lines]
-
         supabase.table("invoice_lines").insert(lines_data).execute()
-
         return {"invoice": invoice_response.data[0], "invoice_number": invoice_number}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -133,17 +127,11 @@ async def create_invoice(invoice: InvoiceCreate, request: Request):
 @router.patch("/{invoice_id}/status")
 async def update_status(invoice_id: str, request: Request):
     user_id = get_user_id(request)
-    body = await request.json()
-    status = body.get("status")
-    if status not in ["draft", "sent", "paid", "overdue"]:
-        raise HTTPException(status_code=400, detail="Invalid status")
     try:
-        update_data = {"status": status}
-        if status == "paid":
-            from datetime import datetime
-            update_data["paid_at"] = datetime.utcnow().isoformat()
+        body = await request.json()
+        status = body.get("status")
         supabase.table("invoices")\
-            .update(update_data)\
+            .update({"status": status})\
             .eq("id", invoice_id)\
             .eq("user_id", user_id)\
             .execute()
@@ -156,31 +144,90 @@ async def update_status(invoice_id: str, request: Request):
 async def send_reminder(invoice_id: str, request: Request):
     user_id = get_user_id(request)
     try:
-        invoice = supabase.table("invoices")\
+        invoice_result = supabase.table("invoices")\
             .select("*, clients(*)")\
             .eq("id", invoice_id)\
             .eq("user_id", user_id)\
             .single()\
             .execute()
 
-        if not invoice.data:
+        if not invoice_result.data:
             raise HTTPException(status_code=404, detail="Invoice not found")
+
+        profile_result = supabase.table("user_profiles")\
+            .select("*")\
+            .eq("id", user_id)\
+            .execute()
+
+        invoice = invoice_result.data
+        client = invoice["clients"]
+        profile = profile_result.data[0] if profile_result.data else {}
+
+        sender_name = profile.get('business_name') or profile.get('full_name') or 'BigDogg'
+        client_name = client.get('contact_name', '')
+        client_email = client.get('email', '')
+        invoice_number = invoice['invoice_number']
+        total = invoice['total_incl_btw']
+        due_date = invoice['due_date']
+        iban = profile.get('iban', '')
+        reminder_count = (invoice.get("reminder_count") or 0) + 1
+
+        if reminder_count == 1:
+            subject = f"Herinnering: Factuur {invoice_number} — {sender_name}"
+            intro = "Wij willen u vriendelijk herinneren aan de onderstaande openstaande factuur."
+        else:
+            subject = f"2e Herinnering: Factuur {invoice_number} — {sender_name}"
+            intro = f"Dit is onze {reminder_count}e herinnering voor de onderstaande openstaande factuur. Wij verzoeken u dringend het bedrag zo spoedig mogelijk te voldoen."
+
+        body = f"""Beste {client_name},
+
+{intro}
+
+Factuurnummer: {invoice_number}
+Bedrag: € {total}
+Vervaldatum: {due_date}
+
+Wij verzoeken u het bedrag over te maken naar:
+IBAN: {iban}
+Ten name van: {sender_name}
+Onder vermelding van: {invoice_number}
+
+Heeft u al betaald? Dan kunt u deze herinnering als niet verzonden beschouwen.
+Heeft u vragen? Neem dan contact met ons op.
+
+Met vriendelijke groet,
+
+{sender_name}
+
+---
+Dit bericht is verzonden via BigDogg · bigdogg.nl
+"""
+
+        if client_email and settings.resend_api_key:
+            resend.Emails.send({
+                "from": f"{sender_name} <info@bigdogg.nl>",
+                "to": [client_email],
+                "subject": subject,
+                "text": body,
+            })
 
         supabase.table("invoices")\
             .update({
-                "reminder_count": (invoice.data.get("reminder_count") or 0) + 1,
-                "last_reminder_at": date.today().isoformat()
+                "reminder_count": reminder_count,
             })\
             .eq("id", invoice_id)\
             .execute()
 
         return {
             "message": "Reminder sent",
-            "client_email": invoice.data["clients"]["email"],
-            "invoice_number": invoice.data["invoice_number"]
+            "client_email": client_email,
+            "invoice_number": invoice_number,
+            "reminder_count": reminder_count,
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.delete("/{invoice_id}")
 async def delete_invoice(invoice_id: str, request: Request):
     user_id = get_user_id(request)
