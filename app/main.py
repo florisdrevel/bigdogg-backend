@@ -1,8 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from app.routers import auth, products, clients, invoices, ai, expenses, overview, profile, subscription, pdf
+from app.routers import auth, products, clients, invoices, ai, expenses, overview, profile, subscription, pdf, email
 import os
 
 app = FastAPI(
@@ -30,6 +29,7 @@ app.include_router(overview.router, prefix="/api/v1/overview", tags=["overview"]
 app.include_router(profile.router, prefix="/api/v1/profile", tags=["profile"])
 app.include_router(subscription.router, prefix="/api/v1/subscription", tags=["subscription"])
 app.include_router(pdf.router, prefix="/api/v1/pdf", tags=["pdf"])
+app.include_router(email.router, prefix="/api/v1/email", tags=["email"])
 
 @app.get("/health")
 async def health():

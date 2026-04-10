@@ -14,5 +14,7 @@ class Settings:
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
     stripe_secret_key: str = os.getenv("STRIPE_SECRET_KEY", "")
     stripe_webhook_secret: str = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+    gmail_user: str = os.getenv("GMAIL_USER", "")
+    gmail_app_password: str = os.getenv("GMAIL_APP_PASSWORD", "")
 
 settings = Settings()
