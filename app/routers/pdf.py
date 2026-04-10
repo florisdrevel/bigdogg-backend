@@ -95,8 +95,8 @@ def _generate_pdf(invoice, lines, profile, client):
 
     page_width = A4[0] - 40*mm
 
-    # Header — show business_name if set, otherwise full_name
-    display_name = profile.get('business_name') or profile.get('full_name') or 'BigDogg'
+    # Header — only show business_name, blank if not set
+    display_name = profile.get('business_name') or ''
 
     header_data = [[
         Paragraph(display_name, title_style),
@@ -111,10 +111,8 @@ def _generate_pdf(invoice, lines, profile, client):
     story.append(Spacer(1, 2*mm))
     story.append(HRFlowable(width="100%", thickness=3, color=GOLD, spaceAfter=6*mm))
 
-    # Sender details — only show full_name if different from business_name
+    # Sender details — no full_name in header, only address/KVK/BTW/IBAN
     sender_lines = []
-    if profile.get('full_name') and profile.get('full_name') != profile.get('business_name'):
-        sender_lines.append(Paragraph(profile['full_name'], value_style))
     if profile.get('address'):
         sender_lines.append(Paragraph(profile['address'], value_style))
     if profile.get('postcode') or profile.get('city'):
