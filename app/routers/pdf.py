@@ -6,7 +6,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
-from reportlab.lib.enums import TA_RIGHT, TA_LEFT, TA_CENTER
+from reportlab.lib.enums import TA_CENTER
 import io
 
 router = APIRouter()
@@ -20,14 +20,13 @@ TEXT_SECONDARY = colors.HexColor('#4A6572')
 
 @router.get("/{invoice_id}")
 async def generate_invoice_pdf(invoice_id: str, request: Request, token: str = Query(None)):
-    # Get token from header or query param
     auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
     if auth_header:
         token = auth_header.replace("Bearer ", "")
-    
+
     if not token:
         raise HTTPException(status_code=401, detail="Authorization required")
-    
+
     try:
         user = supabase.auth.get_user(token)
         user_id = user.user.id
@@ -96,10 +95,12 @@ def _generate_pdf(invoice, lines, profile, client):
 
     page_width = A4[0] - 40*mm
 
+    # Header — show business_name if set, otherwise full_name
+    display_name = profile.get('business_name') or profile.get('full_name') or 'BigDogg'
+
     header_data = [[
-    Paragraph(profile.get('business_name') or profile.get('full_name') or 'BigDogg', title_style),
-    Paragraph(invoice['invoice_number'], title_style),
-]]
+        Paragraph(display_name, title_style),
+        Paragraph(invoice['invoice_number'], title_style),
     ]]
     header_table = Table(header_data, colWidths=[page_width * 0.6, page_width * 0.4])
     header_table.setStyle(TableStyle([
@@ -110,16 +111,15 @@ def _generate_pdf(invoice, lines, profile, client):
     story.append(Spacer(1, 2*mm))
     story.append(HRFlowable(width="100%", thickness=3, color=GOLD, spaceAfter=6*mm))
 
+    # Sender details — only show full_name if different from business_name
     sender_lines = []
-    sender_lines = []
-    if profile.get('business_name') and profile.get('full_name'):
-    sender_lines.append(Paragraph(profile['full_name'], value_style))
-    elif not profile.get('business_name') and profile.get('full_name'):
-    pass  # already shown in header
+    if profile.get('full_name') and profile.get('full_name') != profile.get('business_name'):
+        sender_lines.append(Paragraph(profile['full_name'], value_style))
     if profile.get('address'):
         sender_lines.append(Paragraph(profile['address'], value_style))
     if profile.get('postcode') or profile.get('city'):
-        sender_lines.append(Paragraph(f"{profile.get('postcode', '')} {profile.get('city', '')}".strip(), value_style))
+        sender_lines.append(Paragraph(
+            f"{profile.get('postcode', '')} {profile.get('city', '')}".strip(), value_style))
     if profile.get('kvk_number'):
         sender_lines.append(Paragraph(f"KVK: {profile['kvk_number']}", subtitle_style))
     if profile.get('btw_number'):
@@ -135,7 +135,8 @@ def _generate_pdf(invoice, lines, profile, client):
     if client.get('address'):
         client_lines.append(Paragraph(client['address'], value_style))
     if client.get('postcode') or client.get('city'):
-        client_lines.append(Paragraph(f"{client.get('postcode', '')} {client.get('city', '')}".strip(), value_style))
+        client_lines.append(Paragraph(
+            f"{client.get('postcode', '')} {client.get('city', '')}".strip(), value_style))
     if client.get('email'):
         client_lines.append(Paragraph(client['email'], subtitle_style))
 
