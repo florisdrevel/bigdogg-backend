@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from app.routers import auth, products, clients, invoices, ai, expenses, overview, profile, subscription
+from app.routers import auth, products, clients, invoices, ai, expenses, overview, profile, subscription, pdf
 import os
 
 app = FastAPI(
@@ -29,6 +29,7 @@ app.include_router(expenses.router, prefix="/api/v1/expenses", tags=["expenses"]
 app.include_router(overview.router, prefix="/api/v1/overview", tags=["overview"])
 app.include_router(profile.router, prefix="/api/v1/profile", tags=["profile"])
 app.include_router(subscription.router, prefix="/api/v1/subscription", tags=["subscription"])
+app.include_router(pdf.router, prefix="/api/v1/pdf", tags=["pdf"])
 
 @app.get("/health")
 async def health():
@@ -38,7 +39,6 @@ async def health():
 async def debug_headers(request: Request):
     return {"headers": dict(request.headers)}
 
-# Serve Flutter web app
 static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
 if os.path.exists(static_dir):
     app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")

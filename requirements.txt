@@ -8,7 +8,7 @@ passlib[bcrypt]==1.7.4
 httpx==0.28.1
 pydantic-settings==2.13.1
 anthropic
-weasyprint
 sendgrid
 python-multipart
 stripe
+reportlab
