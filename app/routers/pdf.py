@@ -97,8 +97,9 @@ def _generate_pdf(invoice, lines, profile, client):
     page_width = A4[0] - 40*mm
 
     header_data = [[
-        Paragraph(profile.get('business_name') or 'BigDogg', title_style),
-        Paragraph(invoice['invoice_number'], title_style),
+    Paragraph(profile.get('business_name') or profile.get('full_name') or 'BigDogg', title_style),
+    Paragraph(invoice['invoice_number'], title_style),
+]]
     ]]
     header_table = Table(header_data, colWidths=[page_width * 0.6, page_width * 0.4])
     header_table.setStyle(TableStyle([
@@ -110,8 +111,11 @@ def _generate_pdf(invoice, lines, profile, client):
     story.append(HRFlowable(width="100%", thickness=3, color=GOLD, spaceAfter=6*mm))
 
     sender_lines = []
-    if profile.get('full_name'):
-        sender_lines.append(Paragraph(profile['full_name'], value_style))
+    sender_lines = []
+    if profile.get('business_name') and profile.get('full_name'):
+    sender_lines.append(Paragraph(profile['full_name'], value_style))
+    elif not profile.get('business_name') and profile.get('full_name'):
+    pass  # already shown in header
     if profile.get('address'):
         sender_lines.append(Paragraph(profile['address'], value_style))
     if profile.get('postcode') or profile.get('city'):
