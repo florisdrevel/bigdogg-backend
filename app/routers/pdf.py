@@ -91,7 +91,7 @@ def _generate_pdf(invoice, lines, profile, client):
     label_style = ParagraphStyle('Label', fontName='Helvetica-Bold', fontSize=8, textColor=TEXT_SECONDARY, spaceAfter=1*mm, leading=12)
     value_style = ParagraphStyle('Value', fontName='Helvetica', fontSize=10, textColor=TEAL, spaceAfter=1*mm, leading=14)
     value_bold_style = ParagraphStyle('ValueBold', fontName='Helvetica-Bold', fontSize=10, textColor=TEAL, spaceAfter=1*mm, leading=14)
-    number_style = ParagraphStyle('Number', fontName='Helvetica-Bold', fontSize=28, textColor=TEAL, spaceAfter=2*mm)
+    number_style = ParagraphStyle('Number', fontName='Helvetica-Bold', fontSize=20, textColor=TEAL, spaceAfter=2*mm)
 
     page_width = A4[0] - 40*mm
 
@@ -119,7 +119,7 @@ def _generate_pdf(invoice, lines, profile, client):
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
     ]))
     story.append(header_table)
-    story.append(Spacer(1, 2*mm))
+    story.append(Spacer(1, 5*mm))
     story.append(HRFlowable(width="100%", thickness=3, color=GOLD, spaceAfter=6*mm))
 
     # Sender details — full name, address, KVK, BTW, IBAN
