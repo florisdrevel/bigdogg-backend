@@ -1,6 +1,9 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from app.routers import auth, products, clients, invoices, ai, expenses, overview, profile, subscription
+import os
 
 app = FastAPI(
     title="Bigdogg API",
@@ -27,10 +30,6 @@ app.include_router(overview.router, prefix="/api/v1/overview", tags=["overview"]
 app.include_router(profile.router, prefix="/api/v1/profile", tags=["profile"])
 app.include_router(subscription.router, prefix="/api/v1/subscription", tags=["subscription"])
 
-@app.get("/")
-async def root():
-    return {"message": "Bigdogg API is running", "version": "1.0.0"}
-
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
@@ -38,3 +37,12 @@ async def health():
 @app.get("/debug-headers")
 async def debug_headers(request: Request):
     return {"headers": dict(request.headers)}
+
+# Serve Flutter web app
+static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
+if os.path.exists(static_dir):
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+else:
+    @app.get("/")
+    async def root():
+        return {"message": "Bigdogg API is running", "version": "1.0.0"}
