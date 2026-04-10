@@ -90,7 +90,7 @@ Dit bericht is verzonden via BigDogg · bigdogg.nl
 """
 
         params = {
-            "from": f"{sender_name} <onboarding@resend.dev>",
+            "from": f"{sender_name} <info@bigdogg.nl>",
             "to": [client_email],
             "subject": subject,
             "text": body,
