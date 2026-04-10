@@ -12,3 +12,4 @@ sendgrid
 python-multipart
 stripe
 reportlab
+resend

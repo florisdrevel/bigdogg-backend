@@ -2,13 +2,11 @@ from fastapi import APIRouter, HTTPException, Request
 from app.database import supabase
 from app.config import settings
 from app.routers.pdf import _generate_pdf
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
+import resend
+import base64
 
 router = APIRouter()
+resend.api_key = settings.resend_api_key
 
 
 def get_user_id(request: Request) -> str:
@@ -58,6 +56,7 @@ async def send_invoice_email(invoice_id: str, request: Request):
             raise HTTPException(status_code=400, detail="Client has no email address")
 
         pdf_bytes = _generate_pdf(invoice, lines, profile, client)
+        pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
 
         sender_name = profile.get('business_name') or profile.get('full_name') or 'BigDogg'
         invoice_number = invoice['invoice_number']
@@ -90,21 +89,20 @@ Met vriendelijke groet,
 Dit bericht is verzonden via BigDogg · bigdogg.nl
 """
 
-        msg = MIMEMultipart()
-        msg['From'] = f"{sender_name} <{settings.gmail_user}>"
-        msg['To'] = client_email
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'plain'))
+        params = {
+            "from": f"{sender_name} <onboarding@resend.dev>",
+            "to": [client_email],
+            "subject": subject,
+            "text": body,
+            "attachments": [
+                {
+                    "filename": f"{invoice_number}.pdf",
+                    "content": pdf_base64,
+                }
+            ],
+        }
 
-        attachment = MIMEBase('application', 'octet-stream')
-        attachment.set_payload(pdf_bytes)
-        encoders.encode_base64(attachment)
-        attachment.add_header('Content-Disposition', f'attachment; filename="{invoice_number}.pdf"')
-        msg.attach(attachment)
-
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-            server.login(settings.gmail_user, settings.gmail_app_password)
-            server.sendmail(settings.gmail_user, client_email, msg.as_string())
+        resend.Emails.send(params)
 
         supabase.table("invoices")\
             .update({"status": "sent"})\
@@ -116,4 +114,5 @@ Dit bericht is verzonden via BigDogg · bigdogg.nl
     except HTTPException:
         raise
     except Exception as e:
+        print(f"Email error: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))

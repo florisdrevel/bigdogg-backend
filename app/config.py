@@ -16,5 +16,6 @@ class Settings:
     stripe_webhook_secret: str = os.getenv("STRIPE_WEBHOOK_SECRET", "")
     gmail_user: str = os.getenv("GMAIL_USER", "")
     gmail_app_password: str = os.getenv("GMAIL_APP_PASSWORD", "")
+    resend_api_key: str = os.getenv("RESEND_API_KEY", "")
 
 settings = Settings()
