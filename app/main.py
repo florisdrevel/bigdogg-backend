@@ -5,7 +5,7 @@ from app.routers import auth, products, clients, invoices, ai, expenses, overvie
 import os
 
 app = FastAPI(
-    title="Bigdogg API",
+    title="Bigdogg. API",
     description="Backend API for Bigdogg - Smart invoicing for Dutch freelancers",
     version="1.0.0",
     redirect_slashes=False
