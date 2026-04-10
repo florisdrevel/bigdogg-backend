@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Query
 from fastapi.responses import Response
 from app.database import supabase
 from reportlab.lib.pagesizes import A4
@@ -11,7 +11,6 @@ import io
 
 router = APIRouter()
 
-# BigDogg brand colors
 TEAL = colors.HexColor('#1B3A4B')
 GOLD = colors.HexColor('#C9A96E')
 LIGHT_GREY = colors.HexColor('#F5F3EF')
@@ -19,21 +18,21 @@ MID_GREY = colors.HexColor('#E2DDD6')
 TEXT_SECONDARY = colors.HexColor('#4A6572')
 
 
-def get_user_id(request: Request) -> str:
+@router.get("/{invoice_id}")
+async def generate_invoice_pdf(invoice_id: str, request: Request, token: str = Query(None)):
+    # Get token from header or query param
     auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
-    if not auth_header:
-        raise HTTPException(status_code=401, detail="Authorization header missing")
-    try:
+    if auth_header:
         token = auth_header.replace("Bearer ", "")
+    
+    if not token:
+        raise HTTPException(status_code=401, detail="Authorization required")
+    
+    try:
         user = supabase.auth.get_user(token)
-        return user.user.id
+        user_id = user.user.id
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-
-@router.get("/{invoice_id}")
-async def generate_invoice_pdf(invoice_id: str, request: Request):
-    user_id = get_user_id(request)
 
     try:
         invoice_result = supabase.table("invoices")\
@@ -88,71 +87,19 @@ def _generate_pdf(invoice, lines, profile, client):
     )
 
     story = []
-    styles = getSampleStyleSheet()
 
-    # Custom styles
-    title_style = ParagraphStyle(
-        'Title',
-        fontName='Helvetica-Bold',
-        fontSize=28,
-        textColor=TEAL,
-        spaceAfter=2*mm,
-    )
-    subtitle_style = ParagraphStyle(
-        'Subtitle',
-        fontName='Helvetica',
-        fontSize=10,
-        textColor=TEXT_SECONDARY,
-        spaceAfter=1*mm,
-    )
-    label_style = ParagraphStyle(
-        'Label',
-        fontName='Helvetica-Bold',
-        fontSize=8,
-        textColor=TEXT_SECONDARY,
-        spaceAfter=1*mm,
-        leading=12,
-    )
-    value_style = ParagraphStyle(
-        'Value',
-        fontName='Helvetica',
-        fontSize=10,
-        textColor=TEAL,
-        spaceAfter=1*mm,
-        leading=14,
-    )
-    value_bold_style = ParagraphStyle(
-        'ValueBold',
-        fontName='Helvetica-Bold',
-        fontSize=10,
-        textColor=TEAL,
-        spaceAfter=1*mm,
-        leading=14,
-    )
-    right_style = ParagraphStyle(
-        'Right',
-        fontName='Helvetica',
-        fontSize=10,
-        textColor=TEAL,
-        alignment=TA_RIGHT,
-    )
-    right_bold_style = ParagraphStyle(
-        'RightBold',
-        fontName='Helvetica-Bold',
-        fontSize=10,
-        textColor=TEAL,
-        alignment=TA_RIGHT,
-    )
+    title_style = ParagraphStyle('Title', fontName='Helvetica-Bold', fontSize=28, textColor=TEAL, spaceAfter=2*mm)
+    subtitle_style = ParagraphStyle('Subtitle', fontName='Helvetica', fontSize=10, textColor=TEXT_SECONDARY, spaceAfter=1*mm)
+    label_style = ParagraphStyle('Label', fontName='Helvetica-Bold', fontSize=8, textColor=TEXT_SECONDARY, spaceAfter=1*mm, leading=12)
+    value_style = ParagraphStyle('Value', fontName='Helvetica', fontSize=10, textColor=TEAL, spaceAfter=1*mm, leading=14)
+    value_bold_style = ParagraphStyle('ValueBold', fontName='Helvetica-Bold', fontSize=10, textColor=TEAL, spaceAfter=1*mm, leading=14)
 
     page_width = A4[0] - 40*mm
 
-    # ── Header: Logo text + Invoice number ──────────────────────
-    header_data = [
-        [
-            Paragraph(profile.get('business_name') or 'BigDogg', title_style),
-            Paragraph(invoice['invoice_number'], title_style),
-        ]
-    ]
+    header_data = [[
+        Paragraph(profile.get('business_name') or 'BigDogg', title_style),
+        Paragraph(invoice['invoice_number'], title_style),
+    ]]
     header_table = Table(header_data, colWidths=[page_width * 0.6, page_width * 0.4])
     header_table.setStyle(TableStyle([
         ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
@@ -160,19 +107,15 @@ def _generate_pdf(invoice, lines, profile, client):
     ]))
     story.append(header_table)
     story.append(Spacer(1, 2*mm))
-
-    # Gold line
     story.append(HRFlowable(width="100%", thickness=3, color=GOLD, spaceAfter=6*mm))
 
-    # ── Sender + Client + Dates ──────────────────────────────────
     sender_lines = []
     if profile.get('full_name'):
         sender_lines.append(Paragraph(profile['full_name'], value_style))
     if profile.get('address'):
         sender_lines.append(Paragraph(profile['address'], value_style))
     if profile.get('postcode') or profile.get('city'):
-        sender_lines.append(Paragraph(
-            f"{profile.get('postcode', '')} {profile.get('city', '')}".strip(), value_style))
+        sender_lines.append(Paragraph(f"{profile.get('postcode', '')} {profile.get('city', '')}".strip(), value_style))
     if profile.get('kvk_number'):
         sender_lines.append(Paragraph(f"KVK: {profile['kvk_number']}", subtitle_style))
     if profile.get('btw_number'):
@@ -188,8 +131,7 @@ def _generate_pdf(invoice, lines, profile, client):
     if client.get('address'):
         client_lines.append(Paragraph(client['address'], value_style))
     if client.get('postcode') or client.get('city'):
-        client_lines.append(Paragraph(
-            f"{client.get('postcode', '')} {client.get('city', '')}".strip(), value_style))
+        client_lines.append(Paragraph(f"{client.get('postcode', '')} {client.get('city', '')}".strip(), value_style))
     if client.get('email'):
         client_lines.append(Paragraph(client['email'], subtitle_style))
 
@@ -204,13 +146,11 @@ def _generate_pdf(invoice, lines, profile, client):
         Paragraph(invoice.get('status', '').upper(), value_bold_style),
     ]
 
-    info_data = [
-        [
-            [Paragraph('VAN', label_style)] + sender_lines,
-            [Paragraph('AAN', label_style)] + client_lines,
-            date_lines,
-        ]
-    ]
+    info_data = [[
+        [Paragraph('VAN', label_style)] + sender_lines,
+        [Paragraph('AAN', label_style)] + client_lines,
+        date_lines,
+    ]]
     info_table = Table(info_data, colWidths=[page_width * 0.35, page_width * 0.35, page_width * 0.30])
     info_table.setStyle(TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -219,10 +159,8 @@ def _generate_pdf(invoice, lines, profile, client):
     story.append(info_table)
     story.append(Spacer(1, 8*mm))
 
-    # ── Invoice lines table ──────────────────────────────────────
     line_header = ['OMSCHRIJVING', 'AANTAL', 'PRIJS EX BTW', 'BTW', 'TOTAAL EX BTW']
     table_data = [line_header]
-
     for line in lines:
         table_data.append([
             line['description'],
@@ -232,17 +170,9 @@ def _generate_pdf(invoice, lines, profile, client):
             f"€ {float(line['line_total_ex_btw']):.2f}",
         ])
 
-    col_widths = [
-        page_width * 0.40,
-        page_width * 0.10,
-        page_width * 0.18,
-        page_width * 0.10,
-        page_width * 0.22,
-    ]
-
+    col_widths = [page_width*0.40, page_width*0.10, page_width*0.18, page_width*0.10, page_width*0.22]
     lines_table = Table(table_data, colWidths=col_widths)
     lines_table.setStyle(TableStyle([
-        # Header row
         ('BACKGROUND', (0, 0), (-1, 0), TEAL),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
@@ -250,25 +180,20 @@ def _generate_pdf(invoice, lines, profile, client):
         ('TOPPADDING', (0, 0), (-1, 0), 8),
         ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
         ('LEFTPADDING', (0, 0), (-1, 0), 6),
-        # Data rows
         ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
         ('FONTSIZE', (0, 1), (-1, -1), 9),
         ('TOPPADDING', (0, 1), (-1, -1), 7),
         ('BOTTOMPADDING', (0, 1), (-1, -1), 7),
         ('LEFTPADDING', (0, 1), (-1, -1), 6),
         ('TEXTCOLOR', (0, 1), (-1, -1), TEAL),
-        # Alternating rows
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, LIGHT_GREY]),
-        # Alignment
         ('ALIGN', (1, 0), (-1, -1), 'RIGHT'),
         ('ALIGN', (0, 0), (0, -1), 'LEFT'),
-        # Bottom border
         ('LINEBELOW', (0, -1), (-1, -1), 1, MID_GREY),
     ]))
     story.append(lines_table)
     story.append(Spacer(1, 6*mm))
 
-    # ── Totals ───────────────────────────────────────────────────
     subtotal = float(invoice.get('subtotal_ex_btw', 0))
     btw_amount = float(invoice.get('btw_amount', 0))
     total = float(invoice.get('total_incl_btw', 0))
@@ -278,11 +203,7 @@ def _generate_pdf(invoice, lines, profile, client):
         ['', 'BTW', f"€ {btw_amount:.2f}"],
         ['', 'TOTAAL INCL BTW', f"€ {total:.2f}"],
     ]
-
-    totals_table = Table(
-        totals_data,
-        colWidths=[page_width * 0.60, page_width * 0.22, page_width * 0.18]
-    )
+    totals_table = Table(totals_data, colWidths=[page_width*0.60, page_width*0.22, page_width*0.18])
     totals_table.setStyle(TableStyle([
         ('FONTNAME', (0, 0), (-1, 1), 'Helvetica'),
         ('FONTNAME', (0, 2), (-1, 2), 'Helvetica-Bold'),
@@ -298,7 +219,6 @@ def _generate_pdf(invoice, lines, profile, client):
     story.append(totals_table)
     story.append(Spacer(1, 10*mm))
 
-    # ── Footer ───────────────────────────────────────────────────
     story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
 
     footer_text = "Bedankt voor uw opdracht."
@@ -307,11 +227,7 @@ def _generate_pdf(invoice, lines, profile, client):
     footer_text += " Bij vragen kunt u contact opnemen via e-mail."
 
     story.append(Paragraph(footer_text, ParagraphStyle(
-        'Footer',
-        fontName='Helvetica',
-        fontSize=9,
-        textColor=TEXT_SECONDARY,
-        alignment=TA_CENTER,
+        'Footer', fontName='Helvetica', fontSize=9, textColor=TEXT_SECONDARY, alignment=TA_CENTER,
     )))
 
     doc.build(story)
