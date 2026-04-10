@@ -87,32 +87,45 @@ def _generate_pdf(invoice, lines, profile, client):
 
     story = []
 
-    title_style = ParagraphStyle('Title', fontName='Helvetica-Bold', fontSize=28, textColor=TEAL, spaceAfter=2*mm)
     subtitle_style = ParagraphStyle('Subtitle', fontName='Helvetica', fontSize=10, textColor=TEXT_SECONDARY, spaceAfter=1*mm)
     label_style = ParagraphStyle('Label', fontName='Helvetica-Bold', fontSize=8, textColor=TEXT_SECONDARY, spaceAfter=1*mm, leading=12)
     value_style = ParagraphStyle('Value', fontName='Helvetica', fontSize=10, textColor=TEAL, spaceAfter=1*mm, leading=14)
     value_bold_style = ParagraphStyle('ValueBold', fontName='Helvetica-Bold', fontSize=10, textColor=TEAL, spaceAfter=1*mm, leading=14)
+    number_style = ParagraphStyle('Number', fontName='Helvetica-Bold', fontSize=28, textColor=TEAL, spaceAfter=2*mm)
 
     page_width = A4[0] - 40*mm
 
-    # Header — only show business_name, blank if not set
+    # Business name — scale font size to fit
     display_name = profile.get('business_name') or ''
+    if len(display_name) <= 15:
+        name_font_size = 28
+    elif len(display_name) <= 22:
+        name_font_size = 22
+    elif len(display_name) <= 30:
+        name_font_size = 18
+    else:
+        name_font_size = 14
 
+    name_style = ParagraphStyle('Name', fontName='Helvetica-Bold', fontSize=name_font_size, textColor=TEAL, spaceAfter=2*mm)
+
+    # Header — business name left, invoice number right
     header_data = [[
-        Paragraph(display_name, title_style),
-        Paragraph(invoice['invoice_number'], title_style),
+        Paragraph(display_name, name_style),
+        Paragraph(invoice['invoice_number'], number_style),
     ]]
     header_table = Table(header_data, colWidths=[page_width * 0.6, page_width * 0.4])
     header_table.setStyle(TableStyle([
         ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
     ]))
     story.append(header_table)
     story.append(Spacer(1, 2*mm))
     story.append(HRFlowable(width="100%", thickness=3, color=GOLD, spaceAfter=6*mm))
 
-    # Sender details — no full_name in header, only address/KVK/BTW/IBAN
+    # Sender details — full name, address, KVK, BTW, IBAN
     sender_lines = []
+    if profile.get('full_name'):
+        sender_lines.append(Paragraph(profile['full_name'], value_bold_style))
     if profile.get('address'):
         sender_lines.append(Paragraph(profile['address'], value_style))
     if profile.get('postcode') or profile.get('city'):
@@ -162,6 +175,7 @@ def _generate_pdf(invoice, lines, profile, client):
     story.append(info_table)
     story.append(Spacer(1, 8*mm))
 
+    # Invoice lines
     line_header = ['OMSCHRIJVING', 'AANTAL', 'PRIJS EX BTW', 'BTW', 'TOTAAL EX BTW']
     table_data = [line_header]
     for line in lines:
@@ -197,6 +211,7 @@ def _generate_pdf(invoice, lines, profile, client):
     story.append(lines_table)
     story.append(Spacer(1, 6*mm))
 
+    # Totals
     subtotal = float(invoice.get('subtotal_ex_btw', 0))
     btw_amount = float(invoice.get('btw_amount', 0))
     total = float(invoice.get('total_incl_btw', 0))
