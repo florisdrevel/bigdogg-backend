@@ -129,9 +129,11 @@ async def stripe_webhook(request: Request):
         return {"status": "ok"}
 
     try:
-        if event["type"] == "checkout.session.completed":
-            session = event["data"]["object"]
+        event_type = event["type"]
+        print(f"Webhook event: {event_type}")
 
+        if event_type == "checkout.session.completed":
+            session = event["data"]["object"]
             if hasattr(session, 'to_dict'):
                 session = session.to_dict()
             elif not isinstance(session, dict):
@@ -139,7 +141,7 @@ async def stripe_webhook(request: Request):
 
             metadata = session.get("metadata") or {}
             user_id = metadata.get("user_id")
-            print(f"Webhook received for user_id: {user_id}")
+            print(f"Checkout completed for user_id: {user_id}")
 
             if user_id:
                 ends_at = datetime.now(timezone.utc) + timedelta(days=30)
@@ -148,24 +150,74 @@ async def stripe_webhook(request: Request):
                     .eq("user_id", user_id)\
                     .execute()
 
-                print(f"Existing subscription: {existing.data}")
-
                 if existing.data:
-                    result = supabase.table("subscriptions")\
+                    supabase.table("subscriptions")\
                         .update({
                             "status": "active",
+                            "stripe_customer_id": session.get("customer"),
+                            "stripe_subscription_id": session.get("subscription"),
                             "subscription_ends_at": ends_at.isoformat(),
                         })\
                         .eq("user_id", user_id)\
                         .execute()
-                    print(f"Update result: {result.data}")
                 else:
-                    result = supabase.table("subscriptions").insert({
+                    supabase.table("subscriptions").insert({
                         "user_id": user_id,
                         "status": "active",
+                        "stripe_customer_id": session.get("customer"),
+                        "stripe_subscription_id": session.get("subscription"),
                         "subscription_ends_at": ends_at.isoformat(),
                     }).execute()
-                    print(f"Insert result: {result.data}")
+
+        elif event_type == "invoice.payment_succeeded":
+            invoice = event["data"]["object"]
+            if hasattr(invoice, 'to_dict'):
+                invoice = invoice.to_dict()
+            elif not isinstance(invoice, dict):
+                invoice = dict(invoice)
+
+            customer_id = invoice.get("customer")
+            if customer_id:
+                ends_at = datetime.now(timezone.utc) + timedelta(days=30)
+                supabase.table("subscriptions")\
+                    .update({
+                        "status": "active",
+                        "subscription_ends_at": ends_at.isoformat(),
+                    })\
+                    .eq("stripe_customer_id", customer_id)\
+                    .execute()
+                print(f"Subscription renewed for customer: {customer_id}")
+
+        elif event_type in ("customer.subscription.deleted", "customer.subscription.paused"):
+            subscription = event["data"]["object"]
+            if hasattr(subscription, 'to_dict'):
+                subscription = subscription.to_dict()
+            elif not isinstance(subscription, dict):
+                subscription = dict(subscription)
+
+            customer_id = subscription.get("customer")
+            if customer_id:
+                supabase.table("subscriptions")\
+                    .update({"status": "expired"})\
+                    .eq("stripe_customer_id", customer_id)\
+                    .execute()
+                print(f"Subscription cancelled for customer: {customer_id}")
+
+        elif event_type == "invoice.payment_failed":
+            invoice = event["data"]["object"]
+            if hasattr(invoice, 'to_dict'):
+                invoice = invoice.to_dict()
+            elif not isinstance(invoice, dict):
+                invoice = dict(invoice)
+
+            customer_id = invoice.get("customer")
+            if customer_id:
+                supabase.table("subscriptions")\
+                    .update({"status": "expired"})\
+                    .eq("stripe_customer_id", customer_id)\
+                    .execute()
+                print(f"Payment failed for customer: {customer_id}")
+
     except Exception as e:
         print(f"Webhook processing error: {str(e)}")
 
