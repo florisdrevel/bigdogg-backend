@@ -1,7 +1,6 @@
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, EmailStr
 from app.database import supabase
-import os
 
 router = APIRouter()
 
@@ -24,15 +23,6 @@ class ResetPasswordRequest(BaseModel):
 @router.post("/register")
 async def register(data: RegisterRequest):
     try:
-        # Check if email already exists using service key
-        existing = supabase.auth.admin.list_users()
-        emails = [u.email for u in existing]
-        if data.email.lower() in [e.lower() for e in emails if e]:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="An account with this email already exists. Please sign in instead."
-            )
-
         response = supabase.auth.sign_up({
             "email": data.email,
             "password": data.password,
@@ -47,6 +37,13 @@ async def register(data: RegisterRequest):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Registration failed"
+            )
+
+        # Supabase returns empty identities list when email already exists
+        if response.user.identities is not None and len(response.user.identities) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="An account with this email already exists. Please sign in instead."
             )
 
         return {
