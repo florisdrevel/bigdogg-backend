@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from app.routers import auth, products, clients, invoices, ai, expenses, overview, profile, subscription, pdf, email, reports
+from app.routers import auth, products, clients, invoices, ai, expenses, overview, profile, subscription, pdf, email, reports, annual_report
 import os
 
 
@@ -32,6 +32,7 @@ app.include_router(subscription.router, prefix="/api/v1/subscription", tags=["su
 app.include_router(pdf.router, prefix="/api/v1/pdf", tags=["pdf"])
 app.include_router(email.router, prefix="/api/v1/email", tags=["email"])
 app.include_router(reports.router, prefix="/api/v1/reports", tags=["reports"])
+app.include_router(annual_report.router, prefix="/api/v1/reports", tags=["annual_report"])
 
 @app.get("/health")
 async def health():
