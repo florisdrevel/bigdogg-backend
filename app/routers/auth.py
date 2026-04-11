@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, EmailStr
 from app.database import supabase
+import os
 
 router = APIRouter()
 
@@ -16,9 +17,22 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+
+
 @router.post("/register")
 async def register(data: RegisterRequest):
     try:
+        # Check if email already exists using service key
+        existing = supabase.auth.admin.list_users()
+        emails = [u.email for u in existing]
+        if data.email.lower() in [e.lower() for e in emails if e]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="An account with this email already exists. Please sign in instead."
+            )
+
         response = supabase.auth.sign_up({
             "email": data.email,
             "password": data.password,
@@ -28,15 +42,19 @@ async def register(data: RegisterRequest):
                 }
             }
         })
+
         if response.user is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Registration failed"
             )
+
         return {
             "message": "Registration successful. Please check your email to confirm.",
             "user_id": response.user.id
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -51,11 +69,13 @@ async def login(data: LoginRequest):
             "email": data.email,
             "password": data.password
         })
+
         if response.user is None:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid credentials"
             )
+
         return {
             "access_token": response.session.access_token,
             "refresh_token": response.session.refresh_token,
@@ -65,10 +85,12 @@ async def login(data: LoginRequest):
                 "full_name": response.user.user_metadata.get("full_name", "")
             }
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials"
+            detail="Invalid email or password"
         )
 
 
@@ -79,8 +101,7 @@ async def logout():
         return {"message": "Logged out successfully"}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-class ResetPasswordRequest(BaseModel):
-    email: EmailStr
+
 
 @router.post("/reset-password")
 async def reset_password(data: ResetPasswordRequest):
