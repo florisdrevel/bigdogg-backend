@@ -9,7 +9,7 @@ from reportlab.lib.units import mm
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
 from reportlab.lib.enums import TA_CENTER
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 import resend
 import base64
 import io
@@ -73,8 +73,24 @@ def _get_deadline(quarter, year):
     return deadlines.get(quarter, "—")
 
 
+def _get_quarter_dates(quarter, year):
+    if quarter == 1:
+        return date(year, 1, 1), date(year, 3, 31)
+    elif quarter == 2:
+        return date(year, 4, 1), date(year, 6, 30)
+    elif quarter == 3:
+        return date(year, 7, 1), date(year, 9, 30)
+    else:
+        return date(year, 10, 1), date(year, 12, 31)
+
+
 @router.get("/btw/pdf")
-async def download_btw_report(request: Request, token: str = Query(None)):
+async def download_btw_report(
+    request: Request,
+    token: str = Query(None),
+    quarter: int = Query(None),
+    year: int = Query(None)
+):
     auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
     if auth_header:
         token = auth_header.replace("Bearer ", "")
@@ -86,7 +102,11 @@ async def download_btw_report(request: Request, token: str = Query(None)):
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    quarter, year, start, end = get_current_quarter()
+    if quarter and year:
+        start, end = _get_quarter_dates(quarter, year)
+    else:
+        quarter, year, start, end = get_current_quarter()
+
     pdf_bytes = await _generate_btw_pdf(user_id, quarter, year, start, end)
 
     return Response(
@@ -99,7 +119,6 @@ async def download_btw_report(request: Request, token: str = Query(None)):
 
 
 async def _generate_btw_pdf(user_id, quarter, year, start, end):
-    # Get invoice lines for period to split by BTW rate
     invoices_result = supabase.table("invoices")\
         .select("id, subtotal_ex_btw, btw_amount, status, invoice_date")\
         .eq("user_id", user_id)\
@@ -110,7 +129,6 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
 
     invoice_ids = [inv['id'] for inv in invoices_result.data]
 
-    # Get all invoice lines to split by BTW rate
     lines_21 = []
     lines_9 = []
     lines_0 = []
@@ -130,7 +148,6 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
             else:
                 lines_0.append(line)
 
-    # Calculate per rate
     rev_21_ex = sum(float(l['line_total_ex_btw'] or 0) for l in lines_21)
     rev_21_btw = sum(float(l['line_total_ex_btw'] or 0) * 0.21 for l in lines_21)
     rev_9_ex = sum(float(l['line_total_ex_btw'] or 0) for l in lines_9)
@@ -138,9 +155,7 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     rev_0_ex = sum(float(l['line_total_ex_btw'] or 0) for l in lines_0)
 
     revenue_btw_total = round(rev_21_btw + rev_9_btw, 2)
-    revenue_ex_total = round(rev_21_ex + rev_9_ex + rev_0_ex, 2)
 
-    # Get expenses for period
     expenses_result = supabase.table("expenses")\
         .select("*")\
         .eq("user_id", user_id)\
@@ -151,7 +166,6 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     expenses_btw = round(sum(float(exp.get('btw_amount') or 0) for exp in expenses_result.data), 2)
     btw_to_pay = round(revenue_btw_total - expenses_btw, 2)
 
-    # Get profile
     profile_result = supabase.table("user_profiles")\
         .select("*")\
         .eq("id", user_id)\
@@ -179,7 +193,6 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     business_name = profile.get('business_name') or profile.get('full_name') or 'BigDogg'
     btw_number = profile.get('btw_number') or '—'
 
-    # Header
     header_data = [[
         Paragraph(business_name, name_style),
         Paragraph(f"BTW Aangifte\nQ{quarter} {year}", number_style),
@@ -193,7 +206,6 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     story.append(Spacer(1, 2*mm))
     story.append(HRFlowable(width="100%", thickness=3, color=GOLD, spaceAfter=4*mm))
 
-    # Meta
     meta_data = [[
         [Paragraph('PERIODE', label_style),
          Paragraph(f"{start.strftime('%d %B %Y')} — {end.strftime('%d %B %Y')}", value_style)],
@@ -208,18 +220,16 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     story.append(Spacer(1, 4*mm))
     story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
 
-    # Section 1: Omzet
     story.append(Paragraph("Sectie 1 — Omzet binnenland", section_style))
 
     rubriek_rows = [['Rubriek', 'Omschrijving', 'Omzet ex BTW', 'BTW']]
 
-    if rev_21_ex > 0 or True:  # Always show 21%
-        rubriek_rows.append([
-            Paragraph('1a', value_bold),
-            Paragraph('Leveringen/diensten belast met 21%\nVul dit in bij "Omzet" op belastingdienst.nl', value_style),
-            Paragraph(f"€ {rev_21_ex:,.2f}", value_bold),
-            Paragraph(f"€ {rev_21_btw:,.2f}", value_bold),
-        ])
+    rubriek_rows.append([
+        Paragraph('1a', value_bold),
+        Paragraph('Leveringen/diensten belast met 21%\nVul dit in bij "Omzet" op belastingdienst.nl', value_style),
+        Paragraph(f"€ {rev_21_ex:,.2f}", value_bold),
+        Paragraph(f"€ {rev_21_btw:,.2f}", value_bold),
+    ])
 
     if rev_9_ex > 0:
         rubriek_rows.append([
@@ -254,13 +264,12 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     story.append(r_table)
     story.append(Spacer(1, 2*mm))
     story.append(Paragraph(
-        "💡 Rubriek 1a: Totale omzet exclusief BTW voor 21% tariefproducten/diensten. "
+        "💡 Rubriek 1a: Totale omzet exclusief BTW voor 21% diensten/producten. "
         "Rubriek 1b: Voor producten/diensten met 9% BTW (bijv. voedsel, boeken). "
         "Rubriek 3a: Leveringen buiten Nederland — geen BTW verschuldigd.",
         explain_style
     ))
 
-    # Section 5: Voorbelasting
     story.append(Paragraph("Sectie 5 — Voorbelasting (aftrekbare BTW)", section_style))
 
     v_rows = [
@@ -298,7 +307,6 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
         explain_style
     ))
 
-    # Summary
     story.append(Spacer(1, 4*mm))
     story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
     story.append(Paragraph("Te betalen / te ontvangen BTW", section_style))
@@ -331,12 +339,10 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     story.append(Spacer(1, 4*mm))
     story.append(Paragraph(
         "💡 Dit is het bedrag dat je invult bij 'Te betalen' of 'Te ontvangen' op belastingdienst.nl. "
-        "Zorg dat je de aangifte op tijd indient om boetes te voorkomen. "
-        "De deadline is " + _get_deadline(quarter, year) + ".",
+        "Zorg dat je de aangifte op tijd indient. De deadline is " + _get_deadline(quarter, year) + ".",
         explain_style
     ))
 
-    # Footer
     story.append(Spacer(1, 8*mm))
     story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
     story.append(Paragraph(
