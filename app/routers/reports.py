@@ -8,9 +8,10 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.enums import TA_CENTER
 from datetime import date, datetime, timezone
 import resend
+import base64
 import io
 
 router = APIRouter()
@@ -34,6 +35,25 @@ def get_current_quarter():
     q = (today.month - 1) // 3 + 1
     year = today.year
     if q == 1:
+        start = date(year, 1, 1)
+        end = date(year, 3, 31)
+    elif q == 2:
+        start = date(year, 4, 1)
+        end = date(year, 6, 30)
+    elif q == 3:
+        start = date(year, 7, 1)
+        end = date(year, 9, 30)
+    else:
+        start = date(year, 10, 1)
+        end = date(year, 12, 31)
+    return q, year, start, end
+
+
+def get_previous_quarter():
+    today = date.today()
+    q = (today.month - 1) // 3 + 1
+    year = today.year
+    if q == 1:
         return 4, year - 1, date(year - 1, 10, 1), date(year - 1, 12, 31)
     elif q == 2:
         return 1, year, date(year, 1, 1), date(year, 3, 31)
@@ -41,6 +61,16 @@ def get_current_quarter():
         return 2, year, date(year, 4, 1), date(year, 6, 30)
     else:
         return 3, year, date(year, 7, 1), date(year, 9, 30)
+
+
+def _get_deadline(quarter, year):
+    deadlines = {
+        1: f"30 april {year}",
+        2: f"31 juli {year}",
+        3: f"31 oktober {year}",
+        4: f"31 januari {year + 1}",
+    }
+    return deadlines.get(quarter, "—")
 
 
 @router.get("/btw/pdf")
@@ -69,22 +99,57 @@ async def download_btw_report(request: Request, token: str = Query(None)):
 
 
 async def _generate_btw_pdf(user_id, quarter, year, start, end):
-    # Get invoices for period
-    invoices = supabase.table("invoices")\
-        .select("*")\
+    # Get invoice lines for period to split by BTW rate
+    invoices_result = supabase.table("invoices")\
+        .select("id, subtotal_ex_btw, btw_amount, status, invoice_date")\
         .eq("user_id", user_id)\
-        .eq("status", "paid")\
+        .in_("status", ["paid", "sent", "overdue"])\
         .gte("invoice_date", start.isoformat())\
         .lte("invoice_date", end.isoformat())\
         .execute()
 
+    invoice_ids = [inv['id'] for inv in invoices_result.data]
+
+    # Get all invoice lines to split by BTW rate
+    lines_21 = []
+    lines_9 = []
+    lines_0 = []
+
+    if invoice_ids:
+        lines_result = supabase.table("invoice_lines")\
+            .select("*")\
+            .in_("invoice_id", invoice_ids)\
+            .execute()
+
+        for line in lines_result.data:
+            rate = line.get('btw_rate', 21)
+            if rate == 21:
+                lines_21.append(line)
+            elif rate == 9:
+                lines_9.append(line)
+            else:
+                lines_0.append(line)
+
+    # Calculate per rate
+    rev_21_ex = sum(float(l['line_total_ex_btw'] or 0) for l in lines_21)
+    rev_21_btw = sum(float(l['line_total_ex_btw'] or 0) * 0.21 for l in lines_21)
+    rev_9_ex = sum(float(l['line_total_ex_btw'] or 0) for l in lines_9)
+    rev_9_btw = sum(float(l['line_total_ex_btw'] or 0) * 0.09 for l in lines_9)
+    rev_0_ex = sum(float(l['line_total_ex_btw'] or 0) for l in lines_0)
+
+    revenue_btw_total = round(rev_21_btw + rev_9_btw, 2)
+    revenue_ex_total = round(rev_21_ex + rev_9_ex + rev_0_ex, 2)
+
     # Get expenses for period
-    expenses = supabase.table("expenses")\
+    expenses_result = supabase.table("expenses")\
         .select("*")\
         .eq("user_id", user_id)\
         .gte("expense_date", start.isoformat())\
         .lte("expense_date", end.isoformat())\
         .execute()
+
+    expenses_btw = round(sum(float(exp.get('btw_amount') or 0) for exp in expenses_result.data), 2)
+    btw_to_pay = round(revenue_btw_total - expenses_btw, 2)
 
     # Get profile
     profile_result = supabase.table("user_profiles")\
@@ -92,16 +157,6 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
         .eq("id", user_id)\
         .execute()
     profile = profile_result.data[0] if profile_result.data else {}
-
-    # Calculate totals
-    revenue_ex_btw = sum(float(inv['subtotal_ex_btw'] or 0) for inv in invoices.data)
-    revenue_btw = sum(float(inv['btw_amount'] or 0) for inv in invoices.data)
-    expenses_btw = sum(float(exp['btw_amount'] or 0) for exp in expenses.data)
-    btw_to_pay = round(revenue_btw - expenses_btw, 2)
-
-    # Split by BTW rate
-    btw_21 = sum(float(inv['subtotal_ex_btw'] or 0) for inv in invoices.data)
-    btw_21_amount = sum(float(inv['btw_amount'] or 0) for inv in invoices.data)
 
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -111,24 +166,23 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     )
     story = []
 
-    title_style = ParagraphStyle('Title', fontName='Helvetica-Bold', fontSize=22, textColor=TEAL, spaceAfter=2*mm)
-    subtitle_style = ParagraphStyle('Sub', fontName='Helvetica', fontSize=10, textColor=TEXT_SECONDARY, spaceAfter=1*mm)
     label_style = ParagraphStyle('Label', fontName='Helvetica-Bold', fontSize=9, textColor=TEXT_SECONDARY, leading=14)
     value_style = ParagraphStyle('Value', fontName='Helvetica', fontSize=10, textColor=TEAL, leading=14)
     value_bold = ParagraphStyle('ValueBold', fontName='Helvetica-Bold', fontSize=11, textColor=TEAL, leading=14)
     section_style = ParagraphStyle('Section', fontName='Helvetica-Bold', fontSize=13, textColor=TEAL, spaceBefore=6*mm, spaceAfter=3*mm)
     explain_style = ParagraphStyle('Explain', fontName='Helvetica-Oblique', fontSize=9, textColor=TEXT_SECONDARY, leading=13)
     footer_style = ParagraphStyle('Footer', fontName='Helvetica', fontSize=9, textColor=TEXT_SECONDARY, alignment=TA_CENTER)
+    name_style = ParagraphStyle('Name', fontName='Helvetica-Bold', fontSize=22, textColor=TEAL, spaceAfter=2*mm)
+    number_style = ParagraphStyle('Number', fontName='Helvetica-Bold', fontSize=16, textColor=TEAL, spaceAfter=2*mm, alignment=1)
 
     page_width = A4[0] - 40*mm
-
     business_name = profile.get('business_name') or profile.get('full_name') or 'BigDogg'
     btw_number = profile.get('btw_number') or '—'
 
     # Header
     header_data = [[
-        Paragraph(business_name, title_style),
-        Paragraph(f"BTW Aangifte\nQ{quarter} {year}", ParagraphStyle('Right', fontName='Helvetica-Bold', fontSize=16, textColor=TEAL, alignment=1)),
+        Paragraph(business_name, name_style),
+        Paragraph(f"BTW Aangifte\nQ{quarter} {year}", number_style),
     ]]
     header_table = Table(header_data, colWidths=[page_width * 0.6, page_width * 0.4])
     header_table.setStyle(TableStyle([
@@ -139,7 +193,7 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     story.append(Spacer(1, 2*mm))
     story.append(HRFlowable(width="100%", thickness=3, color=GOLD, spaceAfter=4*mm))
 
-    # Meta info
+    # Meta
     meta_data = [[
         [Paragraph('PERIODE', label_style),
          Paragraph(f"{start.strftime('%d %B %Y')} — {end.strftime('%d %B %Y')}", value_style)],
@@ -151,40 +205,48 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     meta_table = Table(meta_data, colWidths=[page_width/3, page_width/3, page_width/3])
     meta_table.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
     story.append(meta_table)
-    story.append(Spacer(1, 6*mm))
+    story.append(Spacer(1, 4*mm))
     story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
 
     # Section 1: Omzet
     story.append(Paragraph("Sectie 1 — Omzet binnenland", section_style))
 
-    rubriek_data = [
-        ['Rubriek', 'Omschrijving', 'Bedrag', 'BTW'],
-        [
-            Paragraph('1a', value_bold),
-            Paragraph(
-                'Leveringen/diensten belast met 21%\n'
-                'Vul dit in bij "Omzet" op belastingdienst.nl',
-                value_style
-            ),
-            Paragraph(f"€ {revenue_ex_btw:,.2f}", value_bold),
-            Paragraph(f"€ {btw_21_amount:,.2f}", value_bold),
-        ],
-    ]
+    rubriek_rows = [['Rubriek', 'Omschrijving', 'Omzet ex BTW', 'BTW']]
 
-    r_table = Table(rubriek_data, colWidths=[page_width*0.10, page_width*0.50, page_width*0.20, page_width*0.20])
+    if rev_21_ex > 0 or True:  # Always show 21%
+        rubriek_rows.append([
+            Paragraph('1a', value_bold),
+            Paragraph('Leveringen/diensten belast met 21%\nVul dit in bij "Omzet" op belastingdienst.nl', value_style),
+            Paragraph(f"€ {rev_21_ex:,.2f}", value_bold),
+            Paragraph(f"€ {rev_21_btw:,.2f}", value_bold),
+        ])
+
+    if rev_9_ex > 0:
+        rubriek_rows.append([
+            Paragraph('1b', value_bold),
+            Paragraph('Leveringen/diensten belast met 9%\nVul dit in bij "Omzet laag tarief" op belastingdienst.nl', value_style),
+            Paragraph(f"€ {rev_9_ex:,.2f}", value_bold),
+            Paragraph(f"€ {rev_9_btw:,.2f}", value_bold),
+        ])
+
+    if rev_0_ex > 0:
+        rubriek_rows.append([
+            Paragraph('3a', value_bold),
+            Paragraph('Leveringen/diensten buiten NL (0% BTW)\nBijv. export naar EU of buiten EU — geen BTW verschuldigd', value_style),
+            Paragraph(f"€ {rev_0_ex:,.2f}", value_bold),
+            Paragraph('€ 0,00', value_bold),
+        ])
+
+    r_table = Table(rubriek_rows, colWidths=[page_width*0.10, page_width*0.48, page_width*0.21, page_width*0.21])
     r_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), TEAL),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTSIZE', (0, 0), (-1, 0), 9),
-        ('TOPPADDING', (0, 0), (-1, 0), 8),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+        ('TOPPADDING', (0, 0), (-1, -1), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
         ('LEFTPADDING', (0, 0), (-1, -1), 8),
-        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 1), (-1, -1), 9),
-        ('TOPPADDING', (0, 1), (-1, -1), 8),
-        ('BOTTOMPADDING', (0, 1), (-1, -1), 8),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [LIGHT_GREY]),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [LIGHT_GREY, colors.white]),
         ('ALIGN', (2, 0), (-1, -1), 'RIGHT'),
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ('GRID', (0, 0), (-1, -1), 0.5, MID_GREY),
@@ -192,15 +254,16 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     story.append(r_table)
     story.append(Spacer(1, 2*mm))
     story.append(Paragraph(
-        "💡 Rubriek 1a: Dit is je totale omzet exclusief BTW voor diensten/producten belast met 21%. "
-        "Op de aangifte vul je bij 'omzet' het bedrag in de linkerkolom in en de BTW in de rechterkolom.",
+        "💡 Rubriek 1a: Totale omzet exclusief BTW voor 21% tariefproducten/diensten. "
+        "Rubriek 1b: Voor producten/diensten met 9% BTW (bijv. voedsel, boeken). "
+        "Rubriek 3a: Leveringen buiten Nederland — geen BTW verschuldigd.",
         explain_style
     ))
 
     # Section 5: Voorbelasting
     story.append(Paragraph("Sectie 5 — Voorbelasting (aftrekbare BTW)", section_style))
 
-    voorbelasting_data = [
+    v_rows = [
         ['Rubriek', 'Omschrijving', 'Bedrag'],
         [
             Paragraph('5b', value_bold),
@@ -213,19 +276,15 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
         ],
     ]
 
-    v_table = Table(voorbelasting_data, colWidths=[page_width*0.10, page_width*0.70, page_width*0.20])
+    v_table = Table(v_rows, colWidths=[page_width*0.10, page_width*0.68, page_width*0.22])
     v_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), TEAL),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTSIZE', (0, 0), (-1, 0), 9),
-        ('TOPPADDING', (0, 0), (-1, 0), 8),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+        ('TOPPADDING', (0, 0), (-1, -1), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
         ('LEFTPADDING', (0, 0), (-1, -1), 8),
-        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 1), (-1, -1), 9),
-        ('TOPPADDING', (0, 1), (-1, -1), 8),
-        ('BOTTOMPADDING', (0, 1), (-1, -1), 8),
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [LIGHT_GREY]),
         ('ALIGN', (2, 0), (-1, -1), 'RIGHT'),
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
@@ -234,30 +293,31 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     story.append(v_table)
     story.append(Spacer(1, 2*mm))
     story.append(Paragraph(
-        "💡 Rubriek 5b: Dit is de BTW die jij hebt betaald op zakelijke inkopen en kosten. "
-        "Dit bedrag mag je aftrekken van de BTW die je hebt ontvangen.",
+        "💡 Rubriek 5b: BTW die jij hebt betaald op zakelijke inkopen en kosten. "
+        "Dit bedrag mag je aftrekken van de BTW die je hebt ontvangen van klanten.",
         explain_style
     ))
 
-    # Summary box
-    story.append(Spacer(1, 6*mm))
+    # Summary
+    story.append(Spacer(1, 4*mm))
     story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
     story.append(Paragraph("Te betalen / te ontvangen BTW", section_style))
 
     color_btw = colors.HexColor('#DC2626') if btw_to_pay > 0 else colors.HexColor('#16A34A')
     label_btw = "Te betalen aan Belastingdienst" if btw_to_pay > 0 else "Te ontvangen van Belastingdienst"
 
-    summary_data = [
-        ['BTW ontvangen (1a)', f"€ {revenue_btw:,.2f}"],
+    summary_rows = [
+        ['BTW ontvangen (1a + 1b)', f"€ {revenue_btw_total:,.2f}"],
         ['Voorbelasting (5b)', f"- € {expenses_btw:,.2f}"],
         [label_btw, f"€ {abs(btw_to_pay):,.2f}"],
     ]
 
-    sum_table = Table(summary_data, colWidths=[page_width*0.65, page_width*0.35])
+    sum_table = Table(summary_rows, colWidths=[page_width*0.65, page_width*0.35])
     sum_table.setStyle(TableStyle([
         ('FONTNAME', (0, 0), (-1, 1), 'Helvetica'),
         ('FONTNAME', (0, 2), (-1, 2), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, -1), 11),
+        ('FONTSIZE', (0, 0), (-1, 1), 11),
+        ('FONTSIZE', (0, 2), (-1, 2), 13),
         ('TEXTCOLOR', (0, 0), (-1, 1), TEAL),
         ('TEXTCOLOR', (0, 2), (-1, 2), color_btw),
         ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
@@ -266,19 +326,18 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
         ('LEFTPADDING', (0, 0), (-1, -1), 8),
         ('LINEABOVE', (0, 2), (-1, 2), 1.5, GOLD),
         ('BACKGROUND', (0, 2), (-1, 2), LIGHT_GREY),
-        ('FONTSIZE', (0, 2), (-1, 2), 13),
     ]))
     story.append(sum_table)
-
-    story.append(Spacer(1, 6*mm))
+    story.append(Spacer(1, 4*mm))
     story.append(Paragraph(
         "💡 Dit is het bedrag dat je invult bij 'Te betalen' of 'Te ontvangen' op belastingdienst.nl. "
-        "Zorg dat je de aangifte op tijd indient om boetes te voorkomen.",
+        "Zorg dat je de aangifte op tijd indient om boetes te voorkomen. "
+        "De deadline is " + _get_deadline(quarter, year) + ".",
         explain_style
     ))
 
     # Footer
-    story.append(Spacer(1, 10*mm))
+    story.append(Spacer(1, 8*mm))
     story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
     story.append(Paragraph(
         f"Gegenereerd door BigDogg · bigdogg.nl · {datetime.now().strftime('%d-%m-%Y')} · "
@@ -290,26 +349,13 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     return buffer.getvalue()
 
 
-def _get_deadline(quarter, year):
-    deadlines = {
-        1: f"30 april {year}",
-        2: f"31 juli {year}",
-        3: f"31 oktober {year}",
-        4: f"31 januari {year + 1}",
-    }
-    return deadlines.get(quarter, "—")
-
-
 @router.post("/cron/quarterly")
 async def send_quarterly_reports(request: Request):
-    # Simple security check
     auth = request.headers.get("x-cron-secret", "")
     if auth != settings.cron_secret:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    quarter, year, start, end = get_current_quarter()
-
-    # Get all users with subscriptions
+    quarter, year, start, end = get_previous_quarter()
     users = supabase.auth.admin.list_users()
 
     sent = 0
@@ -317,6 +363,8 @@ async def send_quarterly_reports(request: Request):
         try:
             user_id = user.id
             email = user.email
+            if not email:
+                continue
 
             profile_result = supabase.table("user_profiles")\
                 .select("*")\
@@ -326,8 +374,6 @@ async def send_quarterly_reports(request: Request):
             name = profile.get('full_name') or email
 
             pdf_bytes = await _generate_btw_pdf(user_id, quarter, year, start, end)
-
-            import base64
             pdf_b64 = base64.b64encode(pdf_bytes).decode('utf-8')
 
             resend.Emails.send({
@@ -339,10 +385,11 @@ async def send_quarterly_reports(request: Request):
 Je BTW aangifte voor Q{quarter} {year} is klaar.
 
 Je vindt het rapport als bijlage in deze e-mail.
+Je kunt het ook downloaden via het Overzicht in de app.
 
 De aangifte deadline is {_get_deadline(quarter, year)}.
 
-Log in op bigdogg.nl om je overzicht te bekijken en het rapport opnieuw te downloaden.
+Log in op bigdogg.nl voor meer details.
 
 Met vriendelijke groet,
 Team BigDogg
