@@ -79,3 +79,13 @@ async def logout():
         return {"message": "Logged out successfully"}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+
+@router.post("/reset-password")
+async def reset_password(data: ResetPasswordRequest):
+    try:
+        supabase.auth.reset_password_email(data.email)
+        return {"message": "Reset email sent"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
