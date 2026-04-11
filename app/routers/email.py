@@ -9,21 +9,21 @@ router = APIRouter()
 resend.api_key = settings.resend_api_key
 
 
-def get_user_id(request: Request) -> str:
+def get_user_id_and_email(request: Request):
     auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
     if not auth_header:
         raise HTTPException(status_code=401, detail="Authorization header missing")
     try:
         token = auth_header.replace("Bearer ", "")
         user = supabase.auth.get_user(token)
-        return user.user.id
+        return user.user.id, user.user.email or ''
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 
 @router.post("/invoice/{invoice_id}")
 async def send_invoice_email(invoice_id: str, request: Request):
-    user_id = get_user_id(request)
+    user_id, sender_email = get_user_id_and_email(request)
 
     try:
         invoice_result = supabase.table("invoices")\
@@ -49,13 +49,18 @@ async def send_invoice_email(invoice_id: str, request: Request):
         invoice = invoice_result.data
         lines = lines_result.data
         profile = profile_result.data[0] if profile_result.data else {}
-        client = invoice.get("clients", {})
 
-        client_email = client.get("email")
+        client = invoice.get("clients") or {
+            "contact_name": invoice.get("client_name", ""),
+            "email": invoice.get("client_email", ""),
+            "company_name": invoice.get("client_company", ""),
+        }
+
+        client_email = client.get("email") or invoice.get("client_email", "")
         if not client_email:
             raise HTTPException(status_code=400, detail="Client has no email address")
 
-        pdf_bytes = _generate_pdf(invoice, lines, profile, client)
+        pdf_bytes = _generate_pdf(invoice, lines, profile, client, sender_email)
         pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
 
         sender_name = profile.get('business_name') or profile.get('full_name') or 'BigDogg'
@@ -79,17 +84,18 @@ Onder vermelding van: {invoice_number}
 
 De factuur is als PDF bijgevoegd bij deze e-mail.
 
-Heeft u vragen over deze factuur? Neem dan gerust contact met ons op.
+Heeft u vragen over deze factuur? Neem dan contact op via {sender_email}.
 
 Met vriendelijke groet,
 
 {sender_name}
+{sender_email}
 
 ---
 Dit bericht is verzonden via BigDogg · bigdogg.nl
 """
 
-        params = {
+        resend.Emails.send({
             "from": f"{sender_name} <info@bigdogg.nl>",
             "to": [client_email],
             "subject": subject,
@@ -100,9 +106,7 @@ Dit bericht is verzonden via BigDogg · bigdogg.nl
                     "content": pdf_base64,
                 }
             ],
-        }
-
-        resend.Emails.send(params)
+        })
 
         supabase.table("invoices")\
             .update({"status": "sent"})\

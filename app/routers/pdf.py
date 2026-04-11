@@ -30,6 +30,7 @@ async def generate_invoice_pdf(invoice_id: str, request: Request, token: str = Q
     try:
         user = supabase.auth.get_user(token)
         user_id = user.user.id
+        sender_email = user.user.email or ''
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
@@ -58,14 +59,13 @@ async def generate_invoice_pdf(invoice_id: str, request: Request, token: str = Q
         lines = lines_result.data
         profile = profile_result.data[0] if profile_result.data else {}
 
-        # Use stored client data if client was deleted
         client = invoice.get("clients") or {
             "contact_name": invoice.get("client_name", ""),
             "email": invoice.get("client_email", ""),
             "company_name": invoice.get("client_company", ""),
         }
 
-        pdf_bytes = _generate_pdf(invoice, lines, profile, client)
+        pdf_bytes = _generate_pdf(invoice, lines, profile, client, sender_email)
 
         return Response(
             content=pdf_bytes,
@@ -79,7 +79,7 @@ async def generate_invoice_pdf(invoice_id: str, request: Request, token: str = Q
         raise HTTPException(status_code=400, detail=str(e))
 
 
-def _generate_pdf(invoice, lines, profile, client):
+def _generate_pdf(invoice, lines, profile, client, sender_email=''):
     buffer = io.BytesIO()
 
     doc = SimpleDocTemplate(
@@ -141,6 +141,8 @@ def _generate_pdf(invoice, lines, profile, client):
         sender_lines.append(Paragraph(f"BTW: {profile['btw_number']}", subtitle_style))
     if profile.get('iban'):
         sender_lines.append(Paragraph(f"IBAN: {profile['iban']}", subtitle_style))
+    if sender_email:
+        sender_lines.append(Paragraph(sender_email, subtitle_style))
 
     client_lines = []
     if client.get('company_name'):
@@ -244,7 +246,10 @@ def _generate_pdf(invoice, lines, profile, client):
     footer_text = "Bedankt voor uw opdracht."
     if profile.get('iban'):
         footer_text += f" Gelieve het bedrag over te maken op IBAN {profile['iban']}."
-    footer_text += " Bij vragen kunt u contact opnemen via e-mail."
+    if sender_email:
+        footer_text += f" Bij vragen kunt u contact opnemen via {sender_email}."
+    else:
+        footer_text += " Bij vragen kunt u contact opnemen via e-mail."
 
     story.append(Paragraph(footer_text, ParagraphStyle(
         'Footer', fontName='Helvetica', fontSize=9, textColor=TEXT_SECONDARY, alignment=TA_CENTER,
