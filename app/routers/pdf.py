@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Request, Query
 from fastapi.responses import Response
 from app.database import supabase
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
@@ -57,7 +57,13 @@ async def generate_invoice_pdf(invoice_id: str, request: Request, token: str = Q
         invoice = invoice_result.data
         lines = lines_result.data
         profile = profile_result.data[0] if profile_result.data else {}
-        client = invoice.get("clients", {})
+
+        # Use stored client data if client was deleted
+        client = invoice.get("clients") or {
+            "contact_name": invoice.get("client_name", ""),
+            "email": invoice.get("client_email", ""),
+            "company_name": invoice.get("client_company", ""),
+        }
 
         pdf_bytes = _generate_pdf(invoice, lines, profile, client)
 
@@ -87,6 +93,7 @@ def _generate_pdf(invoice, lines, profile, client):
 
     story = []
 
+    title_style = ParagraphStyle('Title', fontName='Helvetica-Bold', fontSize=28, textColor=TEAL, spaceAfter=2*mm)
     subtitle_style = ParagraphStyle('Subtitle', fontName='Helvetica', fontSize=10, textColor=TEXT_SECONDARY, spaceAfter=1*mm)
     label_style = ParagraphStyle('Label', fontName='Helvetica-Bold', fontSize=8, textColor=TEXT_SECONDARY, spaceAfter=1*mm, leading=12)
     value_style = ParagraphStyle('Value', fontName='Helvetica', fontSize=10, textColor=TEAL, spaceAfter=1*mm, leading=14)
@@ -95,7 +102,6 @@ def _generate_pdf(invoice, lines, profile, client):
 
     page_width = A4[0] - 40*mm
 
-    # Business name — scale font size to fit
     display_name = profile.get('business_name') or ''
     if len(display_name) <= 15:
         name_font_size = 28
@@ -108,7 +114,6 @@ def _generate_pdf(invoice, lines, profile, client):
 
     name_style = ParagraphStyle('Name', fontName='Helvetica-Bold', fontSize=name_font_size, textColor=TEAL, spaceAfter=2*mm)
 
-    # Header — business name left, invoice number right
     header_data = [[
         Paragraph(display_name, name_style),
         Paragraph(invoice['invoice_number'], number_style),
@@ -122,7 +127,6 @@ def _generate_pdf(invoice, lines, profile, client):
     story.append(Spacer(1, 5*mm))
     story.append(HRFlowable(width="100%", thickness=3, color=GOLD, spaceAfter=6*mm))
 
-    # Sender details — full name, address, KVK, BTW, IBAN
     sender_lines = []
     if profile.get('full_name'):
         sender_lines.append(Paragraph(profile['full_name'], value_bold_style))
@@ -175,7 +179,6 @@ def _generate_pdf(invoice, lines, profile, client):
     story.append(info_table)
     story.append(Spacer(1, 8*mm))
 
-    # Invoice lines
     line_header = ['OMSCHRIJVING', 'AANTAL', 'PRIJS EX BTW', 'BTW', 'TOTAAL EX BTW']
     table_data = [line_header]
     for line in lines:
@@ -211,7 +214,6 @@ def _generate_pdf(invoice, lines, profile, client):
     story.append(lines_table)
     story.append(Spacer(1, 6*mm))
 
-    # Totals
     subtotal = float(invoice.get('subtotal_ex_btw', 0))
     btw_amount = float(invoice.get('btw_amount', 0))
     total = float(invoice.get('total_incl_btw', 0))

@@ -97,9 +97,20 @@ async def create_invoice(invoice: InvoiceCreate, request: Request):
         btw_amount = sum(l.quantity * l.unit_price_ex_btw * l.btw_rate / 100 for l in invoice.lines)
         total = subtotal + btw_amount
 
+        # Store client details on invoice for permanent reference
+        client_result = supabase.table("clients")\
+            .select("contact_name, email, company_name")\
+            .eq("id", invoice.client_id)\
+            .single()\
+            .execute()
+        client_data = client_result.data or {}
+
         invoice_response = supabase.table("invoices").insert({
             "user_id": user_id,
             "client_id": invoice.client_id,
+            "client_name": client_data.get("contact_name", ""),
+            "client_email": client_data.get("email", ""),
+            "client_company": client_data.get("company_name", ""),
             "invoice_number": invoice_number,
             "invoice_date": invoice_date,
             "due_date": due_date,
@@ -160,12 +171,12 @@ async def send_reminder(invoice_id: str, request: Request):
             .execute()
 
         invoice = invoice_result.data
-        client = invoice["clients"]
+        client = invoice.get("clients") or {}
         profile = profile_result.data[0] if profile_result.data else {}
 
         sender_name = profile.get('business_name') or profile.get('full_name') or 'BigDogg'
-        client_name = client.get('contact_name', '')
-        client_email = client.get('email', '')
+        client_name = client.get('contact_name') or invoice.get('client_name', '')
+        client_email = client.get('email') or invoice.get('client_email', '')
         invoice_number = invoice['invoice_number']
         total = invoice['total_incl_btw']
         due_date = invoice['due_date']
@@ -212,9 +223,7 @@ Dit bericht is verzonden via BigDogg · bigdogg.nl
             })
 
         supabase.table("invoices")\
-            .update({
-                "reminder_count": reminder_count,
-            })\
+            .update({"reminder_count": reminder_count})\
             .eq("id", invoice_id)\
             .execute()
 

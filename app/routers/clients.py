@@ -112,15 +112,43 @@ async def update_client(client_id: str, client: ClientUpdate, request: Request):
 async def delete_client(client_id: str, request: Request):
     user_id = get_user_id(request)
     try:
+        # Block deletion if client has unpaid invoices
+        unpaid = supabase.table("invoices")\
+            .select("id, status")\
+            .eq("client_id", client_id)\
+            .in_("status", ["draft", "sent", "overdue"])\
+            .execute()
+
+        if unpaid.data:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Deze klant heeft {len(unpaid.data)} onbetaalde factuur/facturen. Markeer ze als betaald voor je de klant verwijdert."
+            )
+
+        # Set client_id to null on paid invoices to preserve history
+        supabase.table("invoices")\
+            .update({"client_id": None})\
+            .eq("client_id", client_id)\
+            .execute()
+
+        # Delete client
         supabase.table("clients")\
             .delete()\
             .eq("id", client_id)\
             .eq("user_id", user_id)\
             .execute()
-        return {"message": "Client deleted"}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
+        return {"message": "Client deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_str = str(e)
+        if '23503' in error_str or 'foreign key' in error_str.lower():
+            raise HTTPException(
+                status_code=400,
+                detail="Deze klant heeft openstaande facturen. Markeer ze als betaald voor je de klant verwijdert."
+            )
+        raise HTTPException(status_code=400, detail=str(e))
 
 @router.get("/onboarding/{token}")
 async def get_onboarding_info(token: str):
