@@ -11,7 +11,7 @@ router = APIRouter()
 stripe.api_key = settings.stripe_secret_key
 
 APP_URL = "https://bigdogg.nl"
-PRICE_AMOUNT = 1200
+PRICE_AMOUNT = 799
 PRICE_CURRENCY = "eur"
 
 
