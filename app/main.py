@@ -1,8 +1,9 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from app.routers import auth, products, clients, invoices, ai, expenses, overview, profile, subscription, pdf, email
+from app.routers import auth, products, clients, invoices, ai, expenses, overview, profile, subscription, pdf, email, reports
 import os
+
 
 app = FastAPI(
     title="Bigdogg. API",
@@ -30,6 +31,7 @@ app.include_router(profile.router, prefix="/api/v1/profile", tags=["profile"])
 app.include_router(subscription.router, prefix="/api/v1/subscription", tags=["subscription"])
 app.include_router(pdf.router, prefix="/api/v1/pdf", tags=["pdf"])
 app.include_router(email.router, prefix="/api/v1/email", tags=["email"])
+app.include_router(reports.router, prefix="/api/v1/reports", tags=["reports"])
 
 @app.get("/health")
 async def health():
