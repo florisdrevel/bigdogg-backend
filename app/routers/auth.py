@@ -20,6 +20,10 @@ class ResetPasswordRequest(BaseModel):
     email: EmailStr
 
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
 @router.post("/register")
 async def register(data: RegisterRequest):
     try:
@@ -39,7 +43,6 @@ async def register(data: RegisterRequest):
                 detail="Registration failed"
             )
 
-        # Supabase returns empty identities list when email already exists
         if response.user.identities is not None and len(response.user.identities) == 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -70,7 +73,13 @@ async def login(data: LoginRequest):
         if response.user is None:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid credentials"
+                detail="Invalid email or password"
+            )
+
+        if response.user.email_confirmed_at is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Please confirm your email address before signing in. Check your inbox."
             )
 
         return {
@@ -89,6 +98,22 @@ async def login(data: LoginRequest):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
         )
+
+
+@router.post("/refresh")
+async def refresh_token(data: RefreshRequest):
+    try:
+        response = supabase.auth.refresh_session(data.refresh_token)
+        if response.session is None:
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+        return {
+            "access_token": response.session.access_token,
+            "refresh_token": response.session.refresh_token,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
 
 
 @router.post("/logout")

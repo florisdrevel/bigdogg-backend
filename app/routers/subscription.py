@@ -84,7 +84,6 @@ async def create_checkout(request: Request, data: CheckoutRequest = None):
         email = data.email if data and data.email else None
 
         session_params = {
-            "payment_method_types": ["card", "ideal"],
             "line_items": [{
                 "price_data": {
                     "currency": PRICE_CURRENCY,
