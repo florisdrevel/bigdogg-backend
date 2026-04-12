@@ -45,22 +45,30 @@ async def get_expenses(request: Request):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.post("/")
-async def create_expense(expense: ExpenseCreate, request: Request):
+@router.post("/upload-receipt/{expense_id}")
+async def upload_receipt(expense_id: str, request: Request, file: UploadFile = File(...)):
     user_id = get_user_id(request)
     try:
-        btw_amount = round(expense.amount_ex_btw * expense.btw_rate / 100, 2)
-        expense_date = expense.expense_date or str(date.today())
-        response = supabase.table("expenses").insert({
-            "user_id": user_id,
-            "description": expense.description,
-            "amount_ex_btw": expense.amount_ex_btw,
-            "btw_amount": btw_amount,
-            "btw_rate": expense.btw_rate,
-            "expense_date": expense_date,
-            "category": expense.category,
-        }).execute()
-        return {"expense": response.data[0]}
+        content = await file.read()
+        file_ext = file.filename.split(".")[-1]
+        file_path = f"{user_id}/{expense_id}.{file_ext}"
+
+        supabase.storage.from_("receipts").upload(
+            file_path,
+            content,
+            {"content-type": file.content_type}
+        )
+
+        # Public URL — no expiry
+        public_url = supabase.storage.from_("receipts").get_public_url(file_path)
+
+        supabase.table("expenses")\
+            .update({"receipt_url": public_url})\
+            .eq("id", expense_id)\
+            .eq("user_id", user_id)\
+            .execute()
+
+        return {"receipt_url": public_url}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
