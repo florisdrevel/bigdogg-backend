@@ -18,6 +18,10 @@ router = APIRouter()
 resend.api_key = settings.resend_api_key
 
 
+def _t(nl, en, lang):
+    return en if lang == 'en' else nl
+
+
 def get_user_id(request: Request) -> str:
     auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
     if not auth_header:
@@ -63,13 +67,21 @@ def get_previous_quarter():
         return 3, year, date(year, 7, 1), date(year, 9, 30)
 
 
-def _get_deadline(quarter, year):
-    deadlines = {
-        1: f"30 april {year}",
-        2: f"31 juli {year}",
-        3: f"31 oktober {year}",
-        4: f"31 januari {year + 1}",
-    }
+def _get_deadline(quarter, year, lang='nl'):
+    if lang == 'en':
+        deadlines = {
+            1: f"April 30, {year}",
+            2: f"July 31, {year}",
+            3: f"October 31, {year}",
+            4: f"January 31, {year + 1}",
+        }
+    else:
+        deadlines = {
+            1: f"30 april {year}",
+            2: f"31 juli {year}",
+            3: f"31 oktober {year}",
+            4: f"31 januari {year + 1}",
+        }
     return deadlines.get(quarter, "—")
 
 
@@ -89,7 +101,8 @@ async def download_btw_report(
     request: Request,
     token: str = Query(None),
     quarter: int = Query(None),
-    year: int = Query(None)
+    year: int = Query(None),
+    lang: str = Query('nl'),
 ):
     auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
     if auth_header:
@@ -107,18 +120,18 @@ async def download_btw_report(
     else:
         quarter, year, start, end = get_current_quarter()
 
-    pdf_bytes = await _generate_btw_pdf(user_id, quarter, year, start, end)
+    pdf_bytes = await _generate_btw_pdf(user_id, quarter, year, start, end, lang)
+
+    filename = f"VAT-Return-Q{quarter}-{year}.pdf" if lang == 'en' else f"BTW-aangifte-Q{quarter}-{year}.pdf"
 
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={
-            "Content-Disposition": f"attachment; filename=BTW-aangifte-Q{quarter}-{year}.pdf"
-        }
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
 
-async def _generate_btw_pdf(user_id, quarter, year, start, end):
+async def _generate_btw_pdf(user_id, quarter, year, start, end, lang='nl'):
     invoices_result = supabase.table("invoices")\
         .select("id, subtotal_ex_btw, btw_amount, status, invoice_date")\
         .eq("user_id", user_id)\
@@ -193,9 +206,11 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     business_name = profile.get('business_name') or profile.get('full_name') or 'BigDogg'
     btw_number = profile.get('btw_number') or '—'
 
+    # Header
+    report_title = _t(f"BTW Aangifte\nQ{quarter} {year}", f"VAT Return\nQ{quarter} {year}", lang)
     header_data = [[
         Paragraph(business_name, name_style),
-        Paragraph(f"BTW Aangifte\nQ{quarter} {year}", number_style),
+        Paragraph(report_title, number_style),
     ]]
     header_table = Table(header_data, colWidths=[page_width * 0.6, page_width * 0.4])
     header_table.setStyle(TableStyle([
@@ -206,13 +221,14 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     story.append(Spacer(1, 2*mm))
     story.append(HRFlowable(width="100%", thickness=3, color=GOLD, spaceAfter=4*mm))
 
+    # Meta
     meta_data = [[
-        [Paragraph('PERIODE', label_style),
+        [Paragraph(_t('PERIODE', 'PERIOD', lang), label_style),
          Paragraph(f"{start.strftime('%d %B %Y')} — {end.strftime('%d %B %Y')}", value_style)],
-        [Paragraph('BTW-NUMMER', label_style),
+        [Paragraph(_t('BTW-NUMMER', 'VAT NUMBER', lang), label_style),
          Paragraph(btw_number, value_style)],
-        [Paragraph('AANGIFTE DEADLINE', label_style),
-         Paragraph(_get_deadline(quarter, year), value_style)],
+        [Paragraph(_t('AANGIFTE DEADLINE', 'FILING DEADLINE', lang), label_style),
+         Paragraph(_get_deadline(quarter, year, lang), value_style)],
     ]]
     meta_table = Table(meta_data, colWidths=[page_width/3, page_width/3, page_width/3])
     meta_table.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
@@ -220,13 +236,26 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     story.append(Spacer(1, 4*mm))
     story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
 
-    story.append(Paragraph("Sectie 1 — Omzet binnenland", section_style))
+    # Section 1
+    story.append(Paragraph(
+        _t("Sectie 1 — Omzet binnenland", "Section 1 — Domestic Revenue", lang),
+        section_style
+    ))
 
-    rubriek_rows = [['Rubriek', 'Omschrijving', 'Omzet ex BTW', 'BTW']]
+    rubriek_rows = [[
+        _t('Rubriek', 'Field', lang),
+        _t('Omschrijving', 'Description', lang),
+        _t('Omzet ex BTW', 'Revenue ex VAT', lang),
+        'VAT/BTW'
+    ]]
 
     rubriek_rows.append([
         Paragraph('1a', value_bold),
-        Paragraph('Leveringen/diensten belast met 21%\nVul dit in bij "Omzet" op belastingdienst.nl', value_style),
+        Paragraph(
+            _t('Leveringen/diensten belast met 21%\nVul dit in bij "Omzet" op belastingdienst.nl',
+               'Supplies/services taxed at 21%\nEnter this under "Revenue" on belastingdienst.nl', lang),
+            value_style
+        ),
         Paragraph(f"€ {rev_21_ex:,.2f}", value_bold),
         Paragraph(f"€ {rev_21_btw:,.2f}", value_bold),
     ])
@@ -234,7 +263,11 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     if rev_9_ex > 0:
         rubriek_rows.append([
             Paragraph('1b', value_bold),
-            Paragraph('Leveringen/diensten belast met 9%\nVul dit in bij "Omzet laag tarief" op belastingdienst.nl', value_style),
+            Paragraph(
+                _t('Leveringen/diensten belast met 9%\nVul dit in bij "Omzet laag tarief" op belastingdienst.nl',
+                   'Supplies/services taxed at 9%\nEnter this under "Low rate revenue" on belastingdienst.nl', lang),
+                value_style
+            ),
             Paragraph(f"€ {rev_9_ex:,.2f}", value_bold),
             Paragraph(f"€ {rev_9_btw:,.2f}", value_bold),
         ])
@@ -242,7 +275,11 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     if rev_0_ex > 0:
         rubriek_rows.append([
             Paragraph('3a', value_bold),
-            Paragraph('Leveringen/diensten buiten NL (0% BTW)\nBijv. export naar EU of buiten EU — geen BTW verschuldigd', value_style),
+            Paragraph(
+                _t('Leveringen/diensten buiten NL (0% BTW)\nBijv. export naar EU of buiten EU — geen BTW verschuldigd',
+                   'Supplies/services outside NL (0% VAT)\nE.g. export to EU or outside EU — no VAT due', lang),
+                value_style
+            ),
             Paragraph(f"€ {rev_0_ex:,.2f}", value_bold),
             Paragraph('€ 0,00', value_bold),
         ])
@@ -264,21 +301,34 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     story.append(r_table)
     story.append(Spacer(1, 2*mm))
     story.append(Paragraph(
-        "💡 Rubriek 1a: Totale omzet exclusief BTW voor 21% diensten/producten. "
-        "Rubriek 1b: Voor producten/diensten met 9% BTW (bijv. voedsel, boeken). "
-        "Rubriek 3a: Leveringen buiten Nederland — geen BTW verschuldigd.",
+        _t(
+            "💡 Rubriek 1a: Totale omzet exclusief BTW voor 21% diensten/producten. "
+            "Rubriek 1b: Voor producten/diensten met 9% BTW (bijv. voedsel, boeken). "
+            "Rubriek 3a: Leveringen buiten Nederland — geen BTW verschuldigd.",
+            "💡 Field 1a: Total revenue excluding VAT for 21% services/products. "
+            "Field 1b: For products/services at 9% VAT (e.g. food, books). "
+            "Field 3a: Supplies outside the Netherlands — no VAT due.",
+            lang
+        ),
         explain_style
     ))
 
-    story.append(Paragraph("Sectie 5 — Voorbelasting (aftrekbare BTW)", section_style))
+    # Section 5
+    story.append(Paragraph(
+        _t("Sectie 5 — Voorbelasting (aftrekbare BTW)", "Section 5 — Input Tax (deductible VAT)", lang),
+        section_style
+    ))
 
     v_rows = [
-        ['Rubriek', 'Omschrijving', 'Bedrag'],
+        [_t('Rubriek', 'Field', lang), _t('Omschrijving', 'Description', lang), _t('Bedrag', 'Amount', lang)],
         [
             Paragraph('5b', value_bold),
             Paragraph(
-                'Voorbelasting — BTW op zakelijke kosten\n'
-                'Vul dit in bij "Voorbelasting" op belastingdienst.nl',
+                _t(
+                    'Voorbelasting — BTW op zakelijke kosten\nVul dit in bij "Voorbelasting" op belastingdienst.nl',
+                    'Input tax — VAT on business expenses\nEnter this under "Input tax" on belastingdienst.nl',
+                    lang
+                ),
                 value_style
             ),
             Paragraph(f"€ {expenses_btw:,.2f}", value_bold),
@@ -302,21 +352,33 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     story.append(v_table)
     story.append(Spacer(1, 2*mm))
     story.append(Paragraph(
-        "💡 Rubriek 5b: BTW die jij hebt betaald op zakelijke inkopen en kosten. "
-        "Dit bedrag mag je aftrekken van de BTW die je hebt ontvangen van klanten.",
+        _t(
+            "💡 Rubriek 5b: BTW die jij hebt betaald op zakelijke inkopen en kosten. "
+            "Dit bedrag mag je aftrekken van de BTW die je hebt ontvangen van klanten.",
+            "💡 Field 5b: VAT you paid on business purchases and costs. "
+            "You can deduct this from the VAT you received from clients.",
+            lang
+        ),
         explain_style
     ))
 
+    # Summary
     story.append(Spacer(1, 4*mm))
     story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
-    story.append(Paragraph("Te betalen / te ontvangen BTW", section_style))
+    story.append(Paragraph(
+        _t("Te betalen / te ontvangen BTW", "VAT payable / receivable", lang),
+        section_style
+    ))
 
     color_btw = colors.HexColor('#DC2626') if btw_to_pay > 0 else colors.HexColor('#16A34A')
-    label_btw = "Te betalen aan Belastingdienst" if btw_to_pay > 0 else "Te ontvangen van Belastingdienst"
+    if lang == 'en':
+        label_btw = "Payable to Tax Authority" if btw_to_pay > 0 else "Receivable from Tax Authority"
+    else:
+        label_btw = "Te betalen aan Belastingdienst" if btw_to_pay > 0 else "Te ontvangen van Belastingdienst"
 
     summary_rows = [
-        ['BTW ontvangen (1a + 1b)', f"€ {revenue_btw_total:,.2f}"],
-        ['Voorbelasting (5b)', f"- € {expenses_btw:,.2f}"],
+        [_t('BTW ontvangen (1a + 1b)', 'VAT received (1a + 1b)', lang), f"€ {revenue_btw_total:,.2f}"],
+        [_t('Voorbelasting (5b)', 'Input tax (5b)', lang), f"- € {expenses_btw:,.2f}"],
         [label_btw, f"€ {abs(btw_to_pay):,.2f}"],
     ]
 
@@ -338,16 +400,27 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end):
     story.append(sum_table)
     story.append(Spacer(1, 4*mm))
     story.append(Paragraph(
-        "💡 Dit is het bedrag dat je invult bij 'Te betalen' of 'Te ontvangen' op belastingdienst.nl. "
-        "Zorg dat je de aangifte op tijd indient. De deadline is " + _get_deadline(quarter, year) + ".",
+        _t(
+            "💡 Dit is het bedrag dat je invult bij 'Te betalen' of 'Te ontvangen' op belastingdienst.nl. "
+            "Zorg dat je de aangifte op tijd indient. De deadline is " + _get_deadline(quarter, year, lang) + ".",
+            "💡 This is the amount you enter under 'Payable' or 'Receivable' on belastingdienst.nl. "
+            "Make sure to file on time. The deadline is " + _get_deadline(quarter, year, lang) + ".",
+            lang
+        ),
         explain_style
     ))
 
+    # Footer
     story.append(Spacer(1, 8*mm))
     story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
     story.append(Paragraph(
-        f"Gegenereerd door BigDogg · bigdogg.nl · {datetime.now().strftime('%d-%m-%Y')} · "
-        "Dit rapport is indicatief. Raadpleeg een belastingadviseur bij twijfel.",
+        _t(
+            f"Gegenereerd door BigDogg · bigdogg.nl · {datetime.now().strftime('%d-%m-%Y')} · "
+            "Dit rapport is indicatief. Raadpleeg een belastingadviseur bij twijfel.",
+            f"Generated by BigDogg · bigdogg.nl · {datetime.now().strftime('%d-%m-%Y')} · "
+            "This report is indicative. Consult a tax advisor if in doubt.",
+            lang
+        ),
         footer_style
     ))
 
@@ -379,7 +452,7 @@ async def send_quarterly_reports(request: Request):
             profile = profile_result.data[0] if profile_result.data else {}
             name = profile.get('full_name') or email
 
-            pdf_bytes = await _generate_btw_pdf(user_id, quarter, year, start, end)
+            pdf_bytes = await _generate_btw_pdf(user_id, quarter, year, start, end, 'nl')
             pdf_b64 = base64.b64encode(pdf_bytes).decode('utf-8')
 
             resend.Emails.send({
@@ -393,7 +466,7 @@ Je BTW aangifte voor Q{quarter} {year} is klaar.
 Je vindt het rapport als bijlage in deze e-mail.
 Je kunt het ook downloaden via het Overzicht in de app.
 
-De aangifte deadline is {_get_deadline(quarter, year)}.
+De aangifte deadline is {_get_deadline(quarter, year, 'nl')}.
 
 Log in op bigdogg.nl voor meer details.
 
