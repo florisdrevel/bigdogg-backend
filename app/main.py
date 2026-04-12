@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, products
+from app.routers import auth, products, overview, reports
 
 app = FastAPI(
     title="Bigdogg API",
@@ -18,6 +18,8 @@ app.add_middleware(
 
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(products.router, prefix="/api/v1/products", tags=["products"])
+app.include_router(overview.router, prefix="/api/v1/overview", tags=["overview"])
+app.include_router(reports.router, prefix="/api/v1/reports", tags=["reports"])
 
 @app.get("/")
 async def root():
