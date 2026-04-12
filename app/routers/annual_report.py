@@ -7,8 +7,8 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, KeepTogether
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+from reportlab.lib.enums import TA_CENTER
 from datetime import date, datetime
 import anthropic
 import resend
@@ -74,7 +74,6 @@ def get_year_data(user_id: str, year: int):
             "invoice_count": len(invoices.data),
         })
 
-    # Expense categories
     all_expenses = supabase.table("expenses")\
         .select("amount_ex_btw, category")\
         .eq("user_id", user_id)\
@@ -104,14 +103,47 @@ def get_year_data(user_id: str, year: int):
     }
 
 
-async def get_ai_tax_tips(data_current, data_prev, profile):
+async def get_ai_tax_tips(data_current, data_prev, profile, lang='nl'):
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
-    prompt = f"""Je bent een Nederlandse belastingadviseur gespecialiseerd in ZZP'ers.
+    if lang == 'en':
+        prompt = f"""You are a Dutch tax advisor specializing in self-employed freelancers (ZZP'ers).
+Based on the financial figures below, provide 5-6 concrete, personal tax tips for this Dutch freelancer.
+Focus on legal deductions, income tax return tips, and comparisons with the previous year.
+Write in English. Be specific and mention actual amounts where possible.
+Give practical tips, not legal advice.
+
+IMPORTANT accuracy rules:
+- Home office deductions: only mention if workspace is completely self-contained with own entrance and sanitary facilities. Do NOT suggest partial home deductions — these are NOT allowed for Dutch ZZP'ers under current law.
+- All tips must be accurate under current Dutch tax law.
+- Always recommend consulting a tax advisor for the final return.
+
+Year {data_current['year']}:
+- Revenue: €{data_current['total_revenue']}
+- Costs: €{data_current['total_expenses']}
+- Profit: €{data_current['total_profit']}
+- Total VAT: €{data_current['total_btw']}
+- Invoice count: {data_current['invoice_count']}
+- Expense categories: {data_current['category_totals']}
+
+Year {data_prev['year']}:
+- Revenue: €{data_prev['total_revenue']}
+- Profit: €{data_prev['total_profit']}
+
+Name: {profile.get('full_name', 'Freelancer')}
+
+Provide tips as a numbered list (1. 2. 3. etc.), each on a new line. Max 800 words."""
+    else:
+        prompt = f"""Je bent een Nederlandse belastingadviseur gespecialiseerd in ZZP'ers.
 Geef op basis van de financiële cijfers hieronder 5-6 concrete, persoonlijke belastingtips voor deze ZZP'er.
 Focus op legale aftrekposten, IB aangifte tips, en vergelijkingen met het vorige jaar.
 Schrijf in het Nederlands. Wees concreet en noem specifieke bedragen waar mogelijk.
 Geef geen juridisch advies maar praktische tips.
+
+BELANGRIJKE nauwkeurigheidsregels:
+- Thuiswerkplek aftrek: vermeld dit ALLEEN als de werkruimte volledig zelfstandig is met eigen ingang en eigen sanitair. Suggereer GEEN gedeeltelijke thuisaftrek — dit is onder de huidige Nederlandse wet voor ZZP'ers NIET toegestaan.
+- Alle tips moeten correct zijn onder de huidige Nederlandse belastingwet.
+- Adviseer altijd een belastingadviseur te raadplegen voor de definitieve aangifte.
 
 Jaar {data_current['year']}:
 - Omzet: €{data_current['total_revenue']}
@@ -128,8 +160,7 @@ Jaar {data_prev['year']}:
 Naam: {profile.get('full_name', 'ZZP\'er')}
 KVK: {profile.get('kvk_number', 'onbekend')}
 
-Geef de tips als een genummerde lijst (1. 2. 3. etc.), elk tip op een nieuwe regel.
-Maximaal 800 woorden totaal."""
+Geef de tips als een genummerde lijst (1. 2. 3. etc.), elk op een nieuwe regel. Max 800 woorden."""
 
     message = client.messages.create(
         model="claude-sonnet-4-20250514",
@@ -139,7 +170,11 @@ Maximaal 800 woorden totaal."""
     return message.content[0].text
 
 
-def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, sender_email=''):
+def _t(nl, en, lang):
+    return en if lang == 'en' else nl
+
+
+def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer, pagesize=A4,
@@ -155,6 +190,7 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, sender_emai
     body_style = ParagraphStyle('Body', fontName='Helvetica', fontSize=10, textColor=TEAL, leading=15)
     tip_style = ParagraphStyle('Tip', fontName='Helvetica', fontSize=9, textColor=TEXT_SECONDARY, leading=14, leftIndent=4*mm)
     footer_style = ParagraphStyle('Footer', fontName='Helvetica', fontSize=9, textColor=TEXT_SECONDARY, alignment=TA_CENTER)
+    explain_style = ParagraphStyle('Explain', fontName='Helvetica-Oblique', fontSize=9, textColor=TEXT_SECONDARY, leading=13)
     name_style = ParagraphStyle('Name', fontName='Helvetica-Bold', fontSize=20, textColor=TEAL)
     number_style = ParagraphStyle('Number', fontName='Helvetica-Bold', fontSize=14, textColor=TEAL, alignment=1)
 
@@ -165,7 +201,7 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, sender_emai
     # Header
     header_data = [[
         Paragraph(business_name, name_style),
-        Paragraph(f"Jaarrapport {year}\nInkomstenbelasting", number_style),
+        Paragraph(f"{_t('Jaarrapport', 'Annual Report', lang)} {year}\n{_t('Inkomstenbelasting', 'Income Tax', lang)}", number_style),
     ]]
     header_table = Table(header_data, colWidths=[page_width * 0.6, page_width * 0.4])
     header_table.setStyle(TableStyle([
@@ -178,12 +214,12 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, sender_emai
 
     # Meta
     meta_data = [[
-        [Paragraph('NAAM', label_style),
+        [Paragraph(_t('NAAM', 'NAME', lang), label_style),
          Paragraph(profile.get('full_name', '—'), value_style)],
         [Paragraph('KVK', label_style),
          Paragraph(profile.get('kvk_number', '—'), value_style)],
-        [Paragraph('AANGIFTE PERIODE', label_style),
-         Paragraph(f"1 maart — 30 april {year + 1}", value_style)],
+        [Paragraph(_t('AANGIFTE PERIODE', 'FILING PERIOD', lang), label_style),
+         Paragraph(f"1 {_t('maart', 'March', lang)} — 30 {_t('april', 'April', lang)} {year + 1}", value_style)],
     ]]
     meta_table = Table(meta_data, colWidths=[page_width/3, page_width/3, page_width/3])
     meta_table.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
@@ -192,26 +228,23 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, sender_emai
     story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
 
     # Year summary
-    story.append(Paragraph(f"Jaaroverzicht {year}", section_style))
-
-    GREEN = colors.HexColor('#16A34A')
-    RED = colors.HexColor('#DC2626')
+    story.append(Paragraph(f"{_t('Jaaroverzicht', 'Year Summary', lang)} {year}", section_style))
 
     summary_rows = [
-        ['', f'{year}', f'{data_prev["year"]}', 'Verschil'],
-        ['Omzet ex BTW',
+        ['', f'{year}', f'{data_prev["year"]}', _t('Verschil', 'Change', lang)],
+        [_t('Omzet ex BTW', 'Revenue ex VAT', lang),
          f"€ {data_current['total_revenue']:,.2f}",
          f"€ {data_prev['total_revenue']:,.2f}",
          _diff(data_current['total_revenue'], data_prev['total_revenue'])],
-        ['Kosten ex BTW',
+        [_t('Kosten ex BTW', 'Costs ex VAT', lang),
          f"€ {data_current['total_expenses']:,.2f}",
          f"€ {data_prev['total_expenses']:,.2f}",
          _diff(data_current['total_expenses'], data_prev['total_expenses'])],
-        ['Winst (indicatief)',
+        [_t('Winst (indicatief)', 'Profit (indicative)', lang),
          f"€ {data_current['total_profit']:,.2f}",
          f"€ {data_prev['total_profit']:,.2f}",
          _diff(data_current['total_profit'], data_prev['total_profit'])],
-        ['Totale BTW',
+        [_t('Totale BTW', 'Total VAT', lang),
          f"€ {data_current['total_btw']:,.2f}",
          f"€ {data_prev['total_btw']:,.2f}",
          _diff(data_current['total_btw'], data_prev['total_btw'])],
@@ -222,10 +255,7 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, sender_emai
         ('BACKGROUND', (0, 0), (-1, 0), TEAL),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 9),
-        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 1), (-1, -1), 9),
-        ('FONTNAME', (0, 3), (0, 3), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
         ('TOPPADDING', (0, 0), (-1, -1), 7),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 7),
         ('LEFTPADDING', (0, 0), (-1, -1), 8),
@@ -240,9 +270,10 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, sender_emai
     story.append(sum_table)
 
     # Quarter breakdown
-    story.append(Paragraph(f"Kwartaaloverzicht {year}", section_style))
+    story.append(Paragraph(f"{_t('Kwartaaloverzicht', 'Quarterly Overview', lang)} {year}", section_style))
 
-    q_rows = [['Kwartaal', 'Omzet', 'Kosten', 'Winst', 'BTW']]
+    q_rows = [[_t('Kwartaal', 'Quarter', lang), _t('Omzet', 'Revenue', lang),
+               _t('Kosten', 'Costs', lang), _t('Winst', 'Profit', lang), 'BTW/VAT']]
     for q in data_current['quarters']:
         q_rows.append([
             f"Q{q['quarter']}",
@@ -271,12 +302,20 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, sender_emai
 
     # Expense categories
     if data_current['category_totals']:
-        story.append(Paragraph("Kostenverdeling", section_style))
-        cat_labels = {
+        story.append(Paragraph(_t('Kostenverdeling', 'Expense Breakdown', lang), section_style))
+        cat_labels_nl = {
             'travel': 'Reizen', 'materials': 'Materialen', 'software': 'Software',
             'food': 'Eten & Drinken', 'office': 'Kantoor', 'other': 'Overig', 'general': 'Algemeen'
         }
-        cat_rows = [['Categorie', 'Bedrag ex BTW', '% van totaal']]
+        cat_labels_en = {
+            'travel': 'Travel', 'materials': 'Materials', 'software': 'Software',
+            'food': 'Food & Drinks', 'office': 'Office', 'other': 'Other', 'general': 'General'
+        }
+        cat_labels = cat_labels_en if lang == 'en' else cat_labels_nl
+
+        cat_rows = [[_t('Categorie', 'Category', lang),
+                     _t('Bedrag ex BTW', 'Amount ex VAT', lang),
+                     _t('% van totaal', '% of total', lang)]]
         total_exp = data_current['total_expenses'] or 1
         for cat, amount in sorted(data_current['category_totals'].items(), key=lambda x: x[1], reverse=True):
             pct = round(amount / total_exp * 100, 1)
@@ -304,12 +343,21 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, sender_emai
         story.append(cat_table)
 
     # IB aangifte guidance
-    story.append(Paragraph("IB Aangifte — Wat invullen?", section_style))
+    story.append(Paragraph(
+        _t('IB Aangifte — Wat invullen?', 'Income Tax Return — What to fill in?', lang),
+        section_style
+    ))
     ib_data = [
-        ['Rubriek', 'Omschrijving', 'Jouw bedrag'],
-        ['Omzet', 'Totale omzet exclusief BTW', f"€ {data_current['total_revenue']:,.2f}"],
-        ['Kosten', 'Zakelijke kosten exclusief BTW', f"€ {data_current['total_expenses']:,.2f}"],
-        ['Winst', 'Omzet minus kosten (winst uit onderneming)', f"€ {data_current['total_profit']:,.2f}"],
+        [_t('Rubriek', 'Field', lang), _t('Omschrijving', 'Description', lang), _t('Jouw bedrag', 'Your amount', lang)],
+        [_t('Omzet', 'Revenue', lang),
+         _t('Totale omzet exclusief BTW', 'Total revenue excluding VAT', lang),
+         f"€ {data_current['total_revenue']:,.2f}"],
+        [_t('Kosten', 'Costs', lang),
+         _t('Zakelijke kosten exclusief BTW', 'Business costs excluding VAT', lang),
+         f"€ {data_current['total_expenses']:,.2f}"],
+        [_t('Winst', 'Profit', lang),
+         _t('Omzet minus kosten (winst uit onderneming)', 'Revenue minus costs (business profit)', lang),
+         f"€ {data_current['total_profit']:,.2f}"],
     ]
     ib_table = Table(ib_data, colWidths=[page_width*0.25, page_width*0.50, page_width*0.25])
     ib_table.setStyle(TableStyle([
@@ -330,16 +378,24 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, sender_emai
     ]))
     story.append(ib_table)
     story.append(Spacer(1, 2*mm))
-    story.append(Paragraph(
-        "💡 Vul de winst in bij 'Winst uit onderneming' in je IB aangifte op belastingdienst.nl. "
-        "Vergeet niet de zelfstandigenaftrek (€5.030 in 2026) en eventuele MKB-winstvrijstelling (14%) toe te passen.",
-        ParagraphStyle('Explain', fontName='Helvetica-Oblique', fontSize=9, textColor=TEXT_SECONDARY, leading=13)
-    ))
+
+    if lang == 'en':
+        ib_note = ("💡 Enter your profit under 'Profit from business' in your income tax return on belastingdienst.nl. "
+                   "Don't forget to apply the self-employed deduction (€5,030 in 2026) and the SME profit exemption (14%).")
+    else:
+        ib_note = ("💡 Vul de winst in bij 'Winst uit onderneming' in je IB aangifte op belastingdienst.nl. "
+                   "Vergeet niet de zelfstandigenaftrek (€5.030 in 2026) en eventuele MKB-winstvrijstelling (14%) toe te passen.")
+
+    story.append(Paragraph(ib_note, explain_style))
 
     # AI Tax tips
-    story.append(Paragraph("Persoonlijke belastingtips voor jou", section_style))
     story.append(Paragraph(
-        "Op basis van jouw cijfers heeft BigDogg de volgende tips voor je:",
+        _t('Persoonlijke belastingtips voor jou', 'Personal tax tips for you', lang),
+        section_style
+    ))
+    story.append(Paragraph(
+        _t('Op basis van jouw cijfers heeft BigDogg de volgende tips voor je:',
+           'Based on your figures, BigDogg has the following tips for you:', lang),
         body_style
     ))
     story.append(Spacer(1, 3*mm))
@@ -353,11 +409,15 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, sender_emai
     # Footer
     story.append(Spacer(1, 8*mm))
     story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
-    story.append(Paragraph(
-        f"Gegenereerd door BigDogg · bigdogg.nl · {datetime.now().strftime('%d-%m-%Y')} · "
-        "Dit rapport is indicatief. Raadpleeg een belastingadviseur voor je definitieve aangifte inkomstenbelasting.",
-        footer_style
-    ))
+
+    if lang == 'en':
+        footer_text = (f"Generated by BigDogg · bigdogg.nl · {datetime.now().strftime('%d-%m-%Y')} · "
+                       "This report is indicative. Consult a tax advisor for your final income tax return.")
+    else:
+        footer_text = (f"Gegenereerd door BigDogg · bigdogg.nl · {datetime.now().strftime('%d-%m-%Y')} · "
+                       "Dit rapport is indicatief. Raadpleeg een belastingadviseur voor je definitieve aangifte inkomstenbelasting.")
+
+    story.append(Paragraph(footer_text, footer_style))
 
     doc.build(story)
     return buffer.getvalue()
@@ -376,7 +436,8 @@ def _diff(current, prev):
 async def download_annual_report(
     request: Request,
     token: str = Query(None),
-    year: int = Query(None)
+    year: int = Query(None),
+    lang: str = Query('nl')
 ):
     auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
     if auth_header:
@@ -386,7 +447,6 @@ async def download_annual_report(
     try:
         user = supabase.auth.get_user(token)
         user_id = user.user.id
-        sender_email = user.user.email or ''
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
@@ -398,15 +458,15 @@ async def download_annual_report(
 
     data_current = get_year_data(user_id, year)
     data_prev = get_year_data(user_id, year - 1)
-    tax_tips = await get_ai_tax_tips(data_current, data_prev, profile)
-    pdf_bytes = _generate_annual_pdf(data_current, data_prev, profile, tax_tips, sender_email)
+    tax_tips = await get_ai_tax_tips(data_current, data_prev, profile, lang)
+    pdf_bytes = _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang)
+
+    filename = f"Annual-Report-{year}.pdf" if lang == 'en' else f"Jaarrapport-{year}.pdf"
 
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={
-            "Content-Disposition": f"attachment; filename=Jaarrapport-{year}.pdf"
-        }
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
 
@@ -431,10 +491,11 @@ async def send_annual_reports(request: Request):
             profile = profile_result.data[0] if profile_result.data else {}
             name = profile.get('full_name') or email
 
+            # Default to Dutch for cron emails
             data_current = get_year_data(user_id, year)
             data_prev = get_year_data(user_id, year - 1)
-            tax_tips = await get_ai_tax_tips(data_current, data_prev, profile)
-            pdf_bytes = _generate_annual_pdf(data_current, data_prev, profile, tax_tips)
+            tax_tips = await get_ai_tax_tips(data_current, data_prev, profile, 'nl')
+            pdf_bytes = _generate_annual_pdf(data_current, data_prev, profile, tax_tips, 'nl')
             pdf_b64 = base64.b64encode(pdf_bytes).decode('utf-8')
 
             resend.Emails.send({
