@@ -7,6 +7,7 @@ from app.config import settings
 import anthropic
 import base64
 import json
+import re
 
 router = APIRouter()
 
@@ -45,32 +46,34 @@ async def get_expenses(request: Request):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.post("/upload-receipt/{expense_id}")
-async def upload_receipt(expense_id: str, request: Request, file: UploadFile = File(...)):
+@router.post("/")
+async def create_expense(expense: ExpenseCreate, request: Request):
     user_id = get_user_id(request)
     try:
-        content = await file.read()
-        file_ext = file.filename.split(".")[-1]
-        file_path = f"{user_id}/{expense_id}.{file_ext}"
-
-        supabase.storage.from_("receipts").upload(
-            file_path,
-            content,
-            {"content-type": file.content_type}
-        )
-
-        # Public URL — no expiry
-        public_url = supabase.storage.from_("receipts").get_public_url(file_path)
-
-        supabase.table("expenses")\
-            .update({"receipt_url": public_url})\
-            .eq("id", expense_id)\
-            .eq("user_id", user_id)\
-            .execute()
-
-        return {"receipt_url": public_url}
+        btw_amount = round(expense.amount_ex_btw * expense.btw_rate / 100, 2)
+        expense_date = expense.expense_date or str(date.today())
+        response = supabase.table("expenses").insert({
+            "user_id": user_id,
+            "description": expense.description,
+            "amount_ex_btw": expense.amount_ex_btw,
+            "btw_amount": btw_amount,
+            "btw_rate": expense.btw_rate,
+            "expense_date": expense_date,
+            "category": expense.category,
+        }).execute()
+        return {"expense": response.data[0]}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+def _extract_json(text: str) -> dict:
+    """Extract JSON from Claude response, handling markdown code fences."""
+    # Strip markdown fences if present
+    text = text.strip()
+    text = re.sub(r'^```(?:json)?\s*', '', text)
+    text = re.sub(r'\s*```$', '', text)
+    text = text.strip()
+    return json.loads(text)
 
 
 @router.post("/parse-receipt")
@@ -84,10 +87,22 @@ async def parse_receipt(request: Request, file: UploadFile = File(...)):
         ext = filename.lower().split(".")[-1]
         content_type = file.content_type or "image/jpeg"
 
+        # Sanitize extension — mobile sometimes sends long numeric filenames
+        if len(ext) > 5 or not ext.isalpha():
+            # Try to detect from content_type
+            ct_map = {
+                "image/jpeg": "jpg",
+                "image/png": "png",
+                "image/webp": "webp",
+                "image/gif": "gif",
+                "application/pdf": "pdf",
+            }
+            ext = ct_map.get(content_type, "jpg")
+
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
         prompt_text = """Analyze this receipt or invoice and extract the expense information.
-Return ONLY a JSON object with these exact fields, nothing else, no markdown:
+Return ONLY a JSON object with these exact fields, nothing else, no markdown code fences:
 {
   "description": "short description of what was purchased",
   "amount_ex_btw": 0.00,
@@ -104,7 +119,8 @@ Rules:
 - expense_date: date on receipt in YYYY-MM-DD format, use today if not visible
 - category: one of: travel, materials, software, food, office, other, general
 - description: concise, max 60 chars
-- All amounts as numbers, not strings"""
+- All amounts as numbers, not strings
+- Do NOT wrap the response in markdown code fences"""
 
         if ext == "pdf" or content_type == "application/pdf":
             base64_data = base64.standard_b64encode(content).decode("utf-8")
@@ -176,7 +192,7 @@ Rules:
 
         raw = message.content[0].text.strip()
         print(f"CLAUDE RESPONSE: {raw}")
-        parsed = json.loads(raw)
+        parsed = _extract_json(raw)
 
         return {
             "success": True,
@@ -201,25 +217,50 @@ async def upload_receipt(expense_id: str, request: Request, file: UploadFile = F
     user_id = get_user_id(request)
     try:
         content = await file.read()
-        file_ext = file.filename.split(".")[-1]
-        file_path = f"{user_id}/{expense_id}.{file_ext}"
+        filename = file.filename or "receipt.jpg"
+        content_type = file.content_type or "image/jpeg"
 
-        supabase.storage.from_("receipts").upload(
-            file_path,
-            content,
-            {"content-type": file.content_type}
-        )
+        # Sanitize extension
+        ext = filename.lower().split(".")[-1]
+        if len(ext) > 5 or not ext.isalpha():
+            ct_map = {
+                "image/jpeg": "jpg",
+                "image/png": "png",
+                "image/webp": "webp",
+                "image/gif": "gif",
+                "application/pdf": "pdf",
+            }
+            ext = ct_map.get(content_type, "jpg")
 
-        signed_url = supabase.storage.from_("receipts").create_signed_url(file_path, 86400)
+        file_path = f"{user_id}/{expense_id}.{ext}"
+
+        # Try upload — if file exists, remove and re-upload
+        try:
+            supabase.storage.from_("receipts").upload(
+                file_path,
+                content,
+                {"content-type": content_type}
+            )
+        except Exception:
+            supabase.storage.from_("receipts").remove([file_path])
+            supabase.storage.from_("receipts").upload(
+                file_path,
+                content,
+                {"content-type": content_type}
+            )
+
+        public_url = supabase.storage.from_("receipts").get_public_url(file_path)
+        print(f"UPLOAD RECEIPT: path={file_path}, url={public_url}")
 
         supabase.table("expenses")\
-            .update({"receipt_url": signed_url["signedURL"]})\
+            .update({"receipt_url": public_url})\
             .eq("id", expense_id)\
             .eq("user_id", user_id)\
             .execute()
 
-        return {"receipt_url": signed_url["signedURL"]}
+        return {"receipt_url": public_url}
     except Exception as e:
+        print(f"UPLOAD RECEIPT ERROR: {type(e).__name__}: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 
