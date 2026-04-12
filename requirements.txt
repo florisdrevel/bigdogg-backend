@@ -13,3 +13,4 @@ python-multipart
 stripe
 reportlab
 resend
+Pillow

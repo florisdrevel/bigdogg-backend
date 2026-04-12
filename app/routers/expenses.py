@@ -70,8 +70,54 @@ async def parse_receipt(request: Request, file: UploadFile = File(...)):
     get_user_id(request)
     try:
         content = await file.read()
+        print(f"PARSE RECEIPT: filename={file.filename}, content_type={file.content_type}, size={len(content)} bytes")
+
+        # Determine media type
+        content_type = file.content_type or "image/jpeg"
+        filename = file.filename or "receipt.jpg"
+        ext = filename.lower().split(".")[-1]
+
+        # Map extensions to valid Anthropic media types
+        media_type_map = {
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "png": "image/png",
+            "gif": "image/gif",
+            "webp": "image/webp",
+            "heic": "image/jpeg",
+            "heif": "image/jpeg",
+        }
+
+        if ext in media_type_map:
+            media_type = media_type_map[ext]
+        elif content_type.startswith("image/"):
+            media_type = content_type
+        else:
+            media_type = "image/jpeg"
+
+        # Handle PDF — convert to note for Claude
+        if ext == "pdf" or content_type == "application/pdf":
+            raise HTTPException(
+                status_code=422,
+                detail="PDF parsing not yet supported. Please take a photo of the receipt."
+            )
+
+        # Resize if too large (>4MB)
+        if len(content) > 4 * 1024 * 1024:
+            try:
+                from PIL import Image as PILImage
+                import io
+                img = PILImage.open(io.BytesIO(content))
+                img.thumbnail((1920, 1920))
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=75)
+                content = buf.getvalue()
+                media_type = "image/jpeg"
+                print(f"RESIZED to {len(content)} bytes")
+            except Exception as resize_err:
+                print(f"RESIZE FAILED: {resize_err}")
+
         base64_image = base64.standard_b64encode(content).decode("utf-8")
-        media_type = file.content_type or "image/jpeg"
 
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
@@ -118,9 +164,9 @@ Rules:
         )
 
         raw = message.content[0].text.strip()
+        print(f"CLAUDE RESPONSE: {raw}")
         parsed = json.loads(raw)
 
-        # Validate and sanitize
         return {
             "success": True,
             "description": str(parsed.get("description", ""))[:60],
@@ -131,9 +177,13 @@ Rules:
             "category": str(parsed.get("category", "general")),
         }
 
-    except json.JSONDecodeError:
+    except HTTPException:
+        raise
+    except json.JSONDecodeError as e:
+        print(f"JSON PARSE ERROR: {e}")
         raise HTTPException(status_code=422, detail="Could not parse receipt")
     except Exception as e:
+        print(f"PARSE RECEIPT ERROR: {type(e).__name__}: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 
