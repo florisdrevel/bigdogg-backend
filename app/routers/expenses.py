@@ -72,73 +72,13 @@ async def parse_receipt(request: Request, file: UploadFile = File(...)):
         content = await file.read()
         print(f"PARSE RECEIPT: filename={file.filename}, content_type={file.content_type}, size={len(content)} bytes")
 
-        # Determine media type
-        content_type = file.content_type or "image/jpeg"
         filename = file.filename or "receipt.jpg"
         ext = filename.lower().split(".")[-1]
-
-        # Map extensions to valid Anthropic media types
-        media_type_map = {
-            "jpg": "image/jpeg",
-            "jpeg": "image/jpeg",
-            "png": "image/png",
-            "gif": "image/gif",
-            "webp": "image/webp",
-            "heic": "image/jpeg",
-            "heif": "image/jpeg",
-        }
-
-        if ext in media_type_map:
-            media_type = media_type_map[ext]
-        elif content_type.startswith("image/"):
-            media_type = content_type
-        else:
-            media_type = "image/jpeg"
-
-        # Handle PDF — convert to note for Claude
-        if ext == "pdf" or content_type == "application/pdf":
-            raise HTTPException(
-                status_code=422,
-                detail="PDF parsing not yet supported. Please take a photo of the receipt."
-            )
-
-        # Resize if too large (>4MB)
-        if len(content) > 4 * 1024 * 1024:
-            try:
-                from PIL import Image as PILImage
-                import io
-                img = PILImage.open(io.BytesIO(content))
-                img.thumbnail((1920, 1920))
-                buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=75)
-                content = buf.getvalue()
-                media_type = "image/jpeg"
-                print(f"RESIZED to {len(content)} bytes")
-            except Exception as resize_err:
-                print(f"RESIZE FAILED: {resize_err}")
-
-        base64_image = base64.standard_b64encode(content).decode("utf-8")
+        content_type = file.content_type or "image/jpeg"
 
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
-        message = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=500,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": base64_image,
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": """Analyze this receipt image and extract the expense information.
+        prompt_text = """Analyze this receipt or invoice and extract the expense information.
 Return ONLY a JSON object with these exact fields, nothing else, no markdown:
 {
   "description": "short description of what was purchased",
@@ -157,11 +97,74 @@ Rules:
 - category: one of: travel, materials, software, food, office, other, general
 - description: concise, max 60 chars
 - All amounts as numbers, not strings"""
-                        }
+
+        if ext == "pdf" or content_type == "application/pdf":
+            base64_data = base64.standard_b64encode(content).decode("utf-8")
+            message = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=500,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": base64_data,
+                            },
+                        },
+                        {"type": "text", "text": prompt_text}
                     ],
-                }
-            ],
-        )
+                }],
+            )
+        else:
+            media_type_map = {
+                "jpg": "image/jpeg",
+                "jpeg": "image/jpeg",
+                "png": "image/png",
+                "gif": "image/gif",
+                "webp": "image/webp",
+                "heic": "image/jpeg",
+                "heif": "image/jpeg",
+            }
+            media_type = media_type_map.get(ext, "image/jpeg")
+            if content_type.startswith("image/") and ext not in media_type_map:
+                media_type = content_type
+
+            if len(content) > 4 * 1024 * 1024:
+                try:
+                    from PIL import Image as PILImage
+                    import io
+                    img = PILImage.open(io.BytesIO(content))
+                    img.thumbnail((1920, 1920))
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG", quality=75)
+                    content = buf.getvalue()
+                    media_type = "image/jpeg"
+                    print(f"RESIZED to {len(content)} bytes")
+                except Exception as resize_err:
+                    print(f"RESIZE FAILED: {resize_err}")
+
+            base64_data = base64.standard_b64encode(content).decode("utf-8")
+            message = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=500,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": base64_data,
+                            },
+                        },
+                        {"type": "text", "text": prompt_text}
+                    ],
+                }],
+            )
 
         raw = message.content[0].text.strip()
         print(f"CLAUDE RESPONSE: {raw}")
@@ -177,8 +180,6 @@ Rules:
             "category": str(parsed.get("category", "general")),
         }
 
-    except HTTPException:
-        raise
     except json.JSONDecodeError as e:
         print(f"JSON PARSE ERROR: {e}")
         raise HTTPException(status_code=422, detail="Could not parse receipt")
