@@ -27,7 +27,11 @@ def _extract_json(text: str) -> dict:
     text = text.strip()
     text = re.sub(r'^```(?:json)?\s*', '', text)
     text = re.sub(r'\s*```$', '', text)
-    return json.loads(text.strip())
+    text = text.strip()
+    # Fix missing commas between fields (common Claude mistake)
+    text = re.sub(r'"\s*\n\s*"', '",\n  "', text)
+    text = re.sub(r'(\d)\s*\n\s*"', r'\1,\n  "', text)
+    return json.loads(text)
 
 
 async def _parse_invoice_file(content: bytes, filename: str, content_type: str) -> dict:
@@ -38,7 +42,7 @@ async def _parse_invoice_file(content: bytes, filename: str, content_type: str) 
     is_pdf = ext == "pdf" or content_type == "application/pdf"
 
     prompt_text = """Extract the key financial data from this invoice or screenshot.
-Return ONLY a JSON object, no markdown fences:
+Return ONLY a valid JSON object, no markdown fences, no missing commas:
 {
   "invoice_number": "invoice number or null",
   "invoice_date": "YYYY-MM-DD or null",
@@ -55,7 +59,7 @@ Rules:
 - btw_rate: 21, 9, or 0
 - Use today's date if invoice_date not found
 - Keep description concise
-- If this is a screenshot, extract whatever financial data is visible"""
+- Ensure valid JSON with commas between all fields"""
 
     if is_pdf:
         content_block = {
@@ -77,7 +81,7 @@ Rules:
             "heif": "image/jpeg",
         }
         media_type = media_type_map.get(ext, "image/jpeg")
-        if content_type.startswith("image/"):
+        if content_type.startswith("image/") and ext not in media_type_map:
             media_type = content_type
 
         if len(content) > 4 * 1024 * 1024:
@@ -161,7 +165,6 @@ async def import_invoices(
                 "subtotal_ex_btw": subtotal,
                 "btw_amount": btw_amount,
                 "total_incl_btw": total,
-                "btw_rate": btw_rate,
                 "status": "paid",
                 "is_imported": True,
                 "notes": description,
