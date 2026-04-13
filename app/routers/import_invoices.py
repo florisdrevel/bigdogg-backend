@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 from typing import List
-from datetime import date, datetime
+from datetime import date
 from app.database import supabase
 from app.config import settings
 import anthropic
@@ -30,27 +30,14 @@ def _extract_json(text: str) -> dict:
     return json.loads(text.strip())
 
 
-async def _parse_invoice_pdf(content: bytes, filename: str) -> dict:
+async def _parse_invoice_file(content: bytes, filename: str, content_type: str) -> dict:
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     base64_data = base64.standard_b64encode(content).decode("utf-8")
 
-    message = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=500,
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "document",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "application/pdf",
-                        "data": base64_data,
-                    },
-                },
-                {
-                    "type": "text",
-                    "text": """Extract the key financial data from this invoice.
+    ext = filename.lower().split(".")[-1]
+    is_pdf = ext == "pdf" or content_type == "application/pdf"
+
+    prompt_text = """Extract the key financial data from this invoice or screenshot.
 Return ONLY a JSON object, no markdown fences:
 {
   "invoice_number": "invoice number or null",
@@ -67,13 +54,69 @@ Rules:
 - All amounts as numbers
 - btw_rate: 21, 9, or 0
 - Use today's date if invoice_date not found
-- Keep description concise"""
-                }
+- Keep description concise
+- If this is a screenshot, extract whatever financial data is visible"""
+
+    if is_pdf:
+        content_block = {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": base64_data,
+            },
+        }
+    else:
+        media_type_map = {
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "png": "image/png",
+            "gif": "image/gif",
+            "webp": "image/webp",
+            "heic": "image/jpeg",
+            "heif": "image/jpeg",
+        }
+        media_type = media_type_map.get(ext, "image/jpeg")
+        if content_type.startswith("image/"):
+            media_type = content_type
+
+        if len(content) > 4 * 1024 * 1024:
+            try:
+                from PIL import Image as PILImage
+                import io
+                img = PILImage.open(io.BytesIO(content))
+                img.thumbnail((1920, 1920))
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=75)
+                content = buf.getvalue()
+                base64_data = base64.standard_b64encode(content).decode("utf-8")
+                media_type = "image/jpeg"
+            except Exception as e:
+                print(f"RESIZE ERROR: {e}")
+
+        content_block = {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": base64_data,
+            },
+        }
+
+    message = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=500,
+        messages=[{
+            "role": "user",
+            "content": [
+                content_block,
+                {"type": "text", "text": prompt_text}
             ],
         }],
     )
 
     raw = message.content[0].text.strip()
+    print(f"IMPORT PARSE RESPONSE: {raw}")
     return _extract_json(raw)
 
 
@@ -91,9 +134,10 @@ async def import_invoices(
         try:
             content = await file.read()
             filename = file.filename or "invoice.pdf"
-            print(f"IMPORTING: {filename}, size={len(content)}")
+            content_type = file.content_type or "application/pdf"
+            print(f"IMPORTING: {filename}, type={content_type}, size={len(content)}")
 
-            parsed = await _parse_invoice_pdf(content, filename)
+            parsed = await _parse_invoice_file(content, filename, content_type)
 
             invoice_date = parsed.get("invoice_date") or str(date.today())
             subtotal = float(parsed.get("subtotal_ex_btw") or 0)
@@ -101,7 +145,6 @@ async def import_invoices(
             total = float(parsed.get("total_incl_btw") or subtotal + btw_amount)
             btw_rate = int(parsed.get("btw_rate") or 21)
 
-            # Recalculate if amounts seem off
             if subtotal == 0 and total > 0:
                 subtotal = round(total / (1 + btw_rate / 100), 2)
                 btw_amount = round(total - subtotal, 2)
@@ -110,7 +153,7 @@ async def import_invoices(
             client_name = parsed.get("client_name") or "Unknown"
             description = parsed.get("description") or filename
 
-            result = supabase.table("invoices").insert({
+            supabase.table("invoices").insert({
                 "user_id": user_id,
                 "invoice_number": invoice_number,
                 "invoice_date": invoice_date,
