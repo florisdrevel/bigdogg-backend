@@ -58,7 +58,9 @@ async def send_invoice_email(invoice_id: str, request: Request):
 
         client_email = client.get("email") or invoice.get("client_email", "")
         if not client_email:
-            raise HTTPException(status_code=400, detail="Client has no email address")
+            raise HTTPException(
+                status_code=400, detail="Client has no email address"
+            )
 
         pdf_bytes = _generate_pdf(invoice, lines, profile, client, sender_email)
         pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
@@ -69,18 +71,34 @@ async def send_invoice_email(invoice_id: str, request: Request):
         due_date = invoice['due_date']
         client_name = client.get('contact_name', '')
         iban = profile.get('iban', '')
+        payment_link = invoice.get('payment_link')
 
         subject = f"Factuur {invoice_number} — {sender_name}"
+
+        # Build payment section based on whether link exists
+        if payment_link:
+            payment_section = f"""Wij verzoeken u vriendelijk het bedrag vóór {due_date} te voldoen.
+
+U kunt direct online betalen via de onderstaande betaallink:
+
+👉 {payment_link}
+
+Of maak het bedrag over naar:
+IBAN: {iban}
+Ten name van: {sender_name}
+Onder vermelding van: {invoice_number}"""
+        else:
+            payment_section = f"""Wij verzoeken u vriendelijk het bedrag vóór {due_date} over te maken naar:
+
+IBAN: {iban}
+Ten name van: {sender_name}
+Onder vermelding van: {invoice_number}"""
 
         body = f"""Beste {client_name},
 
 Hierbij ontvangt u factuur {invoice_number} voor een totaalbedrag van € {total}.
 
-Wij verzoeken u vriendelijk het bedrag vóór {due_date} over te maken naar:
-
-IBAN: {iban}
-Ten name van: {sender_name}
-Onder vermelding van: {invoice_number}
+{payment_section}
 
 De factuur is als PDF bijgevoegd bij deze e-mail.
 
