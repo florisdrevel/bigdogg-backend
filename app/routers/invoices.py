@@ -97,7 +97,6 @@ async def create_invoice(invoice: InvoiceCreate, request: Request):
         btw_amount = sum(l.quantity * l.unit_price_ex_btw * l.btw_rate / 100 for l in invoice.lines)
         total = subtotal + btw_amount
 
-        # Store client details on invoice for permanent reference
         client_result = supabase.table("clients")\
             .select("contact_name, email, company_name")\
             .eq("id", invoice.client_id)\
@@ -120,7 +119,9 @@ async def create_invoice(invoice: InvoiceCreate, request: Request):
             "total_incl_btw": round(total, 2),
             "notes": invoice.notes,
         }).execute()
+
         invoice_id = invoice_response.data[0]['id']
+
         lines_data = [{
             "invoice_id": invoice_id,
             "description": l.description,
@@ -130,7 +131,65 @@ async def create_invoice(invoice: InvoiceCreate, request: Request):
             "line_total_ex_btw": round(l.quantity * l.unit_price_ex_btw, 2),
         } for l in invoice.lines]
         supabase.table("invoice_lines").insert(lines_data).execute()
-        return {"invoice": invoice_response.data[0], "invoice_number": invoice_number}
+
+        # Auto-generate payment link if Stripe is connected
+        payment_link_url = None
+        try:
+            profile_result = supabase.table("user_profiles")\
+                .select("stripe_connect_account_id, stripe_connect_enabled, business_name, full_name")\
+                .eq("id", user_id)\
+                .execute()
+            profile = profile_result.data[0] if profile_result.data else {}
+            account_id = profile.get("stripe_connect_account_id")
+
+            if account_id and profile.get("stripe_connect_enabled"):
+                import stripe as stripe_lib
+                stripe_lib.api_key = settings.stripe_secret_key
+
+                business_name = profile.get("business_name") or profile.get("full_name") or "BigDogg"
+                total_cents = int(round(total, 2) * 100)
+
+                product = stripe_lib.Product.create(
+                    name=f"Factuur {invoice_number} — {business_name}",
+                    stripe_account=account_id,
+                )
+                price = stripe_lib.Price.create(
+                    product=product.id,
+                    unit_amount=total_cents,
+                    currency="eur",
+                    stripe_account=account_id,
+                )
+                payment_link = stripe_lib.PaymentLink.create(
+                    line_items=[{"price": price.id, "quantity": 1}],
+                    metadata={
+                        "invoice_id": invoice_id,
+                        "user_id": user_id,
+                        "invoice_number": invoice_number,
+                    },
+                    after_completion={
+                        "type": "hosted_confirmation",
+                        "hosted_confirmation": {
+                            "custom_message": f"Bedankt voor je betaling van factuur {invoice_number}."
+                        }
+                    },
+                    stripe_account=account_id,
+                )
+                payment_link_url = payment_link.url
+
+                supabase.table("invoices").update({
+                    "payment_link": payment_link_url,
+                    "payment_link_id": payment_link.id,
+                }).eq("id", invoice_id).execute()
+
+                print(f"Auto-generated payment link for invoice {invoice_number}")
+        except Exception as e:
+            print(f"Auto payment link failed (non-fatal): {e}")
+
+        return {
+            "invoice": invoice_response.data[0],
+            "invoice_number": invoice_number,
+            "payment_link": payment_link_url,
+        }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

@@ -1,35 +1,61 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <base href="/">
-
+  <base href="$FLUTTER_BASE_HREF">
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
-  <meta name="description" content="BigDogg — Boekhouding voor ZZP'ers">
-
-  <!-- iOS meta tags & icons -->
-  <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black">
-  <meta name="apple-mobile-web-app-title" content="BigDogg">
-  <link rel="apple-touch-icon" href="icons/Icon-192.png">
-
-  <!-- Favicon -->
-  <link rel="icon" type="image/png" href="favicon.png"/>
-
-  <!-- Material Icons font — local -->
-  <style>
-    @font-face {
-      font-family: 'MaterialIcons';
-      src: url('MaterialIcons-Regular.otf') format('opentype');
-      font-weight: normal;
-      font-style: normal;
-    }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <title>BigDogg</title>
+  <meta name="description" content="De slimste facturatietool voor Nederlandse ZZP'ers. Facturen, BTW, kosten en meer.">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="icons/Icon-192.png"/>
+  <link rel="icon" type="image/png" href="favicon.png"/>
+  <link rel="shortcut icon" href="favicon.png"/>
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/Icon-192.png"/>
+  
+  
+
+  <!-- Open Graph — controls how links look when shared -->
+  <meta property="og:title" content="BigDogg — Slim factureren voor ZZP'ers"/>
+  <meta property="og:description" content="Maak facturen in seconden met AI. BTW-rapporten, klantenbeheer en meer voor €7,99/maand."/>
+  <meta property="og:image" content="https://bigdogg.nl/icons/Icon-512.png"/>
+  <meta property="og:url" content="https://bigdogg.nl"/>
+  <meta property="og:type" content="website"/>
+  <meta property="og:site_name" content="BigDogg"/>
+
+  <!-- Twitter card -->
+  <meta name="twitter:card" content="summary"/>
+  <meta name="twitter:title" content="BigDogg — Slim factureren voor ZZP'ers"/>
+  <meta name="twitter:description" content="Maak facturen in seconden met AI. BTW-rapporten, klantenbeheer en meer voor €7,99/maand."/>
+  <meta name="twitter:image" content="https://bigdogg.nl/icons/Icon-512.png"/>
+
+  <!-- PWA -->
   <link rel="manifest" href="manifest.json">
+
+  <!-- Material Icons -->
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+
+  <script>
+    // The value below is injected by flutter build, do not touch.
+    const serviceWorkerVersion = null;
+  </script>
+  <script src="flutter.js" defer></script>
 </head>
 <body>
-  <script src="flutter_bootstrap.js" async></script>
+  <script>
+    window.addEventListener('load', function(ev) {
+      _flutter.loader.loadEntrypoint({
+        serviceWorker: {
+          serviceWorkerVersion: serviceWorkerVersion,
+        }
+      }).then(function(engineInitializer) {
+        return engineInitializer.initializeEngine();
+      }).then(function(appRunner) {
+        return appRunner.runApp();
+      });
+    });
+  </script>
 </body>
 </html>
