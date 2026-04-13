@@ -132,24 +132,34 @@ async def download_btw_report(
 
 
 async def _generate_btw_pdf(user_id, quarter, year, start, end, lang='nl'):
+    # Fetch all invoices in period
     invoices_result = supabase.table("invoices")\
-        .select("id, subtotal_ex_btw, btw_amount, status, invoice_date")\
+        .select("id, subtotal_ex_btw, btw_amount, status, invoice_date, is_imported")\
         .eq("user_id", user_id)\
         .in_("status", ["paid", "sent", "overdue"])\
         .gte("invoice_date", start.isoformat())\
         .lte("invoice_date", end.isoformat())\
         .execute()
 
-    invoice_ids = [inv['id'] for inv in invoices_result.data]
+    # Separate imported vs regular invoices
+    regular_invoice_ids = [
+        inv['id'] for inv in invoices_result.data
+        if not inv.get('is_imported', False)
+    ]
+    imported_invoices = [
+        inv for inv in invoices_result.data
+        if inv.get('is_imported', False)
+    ]
 
     lines_21 = []
     lines_9 = []
     lines_0 = []
 
-    if invoice_ids:
+    # Regular invoices — get from invoice_lines
+    if regular_invoice_ids:
         lines_result = supabase.table("invoice_lines")\
             .select("*")\
-            .in_("invoice_id", invoice_ids)\
+            .in_("invoice_id", regular_invoice_ids)\
             .execute()
 
         for line in lines_result.data:
@@ -166,6 +176,22 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end, lang='nl'):
     rev_9_ex = sum(float(l['line_total_ex_btw'] or 0) for l in lines_9)
     rev_9_btw = sum(float(l['line_total_ex_btw'] or 0) * 0.09 for l in lines_9)
     rev_0_ex = sum(float(l['line_total_ex_btw'] or 0) for l in lines_0)
+
+    # Imported invoices — use subtotal/btw directly from invoices table
+    for inv in imported_invoices:
+        subtotal = float(inv.get('subtotal_ex_btw') or 0)
+        btw = float(inv.get('btw_amount') or 0)
+        # Assume 21% for imported unless btw is 0
+        if btw == 0:
+            rev_0_ex += subtotal
+        else:
+            rate = round(btw / subtotal * 100) if subtotal > 0 else 21
+            if rate <= 10:
+                rev_9_ex += subtotal
+                rev_9_btw += btw
+            else:
+                rev_21_ex += subtotal
+                rev_21_btw += btw
 
     revenue_btw_total = round(rev_21_btw + rev_9_btw, 2)
 
@@ -206,7 +232,6 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end, lang='nl'):
     business_name = profile.get('business_name') or profile.get('full_name') or 'BigDogg'
     btw_number = profile.get('btw_number') or '—'
 
-    # Header
     report_title = _t(f"BTW Aangifte\nQ{quarter} {year}", f"VAT Return\nQ{quarter} {year}", lang)
     header_data = [[
         Paragraph(business_name, name_style),
@@ -221,7 +246,6 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end, lang='nl'):
     story.append(Spacer(1, 2*mm))
     story.append(HRFlowable(width="100%", thickness=3, color=GOLD, spaceAfter=4*mm))
 
-    # Meta
     meta_data = [[
         [Paragraph(_t('PERIODE', 'PERIOD', lang), label_style),
          Paragraph(f"{start.strftime('%d %B %Y')} — {end.strftime('%d %B %Y')}", value_style)],
@@ -236,7 +260,6 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end, lang='nl'):
     story.append(Spacer(1, 4*mm))
     story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
 
-    # Section 1
     story.append(Paragraph(
         _t("Sectie 1 — Omzet binnenland", "Section 1 — Domestic Revenue", lang),
         section_style
@@ -313,7 +336,6 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end, lang='nl'):
         explain_style
     ))
 
-    # Section 5
     story.append(Paragraph(
         _t("Sectie 5 — Voorbelasting (aftrekbare BTW)", "Section 5 — Input Tax (deductible VAT)", lang),
         section_style
@@ -362,7 +384,6 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end, lang='nl'):
         explain_style
     ))
 
-    # Summary
     story.append(Spacer(1, 4*mm))
     story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
     story.append(Paragraph(
@@ -410,7 +431,6 @@ async def _generate_btw_pdf(user_id, quarter, year, start, end, lang='nl'):
         explain_style
     ))
 
-    # Footer
     story.append(Spacer(1, 8*mm))
     story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
     story.append(Paragraph(

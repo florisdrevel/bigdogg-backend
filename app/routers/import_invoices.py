@@ -132,6 +132,7 @@ async def import_invoices(
 
     imported = []
     failed = []
+    duplicates = []
 
     for file in files:
         try:
@@ -146,9 +147,9 @@ async def import_invoices(
             subtotal = float(parsed.get("subtotal_ex_btw") or 0)
             btw_amount = float(parsed.get("btw_amount") or 0)
             total = float(parsed.get("total_incl_btw") or subtotal + btw_amount)
+            btw_rate = int(parsed.get("btw_rate") or 21)
 
             if subtotal == 0 and total > 0:
-                btw_rate = int(parsed.get("btw_rate") or 21)
                 subtotal = round(total / (1 + btw_rate / 100), 2)
                 btw_amount = round(total - subtotal, 2)
 
@@ -156,7 +157,21 @@ async def import_invoices(
             client_name = parsed.get("client_name") or "Unknown"
             description = parsed.get("description") or filename
 
-            # Calculate due date as 30 days after invoice date
+            # Duplicate check by invoice_number
+            existing = supabase.table("invoices")\
+                .select("id")\
+                .eq("user_id", user_id)\
+                .eq("invoice_number", invoice_number)\
+                .execute()
+
+            if existing.data:
+                duplicates.append({
+                    "filename": filename,
+                    "invoice_number": invoice_number,
+                    "reason": "Invoice number already exists"
+                })
+                continue
+
             try:
                 inv_date = date.fromisoformat(invoice_date)
                 due_date = str(inv_date + timedelta(days=30))
@@ -187,6 +202,99 @@ async def import_invoices(
 
         except Exception as e:
             print(f"IMPORT ERROR for {file.filename}: {e}")
+            failed.append({"filename": file.filename, "error": str(e)})
+
+    return {
+        "imported": imported,
+        "failed": failed,
+        "duplicates": duplicates,
+        "total_imported": len(imported),
+        "total_failed": len(failed),
+        "total_duplicates": len(duplicates),
+    }
+
+
+@router.get("/imported")
+async def get_imported_invoices(request: Request):
+    user_id = get_user_id(request)
+    try:
+        result = supabase.table("invoices")\
+            .select("id, invoice_number, invoice_date, client_name, subtotal_ex_btw, btw_amount, total_incl_btw, notes")\
+            .eq("user_id", user_id)\
+            .eq("is_imported", True)\
+            .order("invoice_date", desc=True)\
+            .execute()
+        return {"invoices": result.data}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/imported/{invoice_id}")
+async def delete_imported_invoice(invoice_id: str, request: Request):
+    user_id = get_user_id(request)
+    try:
+        supabase.table("invoices")\
+            .delete()\
+            .eq("id", invoice_id)\
+            .eq("user_id", user_id)\
+            .eq("is_imported", True)\
+            .execute()
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/import-expenses")
+async def import_expenses(
+    request: Request,
+    files: List[UploadFile] = File(...),
+):
+    user_id = get_user_id(request)
+
+    imported = []
+    failed = []
+
+    for file in files:
+        try:
+            content = await file.read()
+            filename = file.filename or "expense.pdf"
+            content_type = file.content_type or "application/pdf"
+            print(f"IMPORTING EXPENSE: {filename}, type={content_type}, size={len(content)}")
+
+            parsed = await _parse_invoice_file(content, filename, content_type)
+
+            expense_date = parsed.get("invoice_date") or str(date.today())
+            total = float(parsed.get("total_incl_btw") or 0)
+            btw_rate = int(parsed.get("btw_rate") or 21)
+            btw_amount = float(parsed.get("btw_amount") or 0)
+            amount_ex_btw = float(parsed.get("subtotal_ex_btw") or 0)
+
+            if amount_ex_btw == 0 and total > 0:
+                amount_ex_btw = round(total / (1 + btw_rate / 100), 2)
+                btw_amount = round(total - amount_ex_btw, 2)
+
+            description = parsed.get("description") or filename
+            client_name = parsed.get("client_name") or "Unknown"
+
+            supabase.table("expenses").insert({
+                "user_id": user_id,
+                "description": f"{description} ({client_name})",
+                "amount_ex_btw": amount_ex_btw,
+                "btw_amount": btw_amount,
+                "btw_rate": btw_rate,
+                "expense_date": expense_date,
+                "category": "general",
+            }).execute()
+
+            imported.append({
+                "filename": filename,
+                "description": description,
+                "total": total,
+                "date": expense_date,
+            })
+
+        except Exception as e:
+            print(f"IMPORT EXPENSE ERROR for {file.filename}: {e}")
             failed.append({"filename": file.filename, "error": str(e)})
 
     return {
