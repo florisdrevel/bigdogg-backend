@@ -34,7 +34,11 @@ app.include_router(pdf.router, prefix="/api/v1/pdf", tags=["pdf"])
 app.include_router(email.router, prefix="/api/v1/email", tags=["email"])
 app.include_router(reports.router, prefix="/api/v1/reports", tags=["reports"])
 app.include_router(annual_report.router, prefix="/api/v1/reports", tags=["annual_report"])
+# Invoice import routes (import-invoices, imported, delete imported)
 app.include_router(import_invoices.router, prefix="/api/v1/invoices", tags=["import"])
+# Expense import route
+app.include_router(import_invoices.router, prefix="/api/v1/expenses", tags=["import-expenses"])
+
 
 @app.get("/health")
 async def health():
@@ -51,5 +55,3 @@ else:
     @app.get("/")
     async def root():
         return {"message": "Bigdogg API is running", "version": "1.0.0"}
-
-
