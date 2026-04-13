@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from app.routers import auth, products, clients, invoices, ai, expenses, overview, profile, subscription, pdf, email, reports, annual_report
 from app.routers import import_invoices
+from app.routers import payments
 import os
 
 
@@ -38,6 +39,7 @@ app.include_router(annual_report.router, prefix="/api/v1/reports", tags=["annual
 app.include_router(import_invoices.router, prefix="/api/v1/invoices", tags=["import"])
 # Expense import route
 app.include_router(import_invoices.router, prefix="/api/v1/expenses", tags=["import-expenses"])
+app.include_router(payments.router, prefix="/api/v1/payments", tags=["payments"])
 
 
 @app.get("/health")
