@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Request
 from app.database import supabase
 from app.config import settings
 import stripe
+import json
 
 router = APIRouter()
 stripe.api_key = settings.stripe_secret_key
@@ -29,6 +30,42 @@ def get_profile(user_id: str) -> dict:
     return result.data[0] if result.data else {}
 
 
+def _mark_invoice_paid(invoice_id: str):
+    """Mark an invoice as paid and disable its payment link."""
+    try:
+        supabase.table("invoices")\
+            .update({"status": "paid"})\
+            .eq("id", invoice_id)\
+            .execute()
+
+        # Deactivate the payment link on Stripe so it can't be paid twice
+        inv = supabase.table("invoices")\
+            .select("payment_link_id, user_id")\
+            .eq("id", invoice_id)\
+            .single()\
+            .execute()
+
+        if inv.data and inv.data.get("payment_link_id"):
+            payment_link_id = inv.data["payment_link_id"]
+            user_id = inv.data["user_id"]
+            profile = get_profile(user_id)
+            account_id = profile.get("stripe_connect_account_id")
+            if account_id:
+                try:
+                    stripe.PaymentLink.modify(
+                        payment_link_id,
+                        active=False,
+                        stripe_account=account_id,
+                    )
+                    print(f"Payment link {payment_link_id} deactivated")
+                except Exception as e:
+                    print(f"Could not deactivate payment link: {e}")
+
+        print(f"Invoice {invoice_id} marked as paid")
+    except Exception as e:
+        print(f"Error marking invoice paid: {e}")
+
+
 @router.post("/connect")
 async def create_connect_link(request: Request):
     user_id = get_user_id(request)
@@ -37,7 +74,6 @@ async def create_connect_link(request: Request):
     try:
         account_id = profile.get("stripe_connect_account_id")
 
-        # Create account if doesn't exist
         if not account_id:
             account = stripe.Account.create(
                 type="express",
@@ -54,7 +90,6 @@ async def create_connect_link(request: Request):
                 .eq("id", user_id)\
                 .execute()
 
-        # Create onboarding link
         link = stripe.AccountLink.create(
             account=account_id,
             refresh_url=f"{APP_URL}/dashboard?stripe=refresh",
@@ -79,7 +114,6 @@ async def get_connect_status(request: Request):
     try:
         account = stripe.Account.retrieve(account_id)
         enabled = account.charges_enabled and account.payouts_enabled
-        # Update enabled status in DB
         supabase.table("user_profiles")\
             .update({"stripe_connect_enabled": enabled})\
             .eq("id", user_id)\
@@ -105,7 +139,6 @@ async def create_payment_link(invoice_id: str, request: Request):
         raise HTTPException(status_code=400, detail="No Stripe account connected")
 
     if not profile.get("stripe_connect_enabled"):
-        # Check live status
         try:
             account = stripe.Account.retrieve(account_id)
             if not account.charges_enabled:
@@ -117,7 +150,6 @@ async def create_payment_link(invoice_id: str, request: Request):
             raise HTTPException(status_code=400, detail=str(e))
 
     try:
-        # Get invoice
         inv_result = supabase.table("invoices")\
             .select("*")\
             .eq("id", invoice_id)\
@@ -139,16 +171,13 @@ async def create_payment_link(invoice_id: str, request: Request):
 
         total_cents = int(float(invoice["total_incl_btw"]) * 100)
         invoice_number = invoice["invoice_number"]
-        client_name = invoice.get("client_name") or "Client"
         business_name = profile.get("business_name") or profile.get("full_name") or "BigDogg"
 
-        # Create product on connected account
         product = stripe.Product.create(
             name=f"Factuur {invoice_number} — {business_name}",
             stripe_account=account_id,
         )
 
-        # Create price
         price = stripe.Price.create(
             product=product.id,
             unit_amount=total_cents,
@@ -156,7 +185,6 @@ async def create_payment_link(invoice_id: str, request: Request):
             stripe_account=account_id,
         )
 
-        # Create payment link
         payment_link = stripe.PaymentLink.create(
             line_items=[{"price": price.id, "quantity": 1}],
             metadata={
@@ -173,7 +201,6 @@ async def create_payment_link(invoice_id: str, request: Request):
             stripe_account=account_id,
         )
 
-        # Save to invoice
         supabase.table("invoices")\
             .update({
                 "payment_link": payment_link.url,
@@ -195,6 +222,79 @@ async def create_payment_link(invoice_id: str, request: Request):
 
 @router.post("/webhook/connect")
 async def connect_webhook(request: Request):
+    """
+    Handles Stripe Connect webhooks — payment completions on
+    connected accounts. Register this URL in Stripe Dashboard:
+    https://api.bigdogg.nl/api/v1/payments/webhook/connect
+    """
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+
+    try:
+        # Use connect webhook secret if set, fall back to main secret
+        secret = settings.stripe_connect_webhook_secret or settings.stripe_webhook_secret
+        if secret:
+            event = stripe.Webhook.construct_event(
+                payload, sig_header, secret
+            )
+        else:
+            event = json.loads(payload)
+    except stripe.error.SignatureVerificationError as e:
+        print(f"Connect webhook signature error: {e}")
+        return {"status": "ok"}
+    except Exception as e:
+        print(f"Connect webhook parse error: {e}")
+        return {"status": "ok"}
+
+    try:
+        event_type = event["type"]
+        data = event["data"]["object"]
+        if hasattr(data, 'to_dict'):
+            data = data.to_dict()
+        elif not isinstance(data, dict):
+            data = dict(data)
+
+        print(f"Connect webhook received: {event_type}")
+
+        # checkout.session.completed fires when client pays via payment link
+        if event_type == "checkout.session.completed":
+            metadata = data.get("metadata") or {}
+            invoice_id = metadata.get("invoice_id")
+            payment_status = data.get("payment_status")
+            print(f"Checkout completed — invoice_id={invoice_id}, payment_status={payment_status}")
+            if invoice_id and payment_status == "paid":
+                _mark_invoice_paid(invoice_id)
+
+        # payment_intent.succeeded fires for direct payments
+        elif event_type == "payment_intent.succeeded":
+            metadata = data.get("metadata") or {}
+            invoice_id = metadata.get("invoice_id")
+            print(f"PaymentIntent succeeded — invoice_id={invoice_id}")
+            if invoice_id:
+                _mark_invoice_paid(invoice_id)
+
+        # charge.succeeded as fallback
+        elif event_type == "charge.succeeded":
+            metadata = data.get("metadata") or {}
+            invoice_id = metadata.get("invoice_id")
+            print(f"Charge succeeded — invoice_id={invoice_id}")
+            if invoice_id:
+                _mark_invoice_paid(invoice_id)
+
+    except Exception as e:
+        print(f"Connect webhook processing error: {e}")
+
+    return {"status": "ok"}
+
+
+@router.post("/webhook")
+async def main_webhook(request: Request):
+    """
+    Handles main Stripe webhooks — BigDogg subscription payments.
+    This is the existing webhook for subscription management.
+    Register this URL in Stripe Dashboard:
+    https://api.bigdogg.nl/api/v1/payments/webhook
+    """
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
 
@@ -204,10 +304,12 @@ async def connect_webhook(request: Request):
                 payload, sig_header, settings.stripe_webhook_secret
             )
         else:
-            import json
             event = json.loads(payload)
+    except stripe.error.SignatureVerificationError as e:
+        print(f"Main webhook signature error: {e}")
+        return {"status": "ok"}
     except Exception as e:
-        print(f"Connect webhook error: {e}")
+        print(f"Main webhook parse error: {e}")
         return {"status": "ok"}
 
     try:
@@ -215,20 +317,79 @@ async def connect_webhook(request: Request):
         data = event["data"]["object"]
         if hasattr(data, 'to_dict'):
             data = data.to_dict()
+        elif not isinstance(data, dict):
+            data = dict(data)
 
-        print(f"Connect webhook: {event_type}")
+        print(f"Main webhook received: {event_type}")
 
-        if event_type == "payment_link.completed" or event_type == "checkout.session.completed":
+        if event_type == "checkout.session.completed":
             metadata = data.get("metadata") or {}
+            user_id = metadata.get("user_id")
             invoice_id = metadata.get("invoice_id")
+
+            # If this is an invoice payment (from connect), handle it
             if invoice_id:
-                supabase.table("invoices")\
-                    .update({"status": "paid"})\
-                    .eq("id", invoice_id)\
+                payment_status = data.get("payment_status")
+                if payment_status == "paid":
+                    _mark_invoice_paid(invoice_id)
+
+            # If this is a BigDogg subscription payment
+            elif user_id:
+                from datetime import datetime, timezone, timedelta
+                ends_at = datetime.now(timezone.utc) + timedelta(days=30)
+                existing = supabase.table("subscriptions")\
+                    .select("id")\
+                    .eq("user_id", user_id)\
                     .execute()
-                print(f"Invoice {invoice_id} marked as paid via payment link")
+                if existing.data:
+                    supabase.table("subscriptions")\
+                        .update({
+                            "status": "active",
+                            "stripe_customer_id": data.get("customer"),
+                            "stripe_subscription_id": data.get("subscription"),
+                            "subscription_ends_at": ends_at.isoformat(),
+                        })\
+                        .eq("user_id", user_id)\
+                        .execute()
+                else:
+                    supabase.table("subscriptions").insert({
+                        "user_id": user_id,
+                        "status": "active",
+                        "stripe_customer_id": data.get("customer"),
+                        "stripe_subscription_id": data.get("subscription"),
+                        "subscription_ends_at": ends_at.isoformat(),
+                    }).execute()
+
+        elif event_type == "invoice.payment_succeeded":
+            customer_id = data.get("customer")
+            if customer_id:
+                from datetime import datetime, timezone, timedelta
+                ends_at = datetime.now(timezone.utc) + timedelta(days=30)
+                supabase.table("subscriptions")\
+                    .update({
+                        "status": "active",
+                        "subscription_ends_at": ends_at.isoformat(),
+                    })\
+                    .eq("stripe_customer_id", customer_id)\
+                    .execute()
+
+        elif event_type in ("customer.subscription.deleted", "customer.subscription.paused"):
+            customer_id = data.get("customer")
+            if customer_id:
+                supabase.table("subscriptions")\
+                    .update({"status": "expired"})\
+                    .eq("stripe_customer_id", customer_id)\
+                    .execute()
+
+        elif event_type == "invoice.payment_failed":
+            customer_id = data.get("customer")
+            if customer_id:
+                supabase.table("subscriptions")\
+                    .update({"status": "expired"})\
+                    .eq("stripe_customer_id", customer_id)\
+                    .execute()
 
     except Exception as e:
-        print(f"Connect webhook processing error: {e}")
+        print(f"Main webhook processing error: {e}")
 
     return {"status": "ok"}
