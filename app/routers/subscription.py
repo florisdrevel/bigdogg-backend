@@ -11,7 +11,7 @@ router = APIRouter()
 stripe.api_key = settings.stripe_secret_key
 
 APP_URL = "https://bigdogg.nl"
-PRICE_AMOUNT = 799
+PRICE_AMOUNT = 999  # €9.99
 PRICE_CURRENCY = "eur"
 
 
@@ -29,6 +29,19 @@ def get_user_id(request: Request) -> str:
         return user.user.id
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+
+def require_active_paid(user_id: str):
+    """Raises 403 if user is not on active paid tier."""
+    result = supabase.table("subscriptions")\
+        .select("status")\
+        .eq("user_id", user_id)\
+        .execute()
+    if not result.data:
+        raise HTTPException(status_code=403, detail="paid_tier_required")
+    status = result.data[0].get("status")
+    if status != "active":
+        raise HTTPException(status_code=403, detail="paid_tier_required")
 
 
 @router.get("/status")
@@ -106,7 +119,6 @@ async def create_checkout(request: Request, data: CheckoutRequest = None):
             session_params["customer_email"] = email
 
         session = stripe.checkout.Session.create(**session_params)
-
         return {"checkout_url": session.url, "session_id": session.id}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -141,7 +153,6 @@ async def stripe_webhook(request: Request):
 
             metadata = session.get("metadata") or {}
             user_id = metadata.get("user_id")
-            print(f"Checkout completed for user_id: {user_id}")
 
             if user_id:
                 ends_at = datetime.now(timezone.utc) + timedelta(days=30)
@@ -186,7 +197,6 @@ async def stripe_webhook(request: Request):
                     })\
                     .eq("stripe_customer_id", customer_id)\
                     .execute()
-                print(f"Subscription renewed for customer: {customer_id}")
 
         elif event_type in ("customer.subscription.deleted", "customer.subscription.paused"):
             subscription = event["data"]["object"]
@@ -201,7 +211,6 @@ async def stripe_webhook(request: Request):
                     .update({"status": "expired"})\
                     .eq("stripe_customer_id", customer_id)\
                     .execute()
-                print(f"Subscription cancelled for customer: {customer_id}")
 
         elif event_type == "invoice.payment_failed":
             invoice = event["data"]["object"]
@@ -216,7 +225,6 @@ async def stripe_webhook(request: Request):
                     .update({"status": "expired"})\
                     .eq("stripe_customer_id", customer_id)\
                     .execute()
-                print(f"Payment failed for customer: {customer_id}")
 
     except Exception as e:
         print(f"Webhook processing error: {str(e)}")

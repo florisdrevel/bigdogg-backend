@@ -3,6 +3,7 @@ from typing import List
 from datetime import date, timedelta
 from app.database import supabase
 from app.config import settings
+from app.routers.subscription import require_active_paid
 import anthropic
 import base64
 import json
@@ -129,6 +130,7 @@ async def import_invoices(
     files: List[UploadFile] = File(...),
 ):
     user_id = get_user_id(request)
+    require_active_paid(user_id)
 
     imported = []
     failed = []
@@ -157,7 +159,6 @@ async def import_invoices(
             client_name = parsed.get("client_name") or "Unknown"
             description = parsed.get("description") or filename
 
-            # Duplicate check 1: same invoice number
             existing_by_number = supabase.table("invoices")\
                 .select("id")\
                 .eq("user_id", user_id)\
@@ -172,7 +173,6 @@ async def import_invoices(
                 })
                 continue
 
-            # Duplicate check 2: same date + same total
             existing_by_amount = supabase.table("invoices")\
                 .select("id")\
                 .eq("user_id", user_id)\
@@ -266,6 +266,7 @@ async def import_expenses(
     files: List[UploadFile] = File(...),
 ):
     user_id = get_user_id(request)
+    require_active_paid(user_id)
 
     imported = []
     failed = []
@@ -294,7 +295,6 @@ async def import_expenses(
             client_name = parsed.get("client_name") or "Unknown"
             full_description = f"{description} ({client_name})"
 
-            # Duplicate check: same date + same amount
             existing = supabase.table("expenses")\
                 .select("id")\
                 .eq("user_id", user_id)\

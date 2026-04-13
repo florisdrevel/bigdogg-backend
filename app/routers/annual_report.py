@@ -3,6 +3,7 @@ from fastapi.responses import Response
 from app.database import supabase
 from app.config import settings
 from app.routers.pdf import TEAL, GOLD, LIGHT_GREY, MID_GREY, TEXT_SECONDARY
+from app.routers.subscription import require_active_paid
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
@@ -18,7 +19,6 @@ import io
 router = APIRouter()
 resend.api_key = settings.resend_api_key
 
-
 def get_user_id(request: Request) -> str:
     auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
     if not auth_header:
@@ -29,7 +29,6 @@ def get_user_id(request: Request) -> str:
         return user.user.id
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-
 
 def get_year_data(user_id: str, year: int):
     quarters = []
@@ -102,7 +101,6 @@ def get_year_data(user_id: str, year: int):
         "invoice_count": sum(q['invoice_count'] for q in quarters),
     }
 
-
 async def get_ai_tax_tips(data_current, data_prev, profile, lang='nl'):
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
@@ -163,16 +161,14 @@ KVK: {profile.get('kvk_number', 'onbekend')}
 Geef de tips als een genummerde lijst (1. 2. 3. etc.), elk op een nieuwe regel. Max 800 woorden."""
 
     message = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-3-5-sonnet-20240620",
         max_tokens=1000,
         messages=[{"role": "user", "content": prompt}]
     )
     return message.content[0].text
 
-
 def _t(nl, en, lang):
     return en if lang == 'en' else nl
-
 
 def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
     buffer = io.BytesIO()
@@ -198,7 +194,6 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
     business_name = profile.get('business_name') or profile.get('full_name') or 'BigDogg'
     year = data_current['year']
 
-    # Header
     header_data = [[
         Paragraph(business_name, name_style),
         Paragraph(f"{_t('Jaarrapport', 'Annual Report', lang)} {year}\n{_t('Inkomstenbelasting', 'Income Tax', lang)}", number_style),
@@ -212,7 +207,6 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
     story.append(Spacer(1, 2*mm))
     story.append(HRFlowable(width="100%", thickness=3, color=GOLD, spaceAfter=4*mm))
 
-    # Meta
     meta_data = [[
         [Paragraph(_t('NAAM', 'NAME', lang), label_style),
          Paragraph(profile.get('full_name', '—'), value_style)],
@@ -227,7 +221,6 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
     story.append(Spacer(1, 4*mm))
     story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
 
-    # Year summary
     story.append(Paragraph(f"{_t('Jaaroverzicht', 'Year Summary', lang)} {year}", section_style))
 
     summary_rows = [
@@ -269,7 +262,6 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
     ]))
     story.append(sum_table)
 
-    # Quarter breakdown
     story.append(Paragraph(f"{_t('Kwartaaloverzicht', 'Quarterly Overview', lang)} {year}", section_style))
 
     q_rows = [[_t('Kwartaal', 'Quarter', lang), _t('Omzet', 'Revenue', lang),
@@ -300,7 +292,6 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
     ]))
     story.append(q_table)
 
-    # Expense categories
     if data_current['category_totals']:
         story.append(Paragraph(_t('Kostenverdeling', 'Expense Breakdown', lang), section_style))
         cat_labels_nl = {
@@ -342,22 +333,12 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
         ]))
         story.append(cat_table)
 
-    # IB aangifte guidance
-    story.append(Paragraph(
-        _t('IB Aangifte — Wat invullen?', 'Income Tax Return — What to fill in?', lang),
-        section_style
-    ))
+    story.append(Paragraph(_t('IB Aangifte — Wat invullen?', 'Income Tax Return — What to fill in?', lang), section_style))
     ib_data = [
         [_t('Rubriek', 'Field', lang), _t('Omschrijving', 'Description', lang), _t('Jouw bedrag', 'Your amount', lang)],
-        [_t('Omzet', 'Revenue', lang),
-         _t('Totale omzet exclusief BTW', 'Total revenue excluding VAT', lang),
-         f"€ {data_current['total_revenue']:,.2f}"],
-        [_t('Kosten', 'Costs', lang),
-         _t('Zakelijke kosten exclusief BTW', 'Business costs excluding VAT', lang),
-         f"€ {data_current['total_expenses']:,.2f}"],
-        [_t('Winst', 'Profit', lang),
-         _t('Omzet minus kosten (winst uit onderneming)', 'Revenue minus costs (business profit)', lang),
-         f"€ {data_current['total_profit']:,.2f}"],
+        [_t('Omzet', 'Revenue', lang), _t('Totale omzet exclusief BTW', 'Total revenue excluding VAT', lang), f"€ {data_current['total_revenue']:,.2f}"],
+        [_t('Kosten', 'Costs', lang), _t('Zakelijke kosten exclusief BTW', 'Business costs excluding VAT', lang), f"€ {data_current['total_expenses']:,.2f}"],
+        [_t('Winst', 'Profit', lang), _t('Omzet minus kosten (winst uit onderneming)', 'Revenue minus costs (business profit)', lang), f"€ {data_current['total_profit']:,.2f}"],
     ]
     ib_table = Table(ib_data, colWidths=[page_width*0.25, page_width*0.50, page_width*0.25])
     ib_table.setStyle(TableStyle([
@@ -388,16 +369,8 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
 
     story.append(Paragraph(ib_note, explain_style))
 
-    # AI Tax tips
-    story.append(Paragraph(
-        _t('Persoonlijke belastingtips voor jou', 'Personal tax tips for you', lang),
-        section_style
-    ))
-    story.append(Paragraph(
-        _t('Op basis van jouw cijfers heeft BigDogg de volgende tips voor je:',
-           'Based on your figures, BigDogg has the following tips for you:', lang),
-        body_style
-    ))
+    story.append(Paragraph(_t('Persoonlijke belastingtips voor jou', 'Personal tax tips for you', lang), section_style))
+    story.append(Paragraph(_t('Op basis van jouw cijfers heeft BigDogg de volgende tips voor je:', 'Based on your figures, BigDogg has the following tips for you:', lang), body_style))
     story.append(Spacer(1, 3*mm))
 
     for line in tax_tips.split('\n'):
@@ -406,7 +379,6 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
             story.append(Paragraph(line, tip_style))
             story.append(Spacer(1, 2*mm))
 
-    # Footer
     story.append(Spacer(1, 8*mm))
     story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
 
@@ -418,10 +390,8 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
                        "Dit rapport is indicatief. Raadpleeg een belastingadviseur voor je definitieve aangifte inkomstenbelasting.")
 
     story.append(Paragraph(footer_text, footer_style))
-
     doc.build(story)
     return buffer.getvalue()
-
 
 def _diff(current, prev):
     if prev == 0:
@@ -430,7 +400,6 @@ def _diff(current, prev):
     pct = round(diff / prev * 100, 1)
     sign = '+' if diff >= 0 else ''
     return f"{sign}{pct}%"
-
 
 @router.get("/annual/pdf")
 async def download_annual_report(
@@ -450,6 +419,9 @@ async def download_annual_report(
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
+    # Gate behind paid tier
+    require_active_paid(user_id)
+
     if not year:
         year = datetime.now().year - 1
 
@@ -468,7 +440,6 @@ async def download_annual_report(
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
-
 
 @router.post("/cron/annual")
 async def send_annual_reports(request: Request):
@@ -491,7 +462,6 @@ async def send_annual_reports(request: Request):
             profile = profile_result.data[0] if profile_result.data else {}
             name = profile.get('full_name') or email
 
-            # Default to Dutch for cron emails
             data_current = get_year_data(user_id, year)
             data_prev = get_year_data(user_id, year - 1)
             tax_tips = await get_ai_tax_tips(data_current, data_prev, profile, 'nl')
