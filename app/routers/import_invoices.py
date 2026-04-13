@@ -157,18 +157,34 @@ async def import_invoices(
             client_name = parsed.get("client_name") or "Unknown"
             description = parsed.get("description") or filename
 
-            # Duplicate check by invoice_number
-            existing = supabase.table("invoices")\
+            # Duplicate check 1: same invoice number
+            existing_by_number = supabase.table("invoices")\
                 .select("id")\
                 .eq("user_id", user_id)\
                 .eq("invoice_number", invoice_number)\
                 .execute()
 
-            if existing.data:
+            if existing_by_number.data:
                 duplicates.append({
                     "filename": filename,
                     "invoice_number": invoice_number,
                     "reason": "Invoice number already exists"
+                })
+                continue
+
+            # Duplicate check 2: same date + same total
+            existing_by_amount = supabase.table("invoices")\
+                .select("id")\
+                .eq("user_id", user_id)\
+                .eq("invoice_date", invoice_date)\
+                .eq("total_incl_btw", total)\
+                .execute()
+
+            if existing_by_amount.data:
+                duplicates.append({
+                    "filename": filename,
+                    "invoice_number": invoice_number,
+                    "reason": "Same date and amount already exists"
                 })
                 continue
 
@@ -278,11 +294,10 @@ async def import_expenses(
             client_name = parsed.get("client_name") or "Unknown"
             full_description = f"{description} ({client_name})"
 
-            # Duplicate check by description + date + amount
+            # Duplicate check: same date + same amount
             existing = supabase.table("expenses")\
                 .select("id")\
                 .eq("user_id", user_id)\
-                .eq("description", full_description)\
                 .eq("expense_date", expense_date)\
                 .eq("amount_ex_btw", amount_ex_btw)\
                 .execute()
@@ -291,7 +306,7 @@ async def import_expenses(
                 duplicates.append({
                     "filename": filename,
                     "description": full_description,
-                    "reason": "Expense already exists"
+                    "reason": "Same date and amount already exists"
                 })
                 continue
 
