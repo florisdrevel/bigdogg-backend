@@ -253,6 +253,7 @@ async def import_expenses(
 
     imported = []
     failed = []
+    duplicates = []
 
     for file in files:
         try:
@@ -275,10 +276,28 @@ async def import_expenses(
 
             description = parsed.get("description") or filename
             client_name = parsed.get("client_name") or "Unknown"
+            full_description = f"{description} ({client_name})"
+
+            # Duplicate check by description + date + amount
+            existing = supabase.table("expenses")\
+                .select("id")\
+                .eq("user_id", user_id)\
+                .eq("description", full_description)\
+                .eq("expense_date", expense_date)\
+                .eq("amount_ex_btw", amount_ex_btw)\
+                .execute()
+
+            if existing.data:
+                duplicates.append({
+                    "filename": filename,
+                    "description": full_description,
+                    "reason": "Expense already exists"
+                })
+                continue
 
             supabase.table("expenses").insert({
                 "user_id": user_id,
-                "description": f"{description} ({client_name})",
+                "description": full_description,
                 "amount_ex_btw": amount_ex_btw,
                 "btw_amount": btw_amount,
                 "btw_rate": btw_rate,
@@ -300,6 +319,8 @@ async def import_expenses(
     return {
         "imported": imported,
         "failed": failed,
+        "duplicates": duplicates,
         "total_imported": len(imported),
         "total_failed": len(failed),
+        "total_duplicates": len(duplicates),
     }
