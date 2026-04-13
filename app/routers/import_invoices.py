@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 from typing import List
-from datetime import date
+from datetime import date, timedelta
 from app.database import supabase
 from app.config import settings
 import anthropic
@@ -28,7 +28,6 @@ def _extract_json(text: str) -> dict:
     text = re.sub(r'^```(?:json)?\s*', '', text)
     text = re.sub(r'\s*```$', '', text)
     text = text.strip()
-    # Fix missing commas between fields (common Claude mistake)
     text = re.sub(r'"\s*\n\s*"', '",\n  "', text)
     text = re.sub(r'(\d)\s*\n\s*"', r'\1,\n  "', text)
     return json.loads(text)
@@ -147,9 +146,9 @@ async def import_invoices(
             subtotal = float(parsed.get("subtotal_ex_btw") or 0)
             btw_amount = float(parsed.get("btw_amount") or 0)
             total = float(parsed.get("total_incl_btw") or subtotal + btw_amount)
-            btw_rate = int(parsed.get("btw_rate") or 21)
 
             if subtotal == 0 and total > 0:
+                btw_rate = int(parsed.get("btw_rate") or 21)
                 subtotal = round(total / (1 + btw_rate / 100), 2)
                 btw_amount = round(total - subtotal, 2)
 
@@ -157,10 +156,18 @@ async def import_invoices(
             client_name = parsed.get("client_name") or "Unknown"
             description = parsed.get("description") or filename
 
+            # Calculate due date as 30 days after invoice date
+            try:
+                inv_date = date.fromisoformat(invoice_date)
+                due_date = str(inv_date + timedelta(days=30))
+            except Exception:
+                due_date = str(date.today() + timedelta(days=30))
+
             supabase.table("invoices").insert({
                 "user_id": user_id,
                 "invoice_number": invoice_number,
                 "invoice_date": invoice_date,
+                "due_date": due_date,
                 "client_name": client_name,
                 "subtotal_ex_btw": subtotal,
                 "btw_amount": btw_amount,
