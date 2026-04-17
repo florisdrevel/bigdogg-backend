@@ -89,7 +89,7 @@ def _generate_btw_pdf(profile: dict, financials: dict, year: int, quarter: int) 
     name_len = len(business_name)
     name_font_size = 28 if name_len <= 15 else 22 if name_len <= 22 else 18 if name_len <= 30 else 14
     name_style   = ParagraphStyle('Name',   fontName='Helvetica-Bold', fontSize=name_font_size, textColor=TEAL)
-    number_style = ParagraphStyle('Number', fontName='Helvetica-Bold', fontSize=20,             textColor=TEAL)
+    number_style = ParagraphStyle('Number', fontName='Helvetica-Bold', fontSize=14,             textColor=TEAL)
 
     header_data = [[
         Paragraph(business_name, name_style),
