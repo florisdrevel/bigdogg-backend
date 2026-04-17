@@ -14,4 +14,4 @@ stripe
 reportlab
 resend
 Pillow
-weasyprint
+fpdf2
