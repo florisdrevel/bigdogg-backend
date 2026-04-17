@@ -3,7 +3,7 @@ from fastapi.responses import Response
 from datetime import date
 from pydantic import BaseModel
 from app.database import supabase
-from app.routers.overview import get_quarter_dates, compute_financials, get_user_id
+from app.routers.overview import get_quarter_dates, get_user_id
 
 router = APIRouter()
 
