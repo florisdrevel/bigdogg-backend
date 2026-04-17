@@ -6,6 +6,16 @@ from app.database import supabase
 from app.routers.overview import get_quarter_dates, get_user_id
 
 router = APIRouter()
+def compute_financials(user_id: str, start_date: str, end_date: str) -> dict:
+    invoices = supabase.table("invoices").select("subtotal_ex_btw, btw_amount, total_incl_btw, status").eq("user_id", user_id).gte("invoice_date", start_date).lte("invoice_date", end_date).neq("status", "draft").execute()
+    expenses = supabase.table("expenses").select("amount_ex_btw, btw_amount").eq("user_id", user_id).gte("expense_date", start_date).lte("expense_date", end_date).execute()
+    revenue_ex_btw = sum(i["subtotal_ex_btw"] for i in invoices.data)
+    revenue_btw = sum(i["btw_amount"] for i in invoices.data)
+    expenses_ex_btw = sum(e["amount_ex_btw"] for e in expenses.data)
+    expenses_btw = sum(e["btw_amount"] for e in expenses.data)
+    return {"revenue_ex_btw": round(revenue_ex_btw, 2), "revenue_btw": round(revenue_btw, 2), "expenses_ex_btw": round(expenses_ex_btw, 2), "expenses_btw": round(expenses_btw, 2), "btw_to_pay": round(revenue_btw - expenses_btw, 2)}
+
+
 
 
 def validate_token(token: str) -> str:
