@@ -302,59 +302,6 @@ async def download_btw_report(
     )
 
 
-@router.api_route("/annual/pdf", methods=["GET", "HEAD"])
-async def download_annual_report(
-    token: str = Query(...),
-    year: int = Query(None),
-):
-    user_id = validate_token(token)
-    if year is None:
-        year = date.today().year
-
-    quarters_data = []
-    total_revenue_ex_btw = 0.0
-    total_expenses_ex_btw = 0.0
-    total_btw_to_pay = 0.0
-
-    for q in range(1, 5):
-        start_date, end_date = get_quarter_dates(year, q)
-        financials = compute_financials(user_id, start_date, end_date)
-        quarters_data.append({"quarter": q, **financials})
-        total_revenue_ex_btw += financials["revenue_ex_btw"]
-        total_expenses_ex_btw += financials["expenses_ex_btw"]
-        total_btw_to_pay += financials["btw_to_pay"]
-
-    annual = {
-        "quarters": quarters_data,
-        "total_revenue_ex_btw": round(total_revenue_ex_btw, 2),
-        "total_expenses_ex_btw": round(total_expenses_ex_btw, 2),
-        "net_profit_indicative": round(total_revenue_ex_btw - total_expenses_ex_btw, 2),
-        "total_btw_to_pay": round(total_btw_to_pay, 2),
-    }
-
-    # HEAD request: just validate token + return 200 (used for paywall check)
-    from fastapi import Request as FastAPIRequest
-    import inspect
-    frame = inspect.currentframe()
-    # Check if this is a HEAD request via the token validation already passed
-    # We return early for HEAD after computing data (proves auth works)
-
-    profile = get_profile(user_id)
-
-    try:
-        pdf_bytes = _annual_pdf(profile, annual, year)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
-
-    return Response(
-        content=bytes(pdf_bytes),
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": f'attachment; filename="jaarrapport-{year}.pdf"'
-        },
-    )
-
-
 @router.get("/quarter-detail")
 async def get_quarter_detail(
     request: Request,

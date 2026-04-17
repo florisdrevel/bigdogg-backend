@@ -401,7 +401,7 @@ def _diff(current, prev):
     sign = '+' if diff >= 0 else ''
     return f"{sign}{pct}%"
 
-@router.get("/annual/pdf")
+@router.api_route("/annual/pdf", methods=["GET", "HEAD"])
 async def download_annual_report(
     request: Request,
     token: str = Query(None),
