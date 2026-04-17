@@ -17,14 +17,19 @@ router = APIRouter()
 
 
 def compute_financials(user_id: str, start_date: str, end_date: str) -> dict:
-    invoices = supabase.table("invoices").select("subtotal_ex_btw, btw_amount, total_incl_btw, status").eq("user_id", user_id).gte("invoice_date", start_date).lte("invoice_date", end_date).neq("status", "draft").execute()
+    invoices = supabase.table("invoices").select("subtotal_ex_btw, btw_amount, btw_rate, total_incl_btw, status").eq("user_id", user_id).gte("invoice_date", start_date).lte("invoice_date", end_date).neq("status", "draft").execute()
     expenses = supabase.table("expenses").select("amount_ex_btw, btw_amount").eq("user_id", user_id).gte("expense_date", start_date).lte("expense_date", end_date).execute()
-    revenue_ex_btw = sum(float(i["subtotal_ex_btw"] or 0) for i in invoices.data)
+    # Split revenue by BTW rate: 1a = taxed (>0%), 3a = buitenland (0%)
+    revenue_1a = sum(float(i["subtotal_ex_btw"] or 0) for i in invoices.data if float(i.get("btw_rate") or 0) > 0)
+    revenue_3a = sum(float(i["subtotal_ex_btw"] or 0) for i in invoices.data if float(i.get("btw_rate") or 0) == 0)
+    revenue_ex_btw = round(revenue_1a + revenue_3a, 2)
     revenue_btw = sum(float(i["btw_amount"] or 0) for i in invoices.data)
     expenses_ex_btw = sum(float(e["amount_ex_btw"] or 0) for e in expenses.data)
     expenses_btw = sum(float(e["btw_amount"] or 0) for e in expenses.data)
     return {
         "revenue_ex_btw": round(revenue_ex_btw, 2),
+        "revenue_1a": round(revenue_1a, 2),
+        "revenue_3a": round(revenue_3a, 2),
         "revenue_btw": round(revenue_btw, 2),
         "expenses_ex_btw": round(expenses_ex_btw, 2),
         "expenses_btw": round(expenses_btw, 2),
@@ -123,8 +128,12 @@ def _generate_btw_pdf(profile: dict, financials: dict, year: int, quarter: int) 
         ["Rubriek", "Omschrijving", "Omzet ex BTW", "VAT/BTW"],
         ["1a",
          'Leveringen/diensten belast met 21%\nVul dit in bij "Omzet" op belastingdienst.nl',
-         f"\u20ac {financials['revenue_ex_btw']:,.2f}",
+         f"\u20ac {financials['revenue_1a']:,.2f}",
          f"\u20ac {financials['revenue_btw']:,.2f}"],
+        ["3a",
+         'Leveringen/diensten buiten NL (0% BTW)\nBijv. export naar EU of buiten EU - geen BTW verschuldigd',
+         f"\u20ac {financials['revenue_3a']:,.2f}",
+         f"\u20ac 0,00"],
     ]
     omzet_table = Table(omzet_data, colWidths=[page_width*0.10, page_width*0.50, page_width*0.20, page_width*0.20])
     omzet_table.setStyle(TableStyle([
