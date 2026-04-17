@@ -199,7 +199,7 @@ async def download_btw_report(
     )
 
 
-@router.get("/annual/pdf")
+@router.api_route("/annual/pdf", methods=["GET", "HEAD"])
 async def download_annual_report(
     token: str = Query(...),
     year: int = Query(None),
@@ -256,8 +256,8 @@ async def get_quarter_detail(
     """Return the invoices and expenses that make up a specific quarter."""
     user_id = get_user_id(request)
     start_date, end_date = get_quarter_dates(year, quarter)
-    start_str = start_date.isoformat()
-    end_str = end_date.isoformat()
+    start_str = start_date
+    end_str = end_date
 
     invoices_resp = (
         supabase.table("invoices")
