@@ -161,7 +161,7 @@ KVK: {profile.get('kvk_number', 'onbekend')}
 Geef de tips als een genummerde lijst (1. 2. 3. etc.), elk op een nieuwe regel. Max 800 woorden."""
 
     message = client.messages.create(
-        model="claude-3-5-sonnet-20240620",
+        model="claude-sonnet-4-5",
         max_tokens=1000,
         messages=[{"role": "user", "content": prompt}]
     )
