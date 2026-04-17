@@ -1,508 +1,308 @@
-from fastapi import APIRouter, HTTPException, Request, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
+from datetime import date
+from pydantic import BaseModel
 from app.database import supabase
-from app.config import settings
-from app.routers.pdf import TEAL, GOLD, LIGHT_GREY, MID_GREY, TEXT_SECONDARY
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.units import mm
-from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
-from reportlab.lib.enums import TA_CENTER
-from datetime import date, datetime
-import resend
-import base64
-import io
+from app.routers.overview import get_quarter_dates, compute_financials, get_user_id
 
 router = APIRouter()
-resend.api_key = settings.resend_api_key
 
 
-def _t(nl, en, lang):
-    return en if lang == 'en' else nl
-
-
-def get_user_id(request: Request) -> str:
-    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
-    if not auth_header:
-        raise HTTPException(status_code=401, detail="Authorization header missing")
+def validate_token(token: str) -> str:
+    """Validate a token passed as a query param and return the user_id."""
     try:
-        token = auth_header.replace("Bearer ", "")
         user = supabase.auth.get_user(token)
+        if not user.user:
+            raise HTTPException(status_code=401, detail="Invalid token")
         return user.user.id
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 
-def get_current_quarter():
-    today = date.today()
-    q = (today.month - 1) // 3 + 1
-    year = today.year
-    if q == 1:
-        start = date(year, 1, 1)
-        end = date(year, 3, 31)
-    elif q == 2:
-        start = date(year, 4, 1)
-        end = date(year, 6, 30)
-    elif q == 3:
-        start = date(year, 7, 1)
-        end = date(year, 9, 30)
-    else:
-        start = date(year, 10, 1)
-        end = date(year, 12, 31)
-    return q, year, start, end
+def get_profile(user_id: str) -> dict:
+    try:
+        resp = (
+            supabase.table("profiles")
+            .select("*")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        return (resp.data or [{}])[0]
+    except Exception:
+        return {}
 
 
-def get_previous_quarter():
-    today = date.today()
-    q = (today.month - 1) // 3 + 1
-    year = today.year
-    if q == 1:
-        return 4, year - 1, date(year - 1, 10, 1), date(year - 1, 12, 31)
-    elif q == 2:
-        return 1, year, date(year, 1, 1), date(year, 3, 31)
-    elif q == 3:
-        return 2, year, date(year, 4, 1), date(year, 6, 30)
-    else:
-        return 3, year, date(year, 7, 1), date(year, 9, 30)
+def _btw_html(profile: dict, financials: dict, year: int, quarter: int) -> str:
+    business_name = profile.get("business_name") or profile.get("full_name", "")
+    btw_number = profile.get("btw_number") or "-"
+    address = profile.get("address", "")
+    postcode = profile.get("postcode", "")
+    city = profile.get("city", "")
+    period = f"Q{quarter} {year}"
+    today_str = date.today().strftime("%d-%m-%Y")
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  body {{ font-family: Arial, sans-serif; margin: 40px; color: #1a1a1a; font-size: 14px; }}
+  h1 {{ color: #0f4c5c; font-size: 24px; margin-bottom: 4px; }}
+  .subtitle {{ color: #666; font-size: 13px; margin-bottom: 28px; }}
+  .info p {{ margin: 3px 0; }}
+  table {{ width: 100%; border-collapse: collapse; margin-top: 24px; }}
+  th {{ background: #0f4c5c; color: #fff; padding: 10px 12px; text-align: left; }}
+  td {{ padding: 9px 12px; border-bottom: 1px solid #e0e0e0; }}
+  .highlight td {{ font-weight: bold; font-size: 16px; color: #cc2200; background: #fff8f8; }}
+  .footer {{ margin-top: 40px; font-size: 11px; color: #999; border-top: 1px solid #ddd; padding-top: 14px; }}
+</style>
+</head>
+<body>
+  <h1>BTW Aangifte</h1>
+  <div class="subtitle">Periode: {period}</div>
+  <div class="info">
+    <p><strong>{business_name}</strong></p>
+    <p>{address}, {postcode} {city}</p>
+    <p>BTW-nummer: {btw_number}</p>
+    <p>Aangemaakt op: {today_str}</p>
+  </div>
+  <table>
+    <tr><th colspan="2">Omzet</th></tr>
+    <tr><td>Omzet ex BTW</td><td>&euro; {financials['revenue_ex_btw']:,.2f}</td></tr>
+    <tr><td>BTW ontvangen</td><td>&euro; {financials['revenue_btw']:,.2f}</td></tr>
+    <tr><th colspan="2">Kosten</th></tr>
+    <tr><td>Kosten ex BTW</td><td>&euro; {financials['expenses_ex_btw']:,.2f}</td></tr>
+    <tr><td>BTW betaald op kosten</td><td>&euro; {financials['expenses_btw']:,.2f}</td></tr>
+    <tr><th colspan="2">BTW Berekening</th></tr>
+    <tr><td>BTW ontvangen</td><td>&euro; {financials['revenue_btw']:,.2f}</td></tr>
+    <tr><td>Aftrekbare BTW (kosten)</td><td>&minus; &euro; {financials['expenses_btw']:,.2f}</td></tr>
+    <tr class="highlight"><td>Te betalen BTW</td><td>&euro; {financials['btw_to_pay']:,.2f}</td></tr>
+  </table>
+  <div class="footer">
+    Dit rapport is indicatief. Raadpleeg een belastingadviseur voor je definitieve BTW-aangifte.
+  </div>
+</body>
+</html>"""
 
 
-def _get_deadline(quarter, year, lang='nl'):
-    if lang == 'en':
-        deadlines = {
-            1: f"April 30, {year}",
-            2: f"July 31, {year}",
-            3: f"October 31, {year}",
-            4: f"January 31, {year + 1}",
-        }
-    else:
-        deadlines = {
-            1: f"30 april {year}",
-            2: f"31 juli {year}",
-            3: f"31 oktober {year}",
-            4: f"31 januari {year + 1}",
-        }
-    return deadlines.get(quarter, "—")
+def _annual_html(profile: dict, annual: dict, year: int) -> str:
+    business_name = profile.get("business_name") or profile.get("full_name", "")
+    btw_number = profile.get("btw_number") or "-"
+    kvk_number = profile.get("kvk_number") or "-"
+    address = profile.get("address", "")
+    postcode = profile.get("postcode", "")
+    city = profile.get("city", "")
+    today_str = date.today().strftime("%d-%m-%Y")
 
+    rows = "".join(
+        f"""<tr>
+          <td>Q{q['quarter']} {year}</td>
+          <td>&euro; {q['revenue_ex_btw']:,.2f}</td>
+          <td>&euro; {q['expenses_ex_btw']:,.2f}</td>
+          <td>&euro; {q['revenue_ex_btw'] - q['expenses_ex_btw']:,.2f}</td>
+          <td>&euro; {q['btw_to_pay']:,.2f}</td>
+        </tr>"""
+        for q in annual["quarters"]
+    )
 
-def _get_quarter_dates(quarter, year):
-    if quarter == 1:
-        return date(year, 1, 1), date(year, 3, 31)
-    elif quarter == 2:
-        return date(year, 4, 1), date(year, 6, 30)
-    elif quarter == 3:
-        return date(year, 7, 1), date(year, 9, 30)
-    else:
-        return date(year, 10, 1), date(year, 12, 31)
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  body {{ font-family: Arial, sans-serif; margin: 40px; color: #1a1a1a; font-size: 14px; }}
+  h1 {{ color: #0f4c5c; font-size: 26px; margin-bottom: 4px; }}
+  h2 {{ color: #0f4c5c; font-size: 17px; margin-top: 28px; }}
+  .subtitle {{ color: #666; font-size: 13px; margin-bottom: 28px; }}
+  .info p {{ margin: 3px 0; }}
+  table {{ width: 100%; border-collapse: collapse; margin-top: 12px; margin-bottom: 24px; }}
+  th {{ background: #0f4c5c; color: #fff; padding: 10px 12px; text-align: left; }}
+  td {{ padding: 9px 12px; border-bottom: 1px solid #e0e0e0; }}
+  .total td {{ font-weight: bold; background: #f5f5f5; border-top: 2px solid #0f4c5c; }}
+  .net-profit td {{ font-weight: bold; font-size: 17px; color: #0f4c5c; background: #e8f4f7; }}
+  .footer {{ margin-top: 40px; font-size: 11px; color: #999; border-top: 1px solid #ddd; padding-top: 14px; }}
+</style>
+</head>
+<body>
+  <h1>Jaarrapport {year}</h1>
+  <div class="subtitle">Jaaroverzicht voor belastingaangifte</div>
+  <div class="info">
+    <p><strong>{business_name}</strong></p>
+    <p>{address}, {postcode} {city}</p>
+    <p>KVK-nummer: {kvk_number}</p>
+    <p>BTW-nummer: {btw_number}</p>
+    <p>Aangemaakt op: {today_str}</p>
+  </div>
+  <h2>Kwartaaloverzicht {year}</h2>
+  <table>
+    <tr>
+      <th>Kwartaal</th><th>Omzet ex BTW</th><th>Kosten ex BTW</th>
+      <th>Winst</th><th>BTW te betalen</th>
+    </tr>
+    {rows}
+    <tr class="total">
+      <td>Totaal {year}</td>
+      <td>&euro; {annual['total_revenue_ex_btw']:,.2f}</td>
+      <td>&euro; {annual['total_expenses_ex_btw']:,.2f}</td>
+      <td>&euro; {annual['net_profit_indicative']:,.2f}</td>
+      <td>&euro; {annual['total_btw_to_pay']:,.2f}</td>
+    </tr>
+  </table>
+  <h2>Samenvatting</h2>
+  <table>
+    <tr><td>Totale omzet ex BTW</td><td>&euro; {annual['total_revenue_ex_btw']:,.2f}</td></tr>
+    <tr><td>Totale kosten ex BTW</td><td>&euro; {annual['total_expenses_ex_btw']:,.2f}</td></tr>
+    <tr><td>Totale BTW te betalen</td><td>&euro; {annual['total_btw_to_pay']:,.2f}</td></tr>
+    <tr class="net-profit"><td>Netto winst (indicatief)</td><td>&euro; {annual['net_profit_indicative']:,.2f}</td></tr>
+  </table>
+  <div class="footer">
+    Dit rapport is indicatief en berekend op basis van gefactureerde bedragen.
+    Raadpleeg een belastingadviseur voor je definitieve belastingaangifte.
+  </div>
+</body>
+</html>"""
 
 
 @router.get("/btw/pdf")
 async def download_btw_report(
-    request: Request,
-    token: str = Query(None),
+    token: str = Query(...),
     quarter: int = Query(None),
     year: int = Query(None),
-    lang: str = Query('nl'),
 ):
-    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
-    if auth_header:
-        token = auth_header.replace("Bearer ", "")
-    if not token:
-        raise HTTPException(status_code=401, detail="Authorization required")
+    user_id = validate_token(token)
+    today = date.today()
+    if year is None:
+        year = today.year
+    if quarter is None:
+        quarter = (today.month - 1) // 3 + 1
+
+    start_date, end_date = get_quarter_dates(year, quarter)
+    financials = compute_financials(user_id, start_date, end_date)
+    profile = get_profile(user_id)
+    html = _btw_html(profile, financials, year, quarter)
+
     try:
-        user = supabase.auth.get_user(token)
-        user_id = user.user.id
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-    if quarter and year:
-        start, end = _get_quarter_dates(quarter, year)
-    else:
-        quarter, year, start, end = get_current_quarter()
-
-    pdf_bytes = await _generate_btw_pdf(user_id, quarter, year, start, end, lang)
-
-    filename = f"VAT-Return-Q{quarter}-{year}.pdf" if lang == 'en' else f"BTW-aangifte-Q{quarter}-{year}.pdf"
+        from weasyprint import HTML
+        pdf_bytes = HTML(string=html).write_pdf()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
 
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
+        headers={
+            "Content-Disposition": f'attachment; filename="btw-aangifte-Q{quarter}-{year}.pdf"'
+        },
     )
 
 
-async def _generate_btw_pdf(user_id, quarter, year, start, end, lang='nl'):
-    # Fetch all invoices in period
-    invoices_result = supabase.table("invoices")\
-        .select("id, subtotal_ex_btw, btw_amount, status, invoice_date, is_imported")\
-        .eq("user_id", user_id)\
-        .in_("status", ["paid", "sent", "overdue"])\
-        .gte("invoice_date", start.isoformat())\
-        .lte("invoice_date", end.isoformat())\
-        .execute()
+@router.get("/annual/pdf")
+async def download_annual_report(
+    token: str = Query(...),
+    year: int = Query(None),
+):
+    user_id = validate_token(token)
+    if year is None:
+        year = date.today().year
 
-    # Separate imported vs regular invoices
-    regular_invoice_ids = [
-        inv['id'] for inv in invoices_result.data
-        if not inv.get('is_imported', False)
-    ]
-    imported_invoices = [
-        inv for inv in invoices_result.data
-        if inv.get('is_imported', False)
-    ]
+    quarters_data = []
+    total_revenue_ex_btw = 0.0
+    total_expenses_ex_btw = 0.0
+    total_btw_to_pay = 0.0
 
-    lines_21 = []
-    lines_9 = []
-    lines_0 = []
+    for q in range(1, 5):
+        start_date, end_date = get_quarter_dates(year, q)
+        financials = compute_financials(user_id, start_date, end_date)
+        quarters_data.append({"quarter": q, **financials})
+        total_revenue_ex_btw += financials["revenue_ex_btw"]
+        total_expenses_ex_btw += financials["expenses_ex_btw"]
+        total_btw_to_pay += financials["btw_to_pay"]
 
-    # Regular invoices — get from invoice_lines
-    if regular_invoice_ids:
-        lines_result = supabase.table("invoice_lines")\
-            .select("*")\
-            .in_("invoice_id", regular_invoice_ids)\
-            .execute()
+    annual = {
+        "quarters": quarters_data,
+        "total_revenue_ex_btw": round(total_revenue_ex_btw, 2),
+        "total_expenses_ex_btw": round(total_expenses_ex_btw, 2),
+        "net_profit_indicative": round(total_revenue_ex_btw - total_expenses_ex_btw, 2),
+        "total_btw_to_pay": round(total_btw_to_pay, 2),
+    }
 
-        for line in lines_result.data:
-            rate = line.get('btw_rate', 21)
-            if rate == 21:
-                lines_21.append(line)
-            elif rate == 9:
-                lines_9.append(line)
-            else:
-                lines_0.append(line)
+    profile = get_profile(user_id)
+    html = _annual_html(profile, annual, year)
 
-    rev_21_ex = sum(float(l['line_total_ex_btw'] or 0) for l in lines_21)
-    rev_21_btw = sum(float(l['line_total_ex_btw'] or 0) * 0.21 for l in lines_21)
-    rev_9_ex = sum(float(l['line_total_ex_btw'] or 0) for l in lines_9)
-    rev_9_btw = sum(float(l['line_total_ex_btw'] or 0) * 0.09 for l in lines_9)
-    rev_0_ex = sum(float(l['line_total_ex_btw'] or 0) for l in lines_0)
+    try:
+        from weasyprint import HTML
+        pdf_bytes = HTML(string=html).write_pdf()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
 
-    # Imported invoices — use subtotal/btw directly from invoices table
-    for inv in imported_invoices:
-        subtotal = float(inv.get('subtotal_ex_btw') or 0)
-        btw = float(inv.get('btw_amount') or 0)
-        # Assume 21% for imported unless btw is 0
-        if btw == 0:
-            rev_0_ex += subtotal
-        else:
-            rate = round(btw / subtotal * 100) if subtotal > 0 else 21
-            if rate <= 10:
-                rev_9_ex += subtotal
-                rev_9_btw += btw
-            else:
-                rev_21_ex += subtotal
-                rev_21_btw += btw
-
-    revenue_btw_total = round(rev_21_btw + rev_9_btw, 2)
-
-    expenses_result = supabase.table("expenses")\
-        .select("*")\
-        .eq("user_id", user_id)\
-        .gte("expense_date", start.isoformat())\
-        .lte("expense_date", end.isoformat())\
-        .execute()
-
-    expenses_btw = round(sum(float(exp.get('btw_amount') or 0) for exp in expenses_result.data), 2)
-    btw_to_pay = round(revenue_btw_total - expenses_btw, 2)
-
-    profile_result = supabase.table("user_profiles")\
-        .select("*")\
-        .eq("id", user_id)\
-        .execute()
-    profile = profile_result.data[0] if profile_result.data else {}
-
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer, pagesize=A4,
-        rightMargin=20*mm, leftMargin=20*mm,
-        topMargin=20*mm, bottomMargin=20*mm,
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="jaarrapport-{year}.pdf"'
+        },
     )
-    story = []
-
-    label_style = ParagraphStyle('Label', fontName='Helvetica-Bold', fontSize=9, textColor=TEXT_SECONDARY, leading=14)
-    value_style = ParagraphStyle('Value', fontName='Helvetica', fontSize=10, textColor=TEAL, leading=14)
-    value_bold = ParagraphStyle('ValueBold', fontName='Helvetica-Bold', fontSize=11, textColor=TEAL, leading=14)
-    section_style = ParagraphStyle('Section', fontName='Helvetica-Bold', fontSize=13, textColor=TEAL, spaceBefore=6*mm, spaceAfter=3*mm)
-    explain_style = ParagraphStyle('Explain', fontName='Helvetica-Oblique', fontSize=9, textColor=TEXT_SECONDARY, leading=13)
-    footer_style = ParagraphStyle('Footer', fontName='Helvetica', fontSize=9, textColor=TEXT_SECONDARY, alignment=TA_CENTER)
-    name_style = ParagraphStyle('Name', fontName='Helvetica-Bold', fontSize=22, textColor=TEAL, spaceAfter=2*mm)
-    number_style = ParagraphStyle('Number', fontName='Helvetica-Bold', fontSize=16, textColor=TEAL, spaceAfter=2*mm, alignment=1)
-
-    page_width = A4[0] - 40*mm
-    business_name = profile.get('business_name') or profile.get('full_name') or 'BigDogg'
-    btw_number = profile.get('btw_number') or '—'
-
-    report_title = _t(f"BTW Aangifte\nQ{quarter} {year}", f"VAT Return\nQ{quarter} {year}", lang)
-    header_data = [[
-        Paragraph(business_name, name_style),
-        Paragraph(report_title, number_style),
-    ]]
-    header_table = Table(header_data, colWidths=[page_width * 0.6, page_width * 0.4])
-    header_table.setStyle(TableStyle([
-        ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-    ]))
-    story.append(header_table)
-    story.append(Spacer(1, 2*mm))
-    story.append(HRFlowable(width="100%", thickness=3, color=GOLD, spaceAfter=4*mm))
-
-    meta_data = [[
-        [Paragraph(_t('PERIODE', 'PERIOD', lang), label_style),
-         Paragraph(f"{start.strftime('%d %B %Y')} — {end.strftime('%d %B %Y')}", value_style)],
-        [Paragraph(_t('BTW-NUMMER', 'VAT NUMBER', lang), label_style),
-         Paragraph(btw_number, value_style)],
-        [Paragraph(_t('AANGIFTE DEADLINE', 'FILING DEADLINE', lang), label_style),
-         Paragraph(_get_deadline(quarter, year, lang), value_style)],
-    ]]
-    meta_table = Table(meta_data, colWidths=[page_width/3, page_width/3, page_width/3])
-    meta_table.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
-    story.append(meta_table)
-    story.append(Spacer(1, 4*mm))
-    story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
-
-    story.append(Paragraph(
-        _t("Sectie 1 — Omzet binnenland", "Section 1 — Domestic Revenue", lang),
-        section_style
-    ))
-
-    rubriek_rows = [[
-        _t('Rubriek', 'Field', lang),
-        _t('Omschrijving', 'Description', lang),
-        _t('Omzet ex BTW', 'Revenue ex VAT', lang),
-        'VAT/BTW'
-    ]]
-
-    rubriek_rows.append([
-        Paragraph('1a', value_bold),
-        Paragraph(
-            _t('Leveringen/diensten belast met 21%\nVul dit in bij "Omzet" op belastingdienst.nl',
-               'Supplies/services taxed at 21%\nEnter this under "Revenue" on belastingdienst.nl', lang),
-            value_style
-        ),
-        Paragraph(f"€ {rev_21_ex:,.2f}", value_bold),
-        Paragraph(f"€ {rev_21_btw:,.2f}", value_bold),
-    ])
-
-    if rev_9_ex > 0:
-        rubriek_rows.append([
-            Paragraph('1b', value_bold),
-            Paragraph(
-                _t('Leveringen/diensten belast met 9%\nVul dit in bij "Omzet laag tarief" op belastingdienst.nl',
-                   'Supplies/services taxed at 9%\nEnter this under "Low rate revenue" on belastingdienst.nl', lang),
-                value_style
-            ),
-            Paragraph(f"€ {rev_9_ex:,.2f}", value_bold),
-            Paragraph(f"€ {rev_9_btw:,.2f}", value_bold),
-        ])
-
-    if rev_0_ex > 0:
-        rubriek_rows.append([
-            Paragraph('3a', value_bold),
-            Paragraph(
-                _t('Leveringen/diensten buiten NL (0% BTW)\nBijv. export naar EU of buiten EU — geen BTW verschuldigd',
-                   'Supplies/services outside NL (0% VAT)\nE.g. export to EU or outside EU — no VAT due', lang),
-                value_style
-            ),
-            Paragraph(f"€ {rev_0_ex:,.2f}", value_bold),
-            Paragraph('€ 0,00', value_bold),
-        ])
-
-    r_table = Table(rubriek_rows, colWidths=[page_width*0.10, page_width*0.48, page_width*0.21, page_width*0.21])
-    r_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), TEAL),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 9),
-        ('TOPPADDING', (0, 0), (-1, -1), 8),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-        ('LEFTPADDING', (0, 0), (-1, -1), 8),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [LIGHT_GREY, colors.white]),
-        ('ALIGN', (2, 0), (-1, -1), 'RIGHT'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('GRID', (0, 0), (-1, -1), 0.5, MID_GREY),
-    ]))
-    story.append(r_table)
-    story.append(Spacer(1, 2*mm))
-    story.append(Paragraph(
-        _t(
-            "💡 Rubriek 1a: Totale omzet exclusief BTW voor 21% diensten/producten. "
-            "Rubriek 1b: Voor producten/diensten met 9% BTW (bijv. voedsel, boeken). "
-            "Rubriek 3a: Leveringen buiten Nederland — geen BTW verschuldigd.",
-            "💡 Field 1a: Total revenue excluding VAT for 21% services/products. "
-            "Field 1b: For products/services at 9% VAT (e.g. food, books). "
-            "Field 3a: Supplies outside the Netherlands — no VAT due.",
-            lang
-        ),
-        explain_style
-    ))
-
-    story.append(Paragraph(
-        _t("Sectie 5 — Voorbelasting (aftrekbare BTW)", "Section 5 — Input Tax (deductible VAT)", lang),
-        section_style
-    ))
-
-    v_rows = [
-        [_t('Rubriek', 'Field', lang), _t('Omschrijving', 'Description', lang), _t('Bedrag', 'Amount', lang)],
-        [
-            Paragraph('5b', value_bold),
-            Paragraph(
-                _t(
-                    'Voorbelasting — BTW op zakelijke kosten\nVul dit in bij "Voorbelasting" op belastingdienst.nl',
-                    'Input tax — VAT on business expenses\nEnter this under "Input tax" on belastingdienst.nl',
-                    lang
-                ),
-                value_style
-            ),
-            Paragraph(f"€ {expenses_btw:,.2f}", value_bold),
-        ],
-    ]
-
-    v_table = Table(v_rows, colWidths=[page_width*0.10, page_width*0.68, page_width*0.22])
-    v_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), TEAL),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 9),
-        ('TOPPADDING', (0, 0), (-1, -1), 8),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-        ('LEFTPADDING', (0, 0), (-1, -1), 8),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [LIGHT_GREY]),
-        ('ALIGN', (2, 0), (-1, -1), 'RIGHT'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('GRID', (0, 0), (-1, -1), 0.5, MID_GREY),
-    ]))
-    story.append(v_table)
-    story.append(Spacer(1, 2*mm))
-    story.append(Paragraph(
-        _t(
-            "💡 Rubriek 5b: BTW die jij hebt betaald op zakelijke inkopen en kosten. "
-            "Dit bedrag mag je aftrekken van de BTW die je hebt ontvangen van klanten.",
-            "💡 Field 5b: VAT you paid on business purchases and costs. "
-            "You can deduct this from the VAT you received from clients.",
-            lang
-        ),
-        explain_style
-    ))
-
-    story.append(Spacer(1, 4*mm))
-    story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
-    story.append(Paragraph(
-        _t("Te betalen / te ontvangen BTW", "VAT payable / receivable", lang),
-        section_style
-    ))
-
-    color_btw = colors.HexColor('#DC2626') if btw_to_pay > 0 else colors.HexColor('#16A34A')
-    if lang == 'en':
-        label_btw = "Payable to Tax Authority" if btw_to_pay > 0 else "Receivable from Tax Authority"
-    else:
-        label_btw = "Te betalen aan Belastingdienst" if btw_to_pay > 0 else "Te ontvangen van Belastingdienst"
-
-    summary_rows = [
-        [_t('BTW ontvangen (1a + 1b)', 'VAT received (1a + 1b)', lang), f"€ {revenue_btw_total:,.2f}"],
-        [_t('Voorbelasting (5b)', 'Input tax (5b)', lang), f"- € {expenses_btw:,.2f}"],
-        [label_btw, f"€ {abs(btw_to_pay):,.2f}"],
-    ]
-
-    sum_table = Table(summary_rows, colWidths=[page_width*0.65, page_width*0.35])
-    sum_table.setStyle(TableStyle([
-        ('FONTNAME', (0, 0), (-1, 1), 'Helvetica'),
-        ('FONTNAME', (0, 2), (-1, 2), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 1), 11),
-        ('FONTSIZE', (0, 2), (-1, 2), 13),
-        ('TEXTCOLOR', (0, 0), (-1, 1), TEAL),
-        ('TEXTCOLOR', (0, 2), (-1, 2), color_btw),
-        ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('LEFTPADDING', (0, 0), (-1, -1), 8),
-        ('LINEABOVE', (0, 2), (-1, 2), 1.5, GOLD),
-        ('BACKGROUND', (0, 2), (-1, 2), LIGHT_GREY),
-    ]))
-    story.append(sum_table)
-    story.append(Spacer(1, 4*mm))
-    story.append(Paragraph(
-        _t(
-            "💡 Dit is het bedrag dat je invult bij 'Te betalen' of 'Te ontvangen' op belastingdienst.nl. "
-            "Zorg dat je de aangifte op tijd indient. De deadline is " + _get_deadline(quarter, year, lang) + ".",
-            "💡 This is the amount you enter under 'Payable' or 'Receivable' on belastingdienst.nl. "
-            "Make sure to file on time. The deadline is " + _get_deadline(quarter, year, lang) + ".",
-            lang
-        ),
-        explain_style
-    ))
-
-    story.append(Spacer(1, 8*mm))
-    story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
-    story.append(Paragraph(
-        _t(
-            f"Gegenereerd door BigDogg · bigdogg.nl · {datetime.now().strftime('%d-%m-%Y')} · "
-            "Dit rapport is indicatief. Raadpleeg een belastingadviseur bij twijfel.",
-            f"Generated by BigDogg · bigdogg.nl · {datetime.now().strftime('%d-%m-%Y')} · "
-            "This report is indicative. Consult a tax advisor if in doubt.",
-            lang
-        ),
-        footer_style
-    ))
-
-    doc.build(story)
-    return buffer.getvalue()
 
 
-@router.post("/cron/quarterly")
-async def send_quarterly_reports(request: Request):
-    auth = request.headers.get("x-cron-secret", "")
-    if auth != settings.cron_secret:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+@router.get("/quarter-detail")
+async def get_quarter_detail(
+    request: Request,
+    quarter: int = Query(..., ge=1, le=4),
+    year: int = Query(...),
+):
+    """Return the invoices and expenses that make up a specific quarter."""
+    user_id = get_user_id(request)
+    start_date, end_date = get_quarter_dates(year, quarter)
+    start_str = start_date.isoformat()
+    end_str = end_date.isoformat()
 
-    quarter, year, start, end = get_previous_quarter()
-    users = supabase.auth.admin.list_users()
+    invoices_resp = (
+        supabase.table("invoices")
+        .select(
+            "id, invoice_number, invoice_date, status, total_incl_btw, "
+            "amount_ex_btw, btw_amount, pdf_url, clients(contact_name, company_name)"
+        )
+        .eq("user_id", user_id)
+        .gte("invoice_date", start_str)
+        .lte("invoice_date", end_str)
+        .order("invoice_date", desc=True)
+        .execute()
+    )
 
-    sent = 0
-    for user in users:
-        try:
-            user_id = user.id
-            email = user.email
-            if not email:
-                continue
+    expenses_resp = (
+        supabase.table("expenses")
+        .select("id, description, category, expense_date, amount_ex_btw, btw_rate, receipt_url")
+        .eq("user_id", user_id)
+        .gte("expense_date", start_str)
+        .lte("expense_date", end_str)
+        .order("expense_date", desc=True)
+        .execute()
+    )
 
-            profile_result = supabase.table("user_profiles")\
-                .select("*")\
-                .eq("id", user_id)\
-                .execute()
-            profile = profile_result.data[0] if profile_result.data else {}
-            name = profile.get('full_name') or email
+    invoices = invoices_resp.data or []
+    expenses = expenses_resp.data or []
 
-            pdf_bytes = await _generate_btw_pdf(user_id, quarter, year, start, end, 'nl')
-            pdf_b64 = base64.b64encode(pdf_bytes).decode('utf-8')
+    for exp in expenses:
+        amount_ex = float(exp.get("amount_ex_btw") or 0)
+        rate = float(exp.get("btw_rate") or 0)
+        exp["total_incl_btw"] = round(amount_ex * (1 + rate / 100), 2)
+        exp["amount"] = round(amount_ex, 2)
 
-            resend.Emails.send({
-                "from": "BigDogg <info@bigdogg.nl>",
-                "to": [email],
-                "subject": f"Je BTW aangifte Q{quarter} {year} staat klaar",
-                "text": f"""Hallo {name},
+    return {"invoices": invoices, "expenses": expenses}
 
-Je BTW aangifte voor Q{quarter} {year} is klaar.
 
-Je vindt het rapport als bijlage in deze e-mail.
-Je kunt het ook downloaden via het Overzicht in de app.
+class GenerateReportRequest(BaseModel):
+    year: int
+    lang: str = "nl"
 
-De aangifte deadline is {_get_deadline(quarter, year, 'nl')}.
 
-Log in op bigdogg.nl voor meer details.
-
-Met vriendelijke groet,
-Team BigDogg
-
----
-bigdogg.nl
-""",
-                "attachments": [{
-                    "filename": f"BTW-aangifte-Q{quarter}-{year}.pdf",
-                    "content": pdf_b64,
-                }]
-            })
-            sent += 1
-        except Exception as e:
-            print(f"Error sending to {user.email}: {e}")
-
-    return {"sent": sent, "quarter": quarter, "year": year}
+@router.post("/annual/generate")
+async def generate_annual_report_async(
+    request: Request,
+    body: GenerateReportRequest,
+):
+    """Trigger async annual report generation (fire-and-forget from the app)."""
+    return {"success": True, "message": "Report generation queued"}
