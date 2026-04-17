@@ -14,3 +14,4 @@ stripe
 reportlab
 resend
 Pillow
+weasyprint
