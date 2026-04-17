@@ -306,3 +306,4 @@ async def generate_annual_report_async(
 ):
     """Trigger async annual report generation (fire-and-forget from the app)."""
     return {"success": True, "message": "Report generation queued"}
+
