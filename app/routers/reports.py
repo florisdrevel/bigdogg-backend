@@ -4,7 +4,14 @@ from datetime import date
 from pydantic import BaseModel
 from app.database import supabase
 from app.routers.overview import get_quarter_dates, get_user_id
-from fpdf import FPDF
+from app.routers.pdf import TEAL, GOLD, LIGHT_GREY, MID_GREY, TEXT_SECONDARY
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+from reportlab.lib.enums import TA_CENTER
+import io
 
 router = APIRouter()
 
@@ -12,10 +19,10 @@ router = APIRouter()
 def compute_financials(user_id: str, start_date: str, end_date: str) -> dict:
     invoices = supabase.table("invoices").select("subtotal_ex_btw, btw_amount, total_incl_btw, status").eq("user_id", user_id).gte("invoice_date", start_date).lte("invoice_date", end_date).neq("status", "draft").execute()
     expenses = supabase.table("expenses").select("amount_ex_btw, btw_amount").eq("user_id", user_id).gte("expense_date", start_date).lte("expense_date", end_date).execute()
-    revenue_ex_btw = sum(i["subtotal_ex_btw"] for i in invoices.data)
-    revenue_btw = sum(i["btw_amount"] for i in invoices.data)
-    expenses_ex_btw = sum(e["amount_ex_btw"] for e in expenses.data)
-    expenses_btw = sum(e["btw_amount"] for e in expenses.data)
+    revenue_ex_btw = sum(float(i["subtotal_ex_btw"] or 0) for i in invoices.data)
+    revenue_btw = sum(float(i["btw_amount"] or 0) for i in invoices.data)
+    expenses_ex_btw = sum(float(e["amount_ex_btw"] or 0) for e in expenses.data)
+    expenses_btw = sum(float(e["btw_amount"] or 0) for e in expenses.data)
     return {
         "revenue_ex_btw": round(revenue_ex_btw, 2),
         "revenue_btw": round(revenue_btw, 2),
@@ -40,9 +47,9 @@ def validate_token(token: str) -> str:
 def get_profile(user_id: str) -> dict:
     try:
         resp = (
-            supabase.table("profiles")
+            supabase.table("user_profiles")
             .select("*")
-            .eq("user_id", user_id)
+            .eq("id", user_id)
             .limit(1)
             .execute()
         )
@@ -51,224 +58,171 @@ def get_profile(user_id: str) -> dict:
         return {}
 
 
-# ── Colours ───────────────────────────────────────────────────────────────────
-TEAL   = (15, 76, 92)    # #0f4c5c
-WHITE  = (255, 255, 255)
-LIGHT  = (245, 245, 245)
-RED    = (204, 34, 0)
-GREY   = (100, 100, 100)
-BLACK  = (26, 26, 26)
+def _generate_btw_pdf(profile: dict, financials: dict, year: int, quarter: int) -> bytes:
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        rightMargin=20*mm, leftMargin=20*mm,
+        topMargin=20*mm, bottomMargin=20*mm,
+    )
+    story = []
 
+    page_width = A4[0] - 40*mm
 
-def _money(v: float) -> str:
-    return f"EUR {v:,.2f}"
+    label_style  = ParagraphStyle('Label', fontName='Helvetica-Bold', fontSize=8,  textColor=TEXT_SECONDARY, leading=12)
+    value_style  = ParagraphStyle('Value', fontName='Helvetica',      fontSize=10, textColor=TEAL, leading=14)
+    value_bold   = ParagraphStyle('VBold', fontName='Helvetica-Bold', fontSize=10, textColor=TEAL, leading=14)
+    section_style = ParagraphStyle('Section', fontName='Helvetica-Bold', fontSize=12, textColor=TEAL, spaceBefore=4*mm, spaceAfter=3*mm)
 
-
-def _btw_pdf(profile: dict, financials: dict, year: int, quarter: int) -> bytes:
-    business_name = profile.get("business_name") or profile.get("full_name", "") or "-"
+    business_name = profile.get("business_name") or profile.get("full_name") or ""
     btw_number    = profile.get("btw_number") or "-"
-    address       = profile.get("address", "")
-    postcode      = profile.get("postcode", "")
-    city          = profile.get("city", "")
-    today_str     = date.today().strftime("%d-%m-%Y")
-    period        = f"Q{quarter} {year}"
-
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_margins(20, 20, 20)
-    pdf.set_auto_page_break(auto=True, margin=20)
-
-    # Header bar
-    pdf.set_fill_color(*TEAL)
-    pdf.rect(0, 0, 210, 28, "F")
-    pdf.set_text_color(*WHITE)
-    pdf.set_font("Helvetica", "B", 18)
-    pdf.set_xy(20, 8)
-    pdf.cell(0, 10, "BTW Aangifte", ln=True)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.set_xy(20, 19)
-    pdf.cell(0, 6, f"Periode: {period}", ln=True)
-
-    # Business info
-    pdf.set_text_color(*BLACK)
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.set_xy(20, 36)
-    pdf.cell(0, 6, business_name, ln=True)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.set_text_color(*GREY)
-    if address:
-        pdf.set_x(20); pdf.cell(0, 5, f"{address}, {postcode} {city}", ln=True)
-    pdf.set_x(20); pdf.cell(0, 5, f"BTW-nummer: {btw_number}", ln=True)
-    pdf.set_x(20); pdf.cell(0, 5, f"Aangemaakt op: {today_str}", ln=True)
-
-    pdf.ln(6)
-
-    def section_header(title: str):
-        pdf.set_fill_color(*TEAL)
-        pdf.set_text_color(*WHITE)
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.set_x(20)
-        pdf.cell(170, 8, title, ln=True, fill=True)
-
-    def row(label: str, value: str, highlight: bool = False):
-        if highlight:
-            pdf.set_fill_color(*RED)
-            pdf.set_text_color(*WHITE)
-            pdf.set_font("Helvetica", "B", 11)
-        else:
-            pdf.set_fill_color(*LIGHT)
-            pdf.set_text_color(*BLACK)
-            pdf.set_font("Helvetica", "", 10)
-        pdf.set_x(20)
-        pdf.cell(120, 7, label, fill=highlight, border="B")
-        pdf.cell(50,  7, value, fill=highlight, border="B", align="R", ln=True)
-
-    section_header("Omzet")
-    row("Omzet ex BTW",   _money(financials["revenue_ex_btw"]))
-    row("BTW ontvangen",  _money(financials["revenue_btw"]))
-    pdf.ln(2)
-
-    section_header("Kosten")
-    row("Kosten ex BTW",          _money(financials["expenses_ex_btw"]))
-    row("BTW betaald op kosten",  _money(financials["expenses_btw"]))
-    pdf.ln(2)
-
-    section_header("BTW Berekening")
-    row("BTW ontvangen",        _money(financials["revenue_btw"]))
-    row("Aftrekbare BTW (kosten)", _money(financials["expenses_btw"]))
-    row("Te betalen BTW",       _money(financials["btw_to_pay"]), highlight=True)
-    pdf.ln(8)
-
-    # Footer
-    pdf.set_font("Helvetica", "I", 8)
-    pdf.set_text_color(*GREY)
-    pdf.set_x(20)
-    pdf.multi_cell(170, 5,
-        "Dit rapport is indicatief. Raadpleeg een belastingadviseur voor je definitieve BTW-aangifte.")
-
-    return pdf.output()
-
-
-def _annual_pdf(profile: dict, annual: dict, year: int) -> bytes:
-    business_name = profile.get("business_name") or profile.get("full_name", "") or "-"
-    btw_number    = profile.get("btw_number") or "-"
-    kvk_number    = profile.get("kvk_number") or "-"
-    address       = profile.get("address", "")
-    postcode      = profile.get("postcode", "")
-    city          = profile.get("city", "")
     today_str     = date.today().strftime("%d-%m-%Y")
 
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_margins(20, 20, 20)
-    pdf.set_auto_page_break(auto=True, margin=20)
+    q_starts = {1: "01 januari", 2: "01 april",   3: "01 juli",      4: "01 oktober"}
+    q_ends   = {1: "31 maart",   2: "30 juni",     3: "30 september", 4: "31 december"}
+    deadline_months = {1: "30 april", 2: "31 juli", 3: "31 oktober",  4: "31 januari"}
+    deadline_year   = year if quarter < 4 else year + 1
+    period_str   = f"{q_starts[quarter]} {year} — {q_ends[quarter]} {year}"
+    deadline_str = f"{deadline_months[quarter]} {deadline_year}"
 
-    # Header bar
-    pdf.set_fill_color(*TEAL)
-    pdf.rect(0, 0, 210, 28, "F")
-    pdf.set_text_color(*WHITE)
-    pdf.set_font("Helvetica", "B", 18)
-    pdf.set_xy(20, 8)
-    pdf.cell(0, 10, f"Jaarrapport {year}", ln=True)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.set_xy(20, 19)
-    pdf.cell(0, 6, "Jaaroverzicht voor belastingaangifte", ln=True)
+    # ── Header ────────────────────────────────────────────────────────────────
+    name_len = len(business_name)
+    name_font_size = 28 if name_len <= 15 else 22 if name_len <= 22 else 18 if name_len <= 30 else 14
+    name_style   = ParagraphStyle('Name',   fontName='Helvetica-Bold', fontSize=name_font_size, textColor=TEAL)
+    number_style = ParagraphStyle('Number', fontName='Helvetica-Bold', fontSize=20,             textColor=TEAL)
 
-    # Business info
-    pdf.set_text_color(*BLACK)
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.set_xy(20, 36)
-    pdf.cell(0, 6, business_name, ln=True)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.set_text_color(*GREY)
-    if address:
-        pdf.set_x(20); pdf.cell(0, 5, f"{address}, {postcode} {city}", ln=True)
-    pdf.set_x(20); pdf.cell(0, 5, f"KVK-nummer: {kvk_number}", ln=True)
-    pdf.set_x(20); pdf.cell(0, 5, f"BTW-nummer: {btw_number}", ln=True)
-    pdf.set_x(20); pdf.cell(0, 5, f"Aangemaakt op: {today_str}", ln=True)
+    header_data = [[
+        Paragraph(business_name, name_style),
+        Paragraph(f"BTW Aangifte Q{quarter} {year}", number_style),
+    ]]
+    header_table = Table(header_data, colWidths=[page_width * 0.6, page_width * 0.4])
+    header_table.setStyle(TableStyle([
+        ('ALIGN',  (1, 0), (1, 0), 'RIGHT'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+    ]))
+    story.append(header_table)
+    story.append(Spacer(1, 3*mm))
+    story.append(HRFlowable(width="100%", thickness=3, color=GOLD, spaceAfter=5*mm))
 
-    pdf.ln(6)
+    # ── Meta row ──────────────────────────────────────────────────────────────
+    meta_data = [[
+        [Paragraph("PERIODE",           label_style), Paragraph(period_str,   value_style)],
+        [Paragraph("BTW-NUMMER",        label_style), Paragraph(btw_number,   value_style)],
+        [Paragraph("AANGIFTE DEADLINE", label_style), Paragraph(deadline_str, value_bold)],
+    ]]
+    meta_table = Table(meta_data, colWidths=[page_width/3, page_width/3, page_width/3])
+    meta_table.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
+    story.append(meta_table)
+    story.append(Spacer(1, 3*mm))
+    story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=5*mm))
 
-    # Quarter table header
-    pdf.set_fill_color(*TEAL)
-    pdf.set_text_color(*WHITE)
-    pdf.set_font("Helvetica", "B", 9)
-    pdf.set_x(20)
-    col_w = [30, 38, 38, 32, 32]
-    headers = ["Kwartaal", "Omzet ex BTW", "Kosten ex BTW", "Winst", "BTW"]
-    for w, h in zip(col_w, headers):
-        pdf.cell(w, 8, h, fill=True, border=0)
-    pdf.ln()
+    # ── Sectie 1: Omzet ───────────────────────────────────────────────────────
+    story.append(Paragraph("Sectie 1 — Omzet binnenland", section_style))
 
-    # Quarter rows
-    pdf.set_font("Helvetica", "", 9)
-    for i, q in enumerate(annual["quarters"]):
-        profit = q["revenue_ex_btw"] - q["expenses_ex_btw"]
-        fill = i % 2 == 0
-        pdf.set_fill_color(248, 248, 248) if fill else pdf.set_fill_color(*WHITE)
-        pdf.set_text_color(*BLACK)
-        pdf.set_x(20)
-        vals = [
-            f"Q{q['quarter']} {year}",
-            _money(q["revenue_ex_btw"]),
-            _money(q["expenses_ex_btw"]),
-            _money(profit),
-            _money(q["btw_to_pay"]),
-        ]
-        for w, v in zip(col_w, vals):
-            pdf.cell(w, 7, v, fill=fill, border="B")
-        pdf.ln()
-
-    # Totals row
-    pdf.set_fill_color(*TEAL)
-    pdf.set_text_color(*WHITE)
-    pdf.set_font("Helvetica", "B", 9)
-    pdf.set_x(20)
-    totals = [
-        f"Totaal {year}",
-        _money(annual["total_revenue_ex_btw"]),
-        _money(annual["total_expenses_ex_btw"]),
-        _money(annual["net_profit_indicative"]),
-        _money(annual["total_btw_to_pay"]),
+    omzet_data = [
+        ["Rubriek", "Omschrijving", "Omzet ex BTW", "VAT/BTW"],
+        ["1a",
+         'Leveringen/diensten belast met 21%\nVul dit in bij "Omzet" op belastingdienst.nl',
+         f"\u20ac {financials['revenue_ex_btw']:,.2f}",
+         f"\u20ac {financials['revenue_btw']:,.2f}"],
     ]
-    for w, v in zip(col_w, totals):
-        pdf.cell(w, 8, v, fill=True)
-    pdf.ln(12)
+    omzet_table = Table(omzet_data, colWidths=[page_width*0.10, page_width*0.50, page_width*0.20, page_width*0.20])
+    omzet_table.setStyle(TableStyle([
+        ('BACKGROUND',    (0, 0), (-1, 0), TEAL),
+        ('TEXTCOLOR',     (0, 0), (-1, 0), colors.white),
+        ('FONTNAME',      (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE',      (0, 0), (-1, -1), 9),
+        ('TOPPADDING',    (0, 0), (-1, -1), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 8),
+        ('ROWBACKGROUNDS',(0, 1), (-1, -1), [LIGHT_GREY]),
+        ('ALIGN',         (2, 0), (-1, -1), 'RIGHT'),
+        ('ALIGN',         (0, 0), (1, -1), 'LEFT'),
+        ('TEXTCOLOR',     (0, 1), (-1, -1), TEAL),
+        ('GRID',          (0, 0), (-1, -1), 0.5, MID_GREY),
+        ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
+    ]))
+    story.append(omzet_table)
+    story.append(Spacer(1, 2*mm))
+    story.append(Paragraph(
+        "<i>Rubriek 1a: Totale omzet exclusief BTW voor 21% diensten/producten. "
+        "Rubriek 1b: Voor producten/diensten met 9% BTW (bijv. voedsel, boeken). "
+        "Rubriek 3a: Leveringen buiten Nederland — geen BTW verschuldigd.</i>",
+        ParagraphStyle('Exp1', fontName='Helvetica-Oblique', fontSize=8, textColor=TEXT_SECONDARY, leading=12)
+    ))
 
-    # Summary
-    pdf.set_fill_color(*TEAL)
-    pdf.set_text_color(*WHITE)
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.set_x(20)
-    pdf.cell(170, 8, "Samenvatting", fill=True, ln=True)
+    # ── Sectie 5: Voorbelasting ───────────────────────────────────────────────
+    story.append(Paragraph("Sectie 5 — Voorbelasting (aftrekbare BTW)", section_style))
 
-    def sum_row(label, value, highlight=False):
-        if highlight:
-            pdf.set_fill_color(232, 244, 247)
-            pdf.set_text_color(*TEAL)
-            pdf.set_font("Helvetica", "B", 11)
-        else:
-            pdf.set_fill_color(*LIGHT)
-            pdf.set_text_color(*BLACK)
-            pdf.set_font("Helvetica", "", 10)
-        pdf.set_x(20)
-        pdf.cell(120, 7, label, fill=highlight, border="B")
-        pdf.cell(50,  7, value, fill=highlight, border="B", align="R", ln=True)
+    voor_data = [
+        ["Rubriek", "Omschrijving", "Bedrag"],
+        ["5b",
+         'Voorbelasting — BTW op zakelijke kosten\nVul dit in bij "Voorbelasting" op belastingdienst.nl',
+         f"\u20ac {financials['expenses_btw']:,.2f}"],
+    ]
+    voor_table = Table(voor_data, colWidths=[page_width*0.10, page_width*0.70, page_width*0.20])
+    voor_table.setStyle(TableStyle([
+        ('BACKGROUND',    (0, 0), (-1, 0), TEAL),
+        ('TEXTCOLOR',     (0, 0), (-1, 0), colors.white),
+        ('FONTNAME',      (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE',      (0, 0), (-1, -1), 9),
+        ('TOPPADDING',    (0, 0), (-1, -1), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 8),
+        ('ROWBACKGROUNDS',(0, 1), (-1, -1), [LIGHT_GREY]),
+        ('ALIGN',         (2, 0), (-1, -1), 'RIGHT'),
+        ('ALIGN',         (0, 0), (1, -1), 'LEFT'),
+        ('TEXTCOLOR',     (0, 1), (-1, -1), TEAL),
+        ('GRID',          (0, 0), (-1, -1), 0.5, MID_GREY),
+        ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
+    ]))
+    story.append(voor_table)
+    story.append(Spacer(1, 2*mm))
+    story.append(Paragraph(
+        "<i>Rubriek 5b: BTW die jij hebt betaald op zakelijke inkopen en kosten. "
+        "Dit bedrag mag je aftrekken van de BTW die je hebt ontvangen van klanten.</i>",
+        ParagraphStyle('Exp2', fontName='Helvetica-Oblique', fontSize=8, textColor=TEXT_SECONDARY, leading=12)
+    ))
 
-    sum_row("Totale omzet ex BTW",    _money(annual["total_revenue_ex_btw"]))
-    sum_row("Totale kosten ex BTW",   _money(annual["total_expenses_ex_btw"]))
-    sum_row("Totale BTW te betalen",  _money(annual["total_btw_to_pay"]))
-    sum_row("Netto winst (indicatief)", _money(annual["net_profit_indicative"]), highlight=True)
+    # ── Te betalen BTW ────────────────────────────────────────────────────────
+    story.append(Spacer(1, 5*mm))
+    story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
 
-    pdf.ln(8)
-    pdf.set_font("Helvetica", "I", 8)
-    pdf.set_text_color(*GREY)
-    pdf.set_x(20)
-    pdf.multi_cell(170, 5,
-        "Dit rapport is indicatief en berekend op basis van gefactureerde bedragen. "
-        "Raadpleeg een belastingadviseur voor je definitieve belastingaangifte.")
+    btw_color = colors.HexColor('#CC2200') if financials['btw_to_pay'] > 0 else colors.HexColor('#166534')
 
-    return pdf.output()
+    totals_data = [
+        ["BTW ontvangen (1a)",         f"\u20ac {financials['revenue_btw']:,.2f}"],
+        ["Aftrekbare BTW kosten (5b)", f"- \u20ac {financials['expenses_btw']:,.2f}"],
+        ["Te betalen BTW",             f"\u20ac {financials['btw_to_pay']:,.2f}"],
+    ]
+    totals_table = Table(totals_data, colWidths=[page_width*0.70, page_width*0.30])
+    totals_table.setStyle(TableStyle([
+        ('FONTNAME',      (0, 0), (-1, 1), 'Helvetica'),
+        ('FONTNAME',      (0, 2), (-1, 2), 'Helvetica-Bold'),
+        ('FONTSIZE',      (0, 0), (-1, 1), 10),
+        ('FONTSIZE',      (0, 2), (-1, 2), 13),
+        ('TEXTCOLOR',     (0, 0), (-1, 1), TEAL),
+        ('TEXTCOLOR',     (0, 2), (-1, 2), btw_color),
+        ('ALIGN',         (1, 0), (-1, -1), 'RIGHT'),
+        ('ALIGN',         (0, 0), (0, -1), 'LEFT'),
+        ('TOPPADDING',    (0, 0), (-1, -1), 5),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+        ('LINEABOVE',     (0, 2), (-1, 2), 1.5, GOLD),
+        ('BACKGROUND',    (0, 2), (-1, 2), LIGHT_GREY),
+    ]))
+    story.append(totals_table)
+
+    # ── Footer ────────────────────────────────────────────────────────────────
+    story.append(Spacer(1, 8*mm))
+    story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
+    story.append(Paragraph(
+        f"Gegenereerd door BigDogg \u00b7 bigdogg.nl \u00b7 {today_str} \u00b7 "
+        "Dit rapport is indicatief. Raadpleeg een belastingadviseur voor je definitieve BTW-aangifte.",
+        ParagraphStyle('Footer', fontName='Helvetica', fontSize=8, textColor=TEXT_SECONDARY, alignment=TA_CENTER)
+    ))
+
+    doc.build(story)
+    return buffer.getvalue()
 
 
 @router.get("/btw/pdf")
@@ -289,12 +243,12 @@ async def download_btw_report(
     profile = get_profile(user_id)
 
     try:
-        pdf_bytes = _btw_pdf(profile, financials, year, quarter)
+        pdf_bytes = _generate_btw_pdf(profile, financials, year, quarter)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
 
     return Response(
-        content=bytes(pdf_bytes),
+        content=pdf_bytes,
         media_type="application/pdf",
         headers={
             "Content-Disposition": f'attachment; filename="btw-aangifte-Q{quarter}-{year}.pdf"'
