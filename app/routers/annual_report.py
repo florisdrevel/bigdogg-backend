@@ -430,11 +430,15 @@ async def download_annual_report(
 
     data_current = get_year_data(user_id, year)
     data_prev = get_year_data(user_id, year - 1)
-    # Skip AI on direct download for speed - AI tips only used in cron email
+    import asyncio
     if lang == 'en':
-        tax_tips = "1. Check if you qualify for the self-employed deduction (zelfstandigenaftrek).\n2. Apply the SME profit exemption (MKB-winstvrijstelling) of 14%.\n3. Review all business costs for deductibility.\n4. Consider a pension reserve (FOR) to reduce taxable profit.\n5. Ensure all invoices are in your administration."
+        fallback_tips = "1. Check if you qualify for the self-employed deduction (zelfstandigenaftrek).\n2. Apply the SME profit exemption (MKB-winstvrijstelling) of 14%.\n3. Review all business costs for deductibility.\n4. Consider a pension reserve (FOR) to reduce taxable profit.\n5. Ensure all invoices are in your administration."
     else:
-        tax_tips = "1. Controleer of je in aanmerking komt voor de zelfstandigenaftrek.\n2. Pas de MKB-winstvrijstelling van 14% toe op je winst.\n3. Bekijk alle zakelijke kosten op aftrekbaarheid.\n4. Overweeg een fiscale oudedagsreserve (FOR) om belastbare winst te verlagen.\n5. Zorg dat alle facturen in je administratie zitten."
+        fallback_tips = "1. Controleer of je in aanmerking komt voor de zelfstandigenaftrek.\n2. Pas de MKB-winstvrijstelling van 14% toe op je winst.\n3. Bekijk alle zakelijke kosten op aftrekbaarheid.\n4. Overweeg een fiscale oudedagsreserve (FOR) om belastbare winst te verlagen.\n5. Zorg dat alle facturen in je administratie zitten."
+    try:
+        tax_tips = await asyncio.wait_for(get_ai_tax_tips(data_current, data_prev, profile, lang), timeout=25.0)
+    except Exception:
+        tax_tips = fallback_tips
     pdf_bytes = _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang)
 
     filename = f"Annual-Report-{year}.pdf" if lang == 'en' else f"Jaarrapport-{year}.pdf"
