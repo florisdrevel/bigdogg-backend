@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from app.routers import auth, products, clients, invoices, ai, expenses, overview, profile, subscription, pdf, email, reports, annual_report
 from app.routers import import_invoices
 from app.routers import payments
+from app.routers import hours, investments, projects
 import os
 
 
@@ -40,6 +41,9 @@ app.include_router(import_invoices.router, prefix="/api/v1/invoices", tags=["imp
 # Expense import route
 app.include_router(import_invoices.router, prefix="/api/v1/expenses", tags=["import-expenses"])
 app.include_router(payments.router, prefix="/api/v1/payments", tags=["payments"])
+app.include_router(hours.router, prefix="/api/v1/hours", tags=["hours"])
+app.include_router(investments.router, prefix="/api/v1/investments", tags=["investments"])
+app.include_router(projects.router, prefix="/api/v1/projects", tags=["projects"])
 
 
 @app.get("/health")
