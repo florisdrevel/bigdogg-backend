@@ -18,6 +18,7 @@ class ExpenseCreate(BaseModel):
     btw_rate: int = 21
     expense_date: Optional[str] = None
     category: str = "general"
+    project_id: Optional[str] = None
 
 
 def get_user_id(request: Request) -> str:

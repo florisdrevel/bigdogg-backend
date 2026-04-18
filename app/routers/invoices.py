@@ -23,6 +23,7 @@ class InvoiceCreate(BaseModel):
     due_date: Optional[str] = None
     lines: List[InvoiceLine]
     notes: Optional[str] = None
+    project_id: Optional[str] = None
 
 
 def get_user_id(request: Request) -> str:
@@ -113,6 +114,7 @@ async def create_invoice(invoice: InvoiceCreate, request: Request):
             "invoice_number": invoice_number,
             "invoice_date": invoice_date,
             "due_date": due_date,
+            "project_id": invoice.project_id,
             "status": "draft",
             "subtotal_ex_btw": round(subtotal, 2),
             "btw_amount": round(btw_amount, 2),
