@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel
 from typing import Optional
 from app.database import supabase
@@ -70,5 +70,45 @@ async def upsert_profile(profile: ProfileUpdate, request: Request):
                 .execute()
 
         return {"profile": response.data[0]}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/logo")
+async def upload_logo(request: Request, file: UploadFile = File(...)):
+    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Authorization header missing")
+    try:
+        token = auth_header.replace("Bearer ", "")
+        user = supabase.auth.get_user(token)
+        user_id = user.user.id
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    try:
+        # Ensure logos bucket exists
+        try:
+            supabase.storage.create_bucket("logos", options={"public": True})
+        except Exception:
+            pass
+        file_bytes = await file.read()
+        ext = file.filename.split(".")[-1].lower() if file.filename else "png"
+        path = f"{user_id}/logo.{ext}"
+        # Remove old logo if exists
+        try:
+            supabase.storage.from_("logos").remove([path])
+        except Exception:
+            pass
+        supabase.storage.from_("logos").upload(
+            path, file_bytes,
+            file_options={"content-type": file.content_type or "image/png", "upsert": "true"}
+        )
+        public_url = supabase.storage.from_("logos").get_public_url(path)
+        # Save to profile
+        existing = supabase.table("user_profiles").select("id").eq("id", user_id).execute()
+        if existing.data:
+            supabase.table("user_profiles").update({"logo_url": public_url}).eq("id", user_id).execute()
+        else:
+            supabase.table("user_profiles").insert({"id": user_id, "logo_url": public_url}).execute()
+        return {"success": True, "logo_url": public_url}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

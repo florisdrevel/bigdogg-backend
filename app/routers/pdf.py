@@ -8,6 +8,7 @@ from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
 from reportlab.lib.enums import TA_CENTER
 import io
+import urllib.request
 
 router = APIRouter()
 
@@ -114,10 +115,35 @@ def _generate_pdf(invoice, lines, profile, client, sender_email=''):
 
     name_style = ParagraphStyle('Name', fontName='Helvetica-Bold', fontSize=name_font_size, textColor=TEAL, spaceAfter=2*mm)
 
-    header_data = [[
-        Paragraph(display_name, name_style),
-        Paragraph(invoice['invoice_number'], number_style),
-    ]]
+    # Try to load logo
+    logo_url = profile.get('logo_url')
+    logo_img = None
+    if logo_url:
+        try:
+            from reportlab.platypus import Image as RLImage
+            import tempfile, os
+            req = urllib.request.Request(logo_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                logo_bytes = resp.read()
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+            tmp.write(logo_bytes)
+            tmp.close()
+            logo_img = RLImage(tmp.name, width=40*mm, height=40*mm)
+            logo_img.hAlign = 'LEFT'
+            os.unlink(tmp.name)
+        except Exception:
+            logo_img = None
+
+    if logo_img:
+        header_data = [[
+            logo_img,
+            Paragraph(invoice['invoice_number'], number_style),
+        ]]
+    else:
+        header_data = [[
+            Paragraph(display_name, name_style),
+            Paragraph(invoice['invoice_number'], number_style),
+        ]]
     header_table = Table(header_data, colWidths=[page_width * 0.6, page_width * 0.4])
     header_table.setStyle(TableStyle([
         ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
