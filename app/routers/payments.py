@@ -63,9 +63,9 @@ def _mark_invoice_paid(invoice_id: str):
 
         # Send paid notification email to the user
         try:
-            full_inv = supabase.table("invoices")                .select("invoice_number, total_incl_btw, subtotal_ex_btw, btw_amount, client_name, clients(contact_name, company_name)")                .eq("id", invoice_id)                .single()                .execute()
-            if full_inv.data and inv.data:
-                uid = inv.data["user_id"]
+            full_inv = supabase.table("invoices")                .select("invoice_number, total_incl_btw, subtotal_ex_btw, btw_amount, client_name, user_id, clients(contact_name, company_name)")                .eq("id", invoice_id)                .single()                .execute()
+            if full_inv.data:
+                uid = full_inv.data["user_id"]
                 user = supabase.auth.admin.get_user_by_id(uid)
                 email = user.user.email if user.user else None
                 if email:
@@ -163,9 +163,9 @@ def _mark_invoice_paid(invoice_id: str):
 
         # Send paid notification email to the user
         try:
-            full_inv = supabase.table("invoices")                .select("invoice_number, total_incl_btw, subtotal_ex_btw, btw_amount, client_name, clients(contact_name, company_name)")                .eq("id", invoice_id)                .single()                .execute()
-            if full_inv.data and inv.data:
-                uid = inv.data["user_id"]
+            full_inv = supabase.table("invoices")                .select("invoice_number, total_incl_btw, subtotal_ex_btw, btw_amount, client_name, user_id, clients(contact_name, company_name)")                .eq("id", invoice_id)                .single()                .execute()
+            if full_inv.data:
+                uid = full_inv.data["user_id"]
                 user = supabase.auth.admin.get_user_by_id(uid)
                 email = user.user.email if user.user else None
                 if email:
