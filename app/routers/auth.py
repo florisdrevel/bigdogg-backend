@@ -233,6 +233,53 @@ async def delete_account(request: Request):
                 supabase.table(table).delete().eq("user_id", user_id).execute()
             except Exception:
                 pass
+        # Send goodbye email before deleting
+        try:
+            user_data = supabase.auth.admin.get_user_by_id(user_id)
+            email = user_data.user.email if user_data.user else None
+            if email:
+                from datetime import datetime
+                resend.Emails.send({
+                    "from": "BigDogg <info@bigdogg.nl>",
+                    "to": [email],
+                    "subject": "Je BigDogg account is verwijderd",
+                    "html": f"""<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#f5f3ef;font-family:Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f3ef;padding:40px 20px;">
+    <tr><td align="center">
+      <table width="520" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+        <tr><td style="background:#1B3A4B;padding:28px 40px;text-align:center;">
+          <div style="font-size:26px;font-weight:900;color:#C9A96E;font-family:Arial,sans-serif;">BigDogg.</div>
+          <div style="color:#ffffff;opacity:0.7;font-size:12px;margin-top:4px;">Slim boekhouden voor ZZP'ers</div>
+        </td></tr>
+        <tr><td style="padding:36px 40px;">
+          <div style="font-size:22px;font-weight:bold;color:#1B3A4B;margin-bottom:16px;">Account verwijderd</div>
+          <p style="color:#4A6572;font-size:15px;line-height:1.6;margin:0 0 16px 0;">
+            Je BigDogg account en alle bijbehorende gegevens zijn op {datetime.now().strftime("%d-%m-%Y om %H:%M")} succesvol en permanent verwijderd.
+          </p>
+          <p style="color:#4A6572;font-size:15px;line-height:1.6;margin:0 0 16px 0;">
+            Dit omvat al je facturen, klanten, kosten, producten en profielgegevens. Er zijn geen gegevens meer van jou opgeslagen bij BigDogg.
+          </p>
+          <p style="color:#4A6572;font-size:15px;line-height:1.6;margin:0 0 24px 0;">
+            Als je ooit opnieuw wilt starten kun je je altijd opnieuw aanmelden op <a href="https://bigdogg.nl" style="color:#1B3A4B;">bigdogg.nl</a>.
+          </p>
+          <p style="color:#4A6572;font-size:14px;line-height:1.6;margin:0;">
+            Bedankt dat je BigDogg hebt gebruikt. We wensen je veel succes als ondernemer!
+          </p>
+        </td></tr>
+        <tr><td style="background:#f5f3ef;padding:20px 40px;text-align:center;border-top:1px solid #E2DDD6;">
+          <div style="color:#4A6572;font-size:12px;">BigDogg &middot; <a href="https://bigdogg.nl" style="color:#1B3A4B;">bigdogg.nl</a></div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+                })
+        except Exception:
+            pass
         # Delete the auth user
         supabase.auth.admin.delete_user(user_id)
         return {"message": "Account deleted successfully"}
