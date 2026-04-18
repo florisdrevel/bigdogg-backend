@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr
 from app.database import supabase
 
@@ -130,5 +130,53 @@ async def reset_password(data: ResetPasswordRequest):
     try:
         supabase.auth.reset_password_email(data.email)
         return {"message": "Reset email sent"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/change-password")
+async def change_password(request: Request):
+    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Authorization header missing")
+    try:
+        token = auth_header.replace("Bearer ", "")
+        user = supabase.auth.get_user(token)
+        user_id = user.user.id
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    try:
+        body = await request.json()
+        new_password = body.get("new_password")
+        if not new_password or len(new_password) < 8:
+            raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+        supabase.auth.admin.update_user_by_id(user_id, {"password": new_password})
+        return {"message": "Password changed successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/delete-account")
+async def delete_account(request: Request):
+    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Authorization header missing")
+    try:
+        token = auth_header.replace("Bearer ", "")
+        user = supabase.auth.get_user(token)
+        user_id = user.user.id
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    try:
+        # Delete all user data first
+        for table in ["invoice_lines", "invoices", "expenses", "clients", "products", "profiles", "user_profiles"]:
+            try:
+                supabase.table(table).delete().eq("user_id", user_id).execute()
+            except Exception:
+                pass
+        # Delete the auth user
+        supabase.auth.admin.delete_user(user_id)
+        return {"message": "Account deleted successfully"}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
