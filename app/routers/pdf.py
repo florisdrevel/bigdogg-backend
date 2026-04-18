@@ -125,12 +125,9 @@ def _generate_pdf(invoice, lines, profile, client, sender_email=''):
             req = urllib.request.Request(logo_url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=5) as resp:
                 logo_bytes = resp.read()
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-            tmp.write(logo_bytes)
-            tmp.close()
-            logo_img = RLImage(tmp.name, width=40*mm, height=40*mm)
-            logo_img.hAlign = 'LEFT'
-            os.unlink(tmp.name)
+            import io as _io
+            logo_img = RLImage(_io.BytesIO(logo_bytes), width=40*mm, height=40*mm)
+            logo_img.hAlign = 'LEFT' 
         except Exception:
             logo_img = None
 
