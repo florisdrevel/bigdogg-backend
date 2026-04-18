@@ -3,6 +3,8 @@ from app.database import supabase
 from app.config import settings
 import stripe
 import json
+import resend
+resend.api_key = settings.resend_api_key
 
 router = APIRouter()
 stripe.api_key = settings.stripe_secret_key
