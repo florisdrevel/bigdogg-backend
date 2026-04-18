@@ -1,4 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request, status
+import resend
+from app.config import settings
+resend.api_key = settings.resend_api_key
 from pydantic import BaseModel, EmailStr
 from app.database import supabase
 
@@ -150,6 +153,52 @@ async def change_password(request: Request):
         if not new_password or len(new_password) < 8:
             raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
         supabase.auth.admin.update_user_by_id(user_id, {"password": new_password})
+        # Send confirmation email
+        try:
+            user_data = supabase.auth.get_user(token)
+            email = user_data.user.email if user_data.user else None
+            if email:
+                from datetime import datetime
+                resend.Emails.send({
+                    "from": "BigDogg <info@bigdogg.nl>",
+                    "to": [email],
+                    "subject": "Je wachtwoord is gewijzigd",
+                    "html": f"""<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#f5f3ef;font-family:Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f3ef;padding:40px 20px;">
+    <tr><td align="center">
+      <table width="520" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+        <tr><td style="background:#1B3A4B;padding:28px 40px;text-align:center;">
+          <div style="font-size:26px;font-weight:900;color:#C9A96E;font-family:Arial,sans-serif;">BigDogg.</div>
+          <div style="color:#ffffff;opacity:0.7;font-size:12px;margin-top:4px;">Slim boekhouden voor ZZP'ers</div>
+        </td></tr>
+        <tr><td style="padding:36px 40px;">
+          <div style="font-size:22px;font-weight:bold;color:#1B3A4B;margin-bottom:16px;">&#x1F512; Wachtwoord gewijzigd</div>
+          <p style="color:#4A6572;font-size:15px;line-height:1.6;margin:0 0 16px 0;">
+            Je wachtwoord voor je BigDogg account is zojuist succesvol gewijzigd op {datetime.now().strftime("%d-%m-%Y om %H:%M")}.
+          </p>
+          <p style="color:#4A6572;font-size:15px;line-height:1.6;margin:0 0 24px 0;">
+            Als jij dit niet was, neem dan direct contact op via <a href="mailto:info@bigdogg.nl" style="color:#1B3A4B;">info@bigdogg.nl</a>.
+          </p>
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr><td align="center">
+              <a href="https://bigdogg.nl" style="display:inline-block;background:#1B3A4B;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:8px;font-weight:bold;font-size:14px;">Ga naar BigDogg</a>
+            </td></tr>
+          </table>
+        </td></tr>
+        <tr><td style="background:#f5f3ef;padding:20px 40px;text-align:center;border-top:1px solid #E2DDD6;">
+          <div style="color:#4A6572;font-size:12px;">BigDogg &middot; <a href="https://bigdogg.nl" style="color:#1B3A4B;">bigdogg.nl</a></div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+                })
+        except Exception:
+            pass
         return {"message": "Password changed successfully"}
     except HTTPException:
         raise
@@ -169,8 +218,17 @@ async def delete_account(request: Request):
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     try:
-        # Delete all user data first
-        for table in ["invoice_lines", "invoices", "expenses", "clients", "products", "profiles", "user_profiles"]:
+        # Delete invoice_lines first (linked via invoice_id, not user_id)
+        try:
+            invoices = supabase.table("invoices").select("id").eq("user_id", user_id).execute()
+            if invoices.data:
+                invoice_ids = [i["id"] for i in invoices.data]
+                for inv_id in invoice_ids:
+                    supabase.table("invoice_lines").delete().eq("invoice_id", inv_id).execute()
+        except Exception:
+            pass
+        # Delete all other user data
+        for table in ["invoices", "expenses", "clients", "products", "profiles", "user_profiles"]:
             try:
                 supabase.table(table).delete().eq("user_id", user_id).execute()
             except Exception:
