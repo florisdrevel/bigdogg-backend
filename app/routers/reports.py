@@ -278,7 +278,7 @@ async def get_quarter_detail(
         supabase.table("invoices")
         .select(
             "id, invoice_number, invoice_date, status, total_incl_btw, "
-            "amount_ex_btw, btw_amount, pdf_url, clients(contact_name, company_name)"
+            "subtotal_ex_btw, btw_amount, pdf_url, clients(contact_name, company_name)"
         )
         .eq("user_id", user_id)
         .gte("invoice_date", start_date)
