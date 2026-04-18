@@ -61,6 +61,7 @@ async def create_expense(expense: ExpenseCreate, request: Request):
             "btw_rate": expense.btw_rate,
             "expense_date": expense_date,
             "category": expense.category,
+            **({"project_id": expense.project_id} if expense.project_id else {}),
         }).execute()
         return {"expense": response.data[0]}
     except Exception as e:
