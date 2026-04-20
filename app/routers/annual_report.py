@@ -90,6 +90,51 @@ def get_year_data(user_id: str, year: int):
     total_btw = sum(q['btw_to_pay'] for q in quarters)
     total_profit = round(total_rev - total_exp, 2)
 
+    # ── Hours: manual + invoice-derived ──────────────────────────────────────
+    manual_hrs_result = supabase.table("hours").select("hours")\
+        .eq("user_id", user_id)\
+        .gte("date", f"{year}-01-01")\
+        .lte("date", f"{year}-12-31")\
+        .execute()
+    manual_hours = round(sum(float(h["hours"]) for h in (manual_hrs_result.data or [])), 2)
+
+    inv_ids_result = supabase.table("invoices").select("id")\
+        .eq("user_id", user_id).neq("status", "draft")\
+        .gte("invoice_date", f"{year}-01-01")\
+        .lte("invoice_date", f"{year}-12-31").execute()
+    inv_ids = [i["id"] for i in (inv_ids_result.data or [])]
+    invoice_hours = 0.0
+    if inv_ids:
+        lines = supabase.table("invoice_lines").select("quantity, unit")\
+            .in_("invoice_id", inv_ids).execute()
+        for line in (lines.data or []):
+            unit = (line.get("unit") or "fixed").lower()
+            qty = float(line.get("quantity", 0) or 0)
+            if unit == "day":
+                invoice_hours += qty * 9.0
+            elif unit == "hour":
+                invoice_hours += qty
+    invoice_hours = round(invoice_hours, 2)
+    total_hours = round(manual_hours + invoice_hours, 2)
+
+    # ── Depreciation ──────────────────────────────────────────────────────────
+    investments = supabase.table("investments").select("*")\
+        .eq("user_id", user_id).execute()
+    total_depreciation = 0.0
+    depreciation_items = []
+    for inv in (investments.data or []):
+        dep_years = inv.get("depreciation_years", 5) or 5
+        purchase_year = int((inv.get("purchase_date") or f"{year}-01-01")[:4])
+        if purchase_year <= year < purchase_year + dep_years:
+            annual_dep = round(float(inv.get("amount", 0)) / dep_years, 2)
+            total_depreciation += annual_dep
+            depreciation_items.append({
+                "description": inv.get("description", ""),
+                "amount": annual_dep,
+                "purchase_date": inv.get("purchase_date", ""),
+            })
+    total_depreciation = round(total_depreciation, 2)
+
     return {
         "year": year,
         "quarters": quarters,
@@ -99,6 +144,11 @@ def get_year_data(user_id: str, year: int):
         "total_profit": total_profit,
         "category_totals": category_totals,
         "invoice_count": sum(q['invoice_count'] for q in quarters),
+        "total_hours": total_hours,
+        "manual_hours": manual_hours,
+        "invoice_hours": invoice_hours,
+        "total_depreciation": total_depreciation,
+        "depreciation_items": depreciation_items,
     }
 
 async def get_ai_tax_tips(data_current, data_prev, profile, lang='nl'):
@@ -123,6 +173,8 @@ Year {data_current['year']}:
 - Total VAT: €{data_current['total_btw']}
 - Invoice count: {data_current['invoice_count']}
 - Expense categories: {data_current['category_totals']}
+- Total hours worked: {data_current['total_hours']} (criterion: 1,225 hrs)
+- Total depreciation: €{data_current['total_depreciation']}
 
 Year {data_prev['year']}:
 - Revenue: €{data_prev['total_revenue']}
@@ -150,12 +202,14 @@ Jaar {data_current['year']}:
 - Totale BTW: €{data_current['total_btw']}
 - Aantal facturen: {data_current['invoice_count']}
 - Kostencategorieën: {data_current['category_totals']}
+- Totaal gewerkte uren: {data_current['total_hours']} (criterium: 1.225 uur)
+- Totale afschrijvingen: €{data_current['total_depreciation']}
 
 Jaar {data_prev['year']}:
 - Omzet: €{data_prev['total_revenue']}
 - Winst: €{data_prev['total_profit']}
 
-Naam: {profile.get('full_name', 'ZZP\'er')}
+Naam: {profile.get('full_name', "ZZP'er")}
 KVK: {profile.get('kvk_number', 'onbekend')}
 
 Geef de tips als een genummerde lijst (1. 2. 3. etc.), elk op een nieuwe regel. Max 800 woorden."""
@@ -181,7 +235,6 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
 
     label_style = ParagraphStyle('Label', fontName='Helvetica-Bold', fontSize=9, textColor=TEXT_SECONDARY, leading=14)
     value_style = ParagraphStyle('Value', fontName='Helvetica', fontSize=10, textColor=TEAL, leading=14)
-    value_bold = ParagraphStyle('ValueBold', fontName='Helvetica-Bold', fontSize=11, textColor=TEAL, leading=14)
     section_style = ParagraphStyle('Section', fontName='Helvetica-Bold', fontSize=13, textColor=TEAL, spaceBefore=6*mm, spaceAfter=3*mm)
     body_style = ParagraphStyle('Body', fontName='Helvetica', fontSize=10, textColor=TEAL, leading=15)
     tip_style = ParagraphStyle('Tip', fontName='Helvetica', fontSize=9, textColor=TEXT_SECONDARY, leading=14, leftIndent=4*mm)
@@ -221,6 +274,7 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
     story.append(Spacer(1, 4*mm))
     story.append(HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4*mm))
 
+    # ── Year Summary ──────────────────────────────────────────────────────────
     story.append(Paragraph(f"{_t('Jaaroverzicht', 'Year Summary', lang)} {year}", section_style))
 
     summary_rows = [
@@ -262,6 +316,7 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
     ]))
     story.append(sum_table)
 
+    # ── Quarterly Overview ────────────────────────────────────────────────────
     story.append(Paragraph(f"{_t('Kwartaaloverzicht', 'Quarterly Overview', lang)} {year}", section_style))
 
     q_rows = [[_t('Kwartaal', 'Quarter', lang), _t('Omzet', 'Revenue', lang),
@@ -292,6 +347,7 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
     ]))
     story.append(q_table)
 
+    # ── Expense Breakdown ─────────────────────────────────────────────────────
     if data_current['category_totals']:
         story.append(Paragraph(_t('Kostenverdeling', 'Expense Breakdown', lang), section_style))
         cat_labels_nl = {
@@ -333,29 +389,140 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
         ]))
         story.append(cat_table)
 
+    # ── Hours Summary ─────────────────────────────────────────────────────────
+    story.append(Paragraph(_t('Urenregistratie', 'Hours Overview', lang), section_style))
+
+    total_hours = data_current.get('total_hours', 0)
+    manual_hours = data_current.get('manual_hours', 0)
+    invoice_hours = data_current.get('invoice_hours', 0)
+    urencriterium = 1225
+    pct_hours = min(round(total_hours / urencriterium * 100, 1), 100) if total_hours > 0 else 0.0
+    criterium_met = _t('Ja', 'Yes', lang) if total_hours >= urencriterium else _t('Nee', 'No', lang)
+
+    hours_rows = [
+        [_t('Omschrijving', 'Description', lang), _t('Uren', 'Hours', lang)],
+        [_t('Handmatig geregistreerd', 'Manually logged', lang), f"{manual_hours:.1f} u"],
+        [_t('Vanuit facturen (uur/dag)', 'From invoices (hour/day)', lang), f"{invoice_hours:.1f} u"],
+        [_t('Totaal gewerkte uren', 'Total hours worked', lang), f"{total_hours:.1f} u"],
+        [_t('Urencriterium (1.225 u)', 'Hour criterion (1,225 hrs)', lang), f"{pct_hours:.1f}% — {criterium_met}"],
+    ]
+    hours_table = Table(hours_rows, colWidths=[page_width * 0.65, page_width * 0.35])
+    hours_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), TEAL),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTNAME', (0, 1), (-1, -2), 'Helvetica'),
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('TOPPADDING', (0, 0), (-1, -1), 7),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 7),
+        ('LEFTPADDING', (0, 0), (-1, -1), 8),
+        ('TEXTCOLOR', (0, 1), (0, -1), colors.HexColor(TEXT_SECONDARY)),
+        ('TEXTCOLOR', (1, 1), (1, -1), colors.HexColor(TEAL)),
+        ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -2), [LIGHT_GREY, colors.white]),
+        ('LINEBELOW', (0, -2), (-1, -2), 0.5, colors.HexColor(MID_GREY)),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor(MID_GREY)),
+    ]))
+    story.append(hours_table)
+
+    if total_hours >= urencriterium:
+        hours_note = _t(
+            f"✓ Je hebt het urencriterium van 1.225 uur gehaald ({total_hours:.0f} uur). "
+            "Je komt in aanmerking voor de zelfstandigenaftrek.",
+            f"✓ You have met the hour criterion of 1,225 hours ({total_hours:.0f} hours). "
+            "You qualify for the self-employed deduction.",
+            lang
+        )
+    else:
+        remaining = max(0, urencriterium - total_hours)
+        hours_note = _t(
+            f"Je hebt {total_hours:.0f} van de benodigde 1.225 uur geregistreerd "
+            f"({remaining:.0f} uur te gaan). Het urencriterium is vereist voor de zelfstandigenaftrek.",
+            f"You have logged {total_hours:.0f} of the required 1,225 hours "
+            f"({remaining:.0f} hours remaining). The hour criterion is required for the self-employed deduction.",
+            lang
+        )
+    story.append(Spacer(1, 2*mm))
+    story.append(Paragraph(hours_note, explain_style))
+
+    # ── Depreciation ──────────────────────────────────────────────────────────
+    total_dep = data_current.get('total_depreciation', 0)
+    dep_items = data_current.get('depreciation_items', [])
+
+    if total_dep > 0 and dep_items:
+        story.append(Paragraph(_t('Afschrijvingen', 'Depreciation', lang), section_style))
+
+        dep_rows = [
+            [_t('Investering', 'Investment', lang),
+             _t('Aankoopdatum', 'Purchase date', lang),
+             _t('Jaarlijkse afschrijving', 'Annual depreciation', lang)],
+        ]
+        for item in dep_items:
+            dep_rows.append([
+                item["description"],
+                item["purchase_date"],
+                f"€ {item['amount']:,.2f}",
+            ])
+        dep_rows.append([
+            _t('Totaal afschrijving dit jaar', 'Total depreciation this year', lang),
+            '',
+            f"€ {total_dep:,.2f}",
+        ])
+
+        dep_table = Table(dep_rows, colWidths=[page_width*0.45, page_width*0.25, page_width*0.30])
+        dep_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), TEAL),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('TOPPADDING', (0, 0), (-1, -1), 7),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 7),
+            ('LEFTPADDING', (0, 0), (-1, -1), 8),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -2), [LIGHT_GREY, colors.white]),
+            ('ALIGN', (2, 0), (2, -1), 'RIGHT'),
+            ('TEXTCOLOR', (0, 1), (-1, -2), colors.HexColor(TEXT_SECONDARY)),
+            ('TEXTCOLOR', (2, 1), (2, -1), colors.HexColor(TEAL)),
+            ('LINEBELOW', (0, -2), (-1, -2), 0.5, colors.HexColor(MID_GREY)),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor(MID_GREY)),
+        ]))
+        story.append(dep_table)
+        story.append(Spacer(1, 2*mm))
+        dep_note = _t(
+            f"Afschrijvingen verlagen je belastbare winst. Totaal dit jaar: €{total_dep:,.2f}. "
+            "Zorg dat investeringen correct zijn geregistreerd in je administratie.",
+            f"Depreciation reduces your taxable profit. Total this year: €{total_dep:,.2f}. "
+            "Ensure all investments are properly documented in your records.",
+            lang
+        )
+        story.append(Paragraph(dep_note, explain_style))
+
+    # ── IB Return Guidance ────────────────────────────────────────────────────
     story.append(Paragraph(_t('IB Aangifte — Wat invullen?', 'Income Tax Return — What to fill in?', lang), section_style))
     ib_data = [
         [_t('Rubriek', 'Field', lang), _t('Omschrijving', 'Description', lang), _t('Jouw bedrag', 'Your amount', lang)],
         [_t('Omzet', 'Revenue', lang), _t('Totale omzet exclusief BTW', 'Total revenue excluding VAT', lang), f"€ {data_current['total_revenue']:,.2f}"],
         [_t('Kosten', 'Costs', lang), _t('Zakelijke kosten exclusief BTW', 'Business costs excluding VAT', lang), f"€ {data_current['total_expenses']:,.2f}"],
-        [_t('Winst', 'Profit', lang), _t('Omzet minus kosten (winst uit onderneming)', 'Revenue minus costs (business profit)', lang), f"€ {data_current['total_profit']:,.2f}"],
+        [_t('Afschrijvingen', 'Depreciation', lang), _t('Jaarlijkse afschrijving investeringen', 'Annual investment depreciation', lang), f"€ {total_dep:,.2f}"],
+        [_t('Winst', 'Profit', lang), _t('Omzet minus kosten minus afschrijvingen', 'Revenue minus costs minus depreciation', lang), f"€ {round(data_current['total_profit'] - total_dep, 2):,.2f}"],
     ]
     ib_table = Table(ib_data, colWidths=[page_width*0.25, page_width*0.50, page_width*0.25])
     ib_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), TEAL),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+        ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#F0FDF4')),
         ('FONTSIZE', (0, 0), (-1, -1), 9),
         ('TOPPADDING', (0, 0), (-1, -1), 7),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 7),
         ('LEFTPADDING', (0, 0), (-1, -1), 8),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [LIGHT_GREY, colors.white]),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -2), [LIGHT_GREY, colors.white]),
         ('ALIGN', (2, 0), (-1, -1), 'RIGHT'),
         ('ALIGN', (0, 0), (1, -1), 'LEFT'),
-        ('TEXTCOLOR', (0, 1), (-1, -1), TEAL),
+        ('TEXTCOLOR', (0, 1), (-1, -2), TEAL),
         ('GRID', (0, 0), (-1, -1), 0.5, MID_GREY),
-        ('FONTNAME', (0, 3), (-1, 3), 'Helvetica-Bold'),
-        ('BACKGROUND', (0, 3), (-1, 3), LIGHT_GREY),
     ]))
     story.append(ib_table)
     story.append(Spacer(1, 2*mm))
@@ -366,9 +533,9 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
     else:
         ib_note = ("💡 Vul de winst in bij 'Winst uit onderneming' in je IB aangifte op belastingdienst.nl. "
                    "Vergeet niet de zelfstandigenaftrek (€5.030 in 2026) en eventuele MKB-winstvrijstelling (14%) toe te passen.")
-
     story.append(Paragraph(ib_note, explain_style))
 
+    # ── AI Tax Tips ───────────────────────────────────────────────────────────
     story.append(Paragraph(_t('Persoonlijke belastingtips voor jou', 'Personal tax tips for you', lang), section_style))
     story.append(Paragraph(_t('Op basis van jouw cijfers heeft BigDogg de volgende tips voor je:', 'Based on your figures, BigDogg has the following tips for you:', lang), body_style))
     story.append(Spacer(1, 3*mm))
@@ -419,7 +586,6 @@ async def download_annual_report(
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    # Gate behind paid tier
     require_active_paid(user_id)
 
     if not year:
@@ -487,6 +653,8 @@ Je jaarrapport voor {year} is klaar. We hebben het voor je samengesteld inclusie
 - Volledig jaaroverzicht met kwartaalverdeling
 - Vergelijking met {year - 1}
 - Kostenverdeling per categorie
+- Urenregistratie overzicht en urencriterium status
+- Afschrijvingen overzicht
 - IB aangifte rubriek guidance
 - Persoonlijke belastingtips op basis van jouw cijfers
 
