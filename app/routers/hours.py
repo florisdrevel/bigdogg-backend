@@ -1,3 +1,4 @@
+import re
 ﻿from fastapi import APIRouter, HTTPException, Request
 from app.database import supabase
 from datetime import date
@@ -51,9 +52,9 @@ def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
             qty = float(line.get("quantity", 0) or 0)
             inv = inv_map.get(line["invoice_id"], {})
             hrs = 0.0
-            if unit == "day" or (unit == "fixed" and any(k in desc for k in DAY_KEYWORDS)):
+            if unit == "day" or (unit == "fixed" and any(re.search(r"\\b" + k + r"\\b", desc) for k in DAY_KEYWORDS)):
                 hrs = qty * HOURS_PER_DAY
-            elif unit == "hour" or (unit == "fixed" and any(k in desc for k in HOUR_KEYWORDS)):
+            elif unit == "hour" or (unit == "fixed" and any(re.search(r"\\b" + k + r"\\b", desc) for k in HOUR_KEYWORDS)):
                 hrs = qty
             if hrs > 0:
                 total += hrs
