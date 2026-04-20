@@ -227,8 +227,8 @@ async def delete_account(request: Request):
                     supabase.table("invoice_lines").delete().eq("invoice_id", inv_id).execute()
         except Exception:
             pass
-        # Delete all other user data
-        for table in ["invoices", "expenses", "clients", "products", "profiles", "user_profiles"]:
+        # Delete all user data
+        for table in ["invoices", "expenses", "clients", "products", "user_profiles", "hours", "investments", "projects"]:
             try:
                 supabase.table(table).delete().eq("user_id", user_id).execute()
             except Exception:
