@@ -1,5 +1,5 @@
 import re
-﻿from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from app.database import supabase
 
 router = APIRouter()
