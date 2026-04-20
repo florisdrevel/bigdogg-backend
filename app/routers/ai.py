@@ -68,6 +68,7 @@ The user has these clients:
 When the user describes an invoice, extract:
 1. Which client it is for (match by name, partial match is fine). If no client is mentioned pick the first one.
 2. Which line items (match to products where possible, create custom lines if needed)
+3. For each line, set "unit" to "day" if it is a day rate, "hour" if it is an hourly rate, or "fixed" for fixed price items
 3. Quantities for each line item
 
 You MUST return ONLY a raw JSON object. No markdown. No code blocks. No explanation. No text before or after.
