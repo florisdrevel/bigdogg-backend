@@ -287,10 +287,11 @@ async def create_connect_link(request: Request):
                 metadata={"user_id": user_id},
             )
             account_id = account.id
-            supabase.table("user_profiles")\
-                .update({"stripe_connect_account_id": account_id})\
-                .eq("id", user_id)\
-                .execute()
+            existing = supabase.table("user_profiles").select("id").eq("id", user_id).execute()
+            if existing.data:
+                supabase.table("user_profiles").update({"stripe_connect_account_id": account_id}).eq("id", user_id).execute()
+            else:
+                supabase.table("user_profiles").insert({"id": user_id, "stripe_connect_account_id": account_id}).execute()
 
         link = stripe.AccountLink.create(
             account=account_id,
