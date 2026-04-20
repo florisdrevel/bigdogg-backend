@@ -15,6 +15,7 @@ class InvoiceLine(BaseModel):
     quantity: float
     unit_price_ex_btw: float
     btw_rate: int = 21
+    unit: str = "fixed"
 
 
 class InvoiceCreate(BaseModel):
@@ -131,6 +132,7 @@ async def create_invoice(invoice: InvoiceCreate, request: Request):
             "unit_price_ex_btw": l.unit_price_ex_btw,
             "btw_rate": l.btw_rate,
             "line_total_ex_btw": round(l.quantity * l.unit_price_ex_btw, 2),
+            "unit": l.unit,
         } for l in invoice.lines]
         supabase.table("invoice_lines").insert(lines_data).execute()
 

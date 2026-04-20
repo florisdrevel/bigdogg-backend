@@ -1,13 +1,10 @@
-from fastapi import APIRouter, HTTPException, Request
+﻿from fastapi import APIRouter, HTTPException, Request
 from app.database import supabase
 from datetime import date
 
 router = APIRouter()
 
-HOURS_PER_DAY = 9.0  # Dutch freelancer standard day including travel/prep
-
-DAY_KEYWORDS = ['dag', 'day', 'days', 'dagen', 'dagdeel']
-HOUR_KEYWORDS = ['uur', 'hour', 'hours', 'uren', 'hr', 'hrs']
+HOURS_PER_DAY = 9.0
 
 
 def get_user_id(request: Request) -> str:
@@ -22,20 +19,8 @@ def get_user_id(request: Request) -> str:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 
-def _is_day_unit(text: str) -> bool:
-    t = text.lower()
-    return any(k in t for k in DAY_KEYWORDS)
-
-
-def _is_hour_unit(text: str) -> bool:
-    t = text.lower()
-    return any(k in t for k in HOUR_KEYWORDS)
-
-
 def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
-    """Returns (total_hours, breakdown_list) derived from invoice lines."""
     try:
-        # Get all invoices in range
         inv_result = supabase.table("invoices")\
             .select("id, invoice_date, invoice_number, project_id, status")\
             .eq("user_id", user_id)\
@@ -50,9 +35,8 @@ def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
         inv_ids = [i["id"] for i in invoices]
         inv_map = {i["id"]: i for i in invoices}
 
-        # Get all lines for these invoices
         lines_result = supabase.table("invoice_lines")\
-            .select("invoice_id, description, quantity, unit_price_ex_btw")\
+            .select("invoice_id, description, quantity, unit")\
             .in_("invoice_id", inv_ids)\
             .execute()
         lines = lines_result.data or []
@@ -60,34 +44,24 @@ def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
         total = 0.0
         breakdown = []
         for line in lines:
-            desc = line.get("description", "") or ""
+            unit = (line.get("unit") or "fixed").lower()
             qty = float(line.get("quantity", 0) or 0)
             inv = inv_map.get(line["invoice_id"], {})
-            if _is_day_unit(desc):
+            hrs = 0.0
+            if unit == "day":
                 hrs = qty * HOURS_PER_DAY
-                total += hrs
-                breakdown.append({
-                    "source": "invoice",
-                    "invoice_number": inv.get("invoice_number", ""),
-                    "invoice_id": line["invoice_id"],
-                    "project_id": inv.get("project_id"),
-                    "description": desc,
-                    "quantity": qty,
-                    "unit": "dag",
-                    "hours": hrs,
-                    "date": inv.get("invoice_date", ""),
-                })
-            elif _is_hour_unit(desc):
+            elif unit == "hour":
                 hrs = qty
+            if hrs > 0:
                 total += hrs
                 breakdown.append({
                     "source": "invoice",
                     "invoice_number": inv.get("invoice_number", ""),
                     "invoice_id": line["invoice_id"],
                     "project_id": inv.get("project_id"),
-                    "description": desc,
+                    "description": line.get("description", ""),
                     "quantity": qty,
-                    "unit": "uur",
+                    "unit": unit,
                     "hours": hrs,
                     "date": inv.get("invoice_date", ""),
                 })
@@ -104,7 +78,6 @@ async def get_hours(request: Request, year: int = None, quarter: int = None):
     if year is None:
         year = today.year
     try:
-        # Manual entries
         query = supabase.table("hours").select("*").eq("user_id", user_id)
         if quarter is not None:
             quarters = {1: ("01-01", "03-31"), 2: ("04-01", "06-30"),
@@ -117,13 +90,9 @@ async def get_hours(request: Request, year: int = None, quarter: int = None):
         entries = result.data or []
         manual_year = sum(float(e["hours"]) for e in entries)
 
-        # Invoice-derived hours for the year
-        inv_year_hrs, inv_breakdown = _calc_invoice_hours(
-            user_id, f"{year}-01-01", f"{year}-12-31")
-
+        inv_year_hrs, inv_breakdown = _calc_invoice_hours(user_id, f"{year}-01-01", f"{year}-12-31")
         total_year = manual_year + inv_year_hrs
 
-        # Current quarter manual
         current_quarter = (today.month - 1) // 3 + 1
         q_ends = {1: "03-31", 2: "06-30", 3: "09-30", 4: "12-31"}
         q_starts = {1: "01", 2: "04", 3: "07", 4: "10"}
@@ -133,14 +102,12 @@ async def get_hours(request: Request, year: int = None, quarter: int = None):
         q_result = supabase.table("hours").select("hours").eq("user_id", user_id)\
             .gte("date", q_start_str).lte("date", q_end_str).execute()
         manual_quarter = sum(float(e["hours"]) for e in (q_result.data or []))
-
-        # Invoice-derived hours for current quarter
         inv_q_hrs, _ = _calc_invoice_hours(user_id, q_start_str, q_end_str)
         total_quarter = manual_quarter + inv_q_hrs
 
         return {
             "entries": entries,
-            "invoice_hours_breakdown": inv_breakdown[:20],  # last 20
+            "invoice_hours_breakdown": inv_breakdown[:20],
             "total_year": round(total_year, 2),
             "total_quarter": round(total_quarter, 2),
             "manual_year": round(manual_year, 2),
