@@ -4,6 +4,8 @@ from app.database import supabase
 router = APIRouter()
 
 HOURS_PER_DAY = 9.0
+DAY_KEYWORDS = ["dag", "day", "days", "dagen", "dagdeel"]
+HOUR_KEYWORDS = ["uur", "hour", "hours", "uren", "hr", "hrs"]
 DAY_KEYWORDS = ['dag', 'day', 'days', 'dagen', 'dagdeel']
 HOUR_KEYWORDS = ['uur', 'hour', 'hours', 'uren', 'hr', 'hrs']
 

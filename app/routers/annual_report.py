@@ -417,12 +417,12 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
         ('TOPPADDING', (0, 0), (-1, -1), 7),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 7),
         ('LEFTPADDING', (0, 0), (-1, -1), 8),
-        ('TEXTCOLOR', (0, 1), (0, -1), colors.HexColor(TEXT_SECONDARY)),
-        ('TEXTCOLOR', (1, 1), (1, -1), colors.HexColor(TEAL)),
+        ('TEXTCOLOR', (0, 1), (0, -1), TEXT_SECONDARY),
+        ('TEXTCOLOR', (1, 1), (1, -1), TEAL),
         ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
         ('ROWBACKGROUNDS', (0, 1), (-1, -2), [LIGHT_GREY, colors.white]),
-        ('LINEBELOW', (0, -2), (-1, -2), 0.5, colors.HexColor(MID_GREY)),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor(MID_GREY)),
+        ('LINEBELOW', (0, -2), (-1, -2), 0.5, MID_GREY),
+        ('GRID', (0, 0), (-1, -1), 0.5, MID_GREY),
     ]))
     story.append(hours_table)
 
@@ -482,10 +482,10 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
             ('LEFTPADDING', (0, 0), (-1, -1), 8),
             ('ROWBACKGROUNDS', (0, 1), (-1, -2), [LIGHT_GREY, colors.white]),
             ('ALIGN', (2, 0), (2, -1), 'RIGHT'),
-            ('TEXTCOLOR', (0, 1), (-1, -2), colors.HexColor(TEXT_SECONDARY)),
-            ('TEXTCOLOR', (2, 1), (2, -1), colors.HexColor(TEAL)),
-            ('LINEBELOW', (0, -2), (-1, -2), 0.5, colors.HexColor(MID_GREY)),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor(MID_GREY)),
+            ('TEXTCOLOR', (0, 1), (-1, -2), TEXT_SECONDARY),
+            ('TEXTCOLOR', (2, 1), (2, -1), TEAL),
+            ('LINEBELOW', (0, -2), (-1, -2), 0.5, MID_GREY),
+            ('GRID', (0, 0), (-1, -1), 0.5, MID_GREY),
         ]))
         story.append(dep_table)
         story.append(Spacer(1, 2*mm))

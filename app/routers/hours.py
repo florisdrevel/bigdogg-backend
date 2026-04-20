@@ -5,6 +5,8 @@ from datetime import date
 router = APIRouter()
 
 HOURS_PER_DAY = 9.0
+DAY_KEYWORDS = ["dag", "day", "days", "dagen", "dagdeel"]
+HOUR_KEYWORDS = ["uur", "hour", "hours", "uren", "hr", "hrs"]
 
 
 def get_user_id(request: Request) -> str:
@@ -45,12 +47,13 @@ def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
         breakdown = []
         for line in lines:
             unit = (line.get("unit") or "fixed").lower()
+            desc = (line.get("description") or "").lower()
             qty = float(line.get("quantity", 0) or 0)
             inv = inv_map.get(line["invoice_id"], {})
             hrs = 0.0
-            if unit == "day":
+            if unit == "day" or (unit == "fixed" and any(k in desc for k in DAY_KEYWORDS)):
                 hrs = qty * HOURS_PER_DAY
-            elif unit == "hour":
+            elif unit == "hour" or (unit == "fixed" and any(k in desc for k in HOUR_KEYWORDS)):
                 hrs = qty
             if hrs > 0:
                 total += hrs
