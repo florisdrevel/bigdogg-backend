@@ -125,6 +125,10 @@ async def create_invoice(invoice: InvoiceCreate, request: Request):
 
         invoice_id = invoice_response.data[0]['id']
 
+        # Fetch all user products once for unit lookup
+        products_result = supabase.table("products").select("name, unit").eq("user_id", user_id).execute()
+        product_unit_map = {p["name"].lower(): p["unit"] for p in (products_result.data or [])}
+
         lines_data = [{
             "invoice_id": invoice_id,
             "description": l.description,
@@ -132,7 +136,7 @@ async def create_invoice(invoice: InvoiceCreate, request: Request):
             "unit_price_ex_btw": l.unit_price_ex_btw,
             "btw_rate": l.btw_rate,
             "line_total_ex_btw": round(l.quantity * l.unit_price_ex_btw, 2),
-            "unit": l.unit,
+            "unit": l.unit if l.unit not in ("fixed", None, "") else product_unit_map.get(l.description.lower(), "fixed"),
         } for l in invoice.lines]
         supabase.table("invoice_lines").insert(lines_data).execute()
 
