@@ -317,3 +317,19 @@ async def delete_invoice(invoice_id: str, request: Request):
         return {"message": "Invoice deleted"}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@router.patch("/{invoice_id}")
+async def update_invoice(invoice_id: str, request: Request):
+    user_id = get_user_id(request)
+    try:
+        body = await request.json()
+        allowed = ["project_id", "notes", "status"]
+        update = {k: v for k, v in body.items() if k in allowed}
+        if not update:
+            raise HTTPException(status_code=400, detail="No valid fields to update")
+        supabase.table("invoices").update(update).eq("id", invoice_id).eq("user_id", user_id).execute()
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
