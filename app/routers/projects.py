@@ -1,14 +1,9 @@
-import re
 from fastapi import APIRouter, HTTPException, Request
 from app.database import supabase
 
 router = APIRouter()
 
 HOURS_PER_DAY = 9.0
-DAY_KEYWORDS = ["dag", "day", "days", "dagen", "dagdeel"]
-HOUR_KEYWORDS = ["uur", "hour", "hours", "uren", "hr", "hrs"]
-DAY_KEYWORDS = ['dag', 'day', 'days', 'dagen', 'dagdeel']
-HOUR_KEYWORDS = ['uur', 'hour', 'hours', 'uren', 'hr', 'hrs']
 
 
 def get_user_id(request: Request) -> str:
@@ -23,18 +18,12 @@ def get_user_id(request: Request) -> str:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 
-def _is_day_unit(text: str) -> bool:
-    t = text.lower()
-    return any(k in t for k in DAY_KEYWORDS)
-
-
-def _is_hour_unit(text: str) -> bool:
-    t = text.lower()
-    return any(k in t for k in HOUR_KEYWORDS)
-
-
 def _calc_invoice_hours_for_project(project_id: str, user_id: str) -> float:
-    """Calculate hours derived from invoice lines for a specific project."""
+    """
+    unit='day'  -> quantity * 9 hours
+    unit='hour' -> quantity * 1 hour
+    anything else -> 0
+    """
     try:
         inv_result = supabase.table("invoices")\
             .select("id")\
@@ -48,18 +37,17 @@ def _calc_invoice_hours_for_project(project_id: str, user_id: str) -> float:
 
         inv_ids = [i["id"] for i in invoices]
         lines_result = supabase.table("invoice_lines")\
-            .select("description, quantity")\
+            .select("quantity, unit")\
             .in_("invoice_id", inv_ids)\
             .execute()
-        lines = lines_result.data or []
 
         total = 0.0
-        for line in lines:
-            desc = line.get("description", "") or ""
+        for line in (lines_result.data or []):
+            unit = (line.get("unit") or "fixed").lower()
             qty = float(line.get("quantity", 0) or 0)
-            if _is_day_unit(desc):
+            if unit == "day":
                 total += qty * HOURS_PER_DAY
-            elif _is_hour_unit(desc):
+            elif unit == "hour":
                 total += qty
         return round(total, 2)
     except Exception as e:
@@ -98,15 +86,12 @@ async def get_projects(request: Request):
             proj["total_expenses"] = round(sum(float(e["amount_ex_btw"] or 0) for e in (exp.data or [])), 2)
             proj["profit"] = round(proj["total_revenue"] - proj["total_expenses"], 2)
 
-            # Manual hours
             hrs = supabase.table("hours")\
                 .select("hours")\
                 .eq("user_id", user_id)\
                 .eq("project_id", pid)\
                 .execute()
             manual_hours = round(sum(float(h["hours"]) for h in (hrs.data or [])), 2)
-
-            # Invoice-derived hours
             invoice_hours = _calc_invoice_hours_for_project(pid, user_id)
 
             proj["total_hours"] = round(manual_hours + invoice_hours, 2)

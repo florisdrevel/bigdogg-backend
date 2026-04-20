@@ -1,4 +1,3 @@
-import re
 from fastapi import APIRouter, HTTPException, Request
 from app.database import supabase
 from datetime import date
@@ -6,8 +5,6 @@ from datetime import date
 router = APIRouter()
 
 HOURS_PER_DAY = 9.0
-DAY_KEYWORDS = ["dag", "day", "days", "dagen", "dagdeel"]
-HOUR_KEYWORDS = ["uur", "hour", "hours", "uren", "hr", "hrs"]
 
 
 def get_user_id(request: Request) -> str:
@@ -23,6 +20,12 @@ def get_user_id(request: Request) -> str:
 
 
 def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
+    """
+    Calculate hours from invoice lines using unit field only.
+    unit='day'  -> quantity * 9 hours
+    unit='hour' -> quantity * 1 hour
+    anything else (fixed, piece, km, etc) -> 0 hours
+    """
     try:
         inv_result = supabase.table("invoices")\
             .select("id, invoice_date, invoice_number, project_id, status")\
@@ -48,27 +51,31 @@ def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
         breakdown = []
         for line in lines:
             unit = (line.get("unit") or "fixed").lower()
-            desc = (line.get("description") or "").lower()
             qty = float(line.get("quantity", 0) or 0)
             inv = inv_map.get(line["invoice_id"], {})
-            hrs = 0.0
-            if unit == "day" or (unit == "fixed" and any(re.search(r"\\b" + k + r"\\b", desc) for k in DAY_KEYWORDS)):
+
+            if unit == "day":
                 hrs = qty * HOURS_PER_DAY
-            elif unit == "hour" or (unit == "fixed" and any(re.search(r"\\b" + k + r"\\b", desc) for k in HOUR_KEYWORDS)):
+            elif unit == "hour":
                 hrs = qty
-            if hrs > 0:
-                total += hrs
-                breakdown.append({
-                    "source": "invoice",
-                    "invoice_number": inv.get("invoice_number", ""),
-                    "invoice_id": line["invoice_id"],
-                    "project_id": inv.get("project_id"),
-                    "description": line.get("description", ""),
-                    "quantity": qty,
-                    "unit": unit,
-                    "hours": hrs,
-                    "date": inv.get("invoice_date", ""),
-                })
+            else:
+                continue  # unit, fixed, km, piece, etc -> skip
+
+            if hrs <= 0:
+                continue
+
+            total += hrs
+            breakdown.append({
+                "source": "invoice",
+                "invoice_number": inv.get("invoice_number", ""),
+                "invoice_id": line["invoice_id"],
+                "project_id": inv.get("project_id"),
+                "description": line.get("description", ""),
+                "quantity": qty,
+                "unit": unit,
+                "hours": hrs,
+                "date": inv.get("invoice_date", ""),
+            })
         return round(total, 2), breakdown
     except Exception as e:
         print(f"Error calculating invoice hours: {e}")
