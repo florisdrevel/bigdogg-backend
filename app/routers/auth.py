@@ -4,6 +4,8 @@ from app.config import settings
 resend.api_key = settings.resend_api_key
 from pydantic import BaseModel, EmailStr
 from app.database import supabase
+import stripe
+stripe.api_key = settings.stripe_secret_key
 
 router = APIRouter()
 
@@ -218,6 +220,19 @@ async def delete_account(request: Request):
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     try:
+        # Cancel Stripe subscription if active
+        try:
+            sub_result = supabase.table("subscriptions")\
+                .select("stripe_subscription_id")\
+                .eq("user_id", user_id)\
+                .execute()
+            if sub_result.data:
+                stripe_sub_id = sub_result.data[0].get("stripe_subscription_id")
+                if stripe_sub_id:
+                    stripe.Subscription.cancel(stripe_sub_id)
+        except Exception as e:
+            print(f"Stripe cancellation error (non-fatal): {e}")
+
         # Delete invoice_lines first (linked via invoice_id, not user_id)
         try:
             invoices = supabase.table("invoices").select("id").eq("user_id", user_id).execute()
@@ -227,13 +242,15 @@ async def delete_account(request: Request):
                     supabase.table("invoice_lines").delete().eq("invoice_id", inv_id).execute()
         except Exception:
             pass
-        # Delete all user data
-        for table in ["invoices", "expenses", "clients", "products", "user_profiles", "hours", "investments", "projects"]:
+
+        # Delete all user data including subscriptions
+        for table in ["invoices", "expenses", "clients", "products", "user_profiles", "hours", "investments", "projects", "subscriptions"]:
             try:
                 supabase.table(table).delete().eq("user_id", user_id).execute()
             except Exception:
                 pass
-        # Send goodbye email before deleting
+
+        # Send goodbye email before deleting auth user
         try:
             user_data = supabase.auth.admin.get_user_by_id(user_id)
             email = user_data.user.email if user_data.user else None
@@ -280,6 +297,7 @@ async def delete_account(request: Request):
                 })
         except Exception:
             pass
+
         # Delete the auth user
         supabase.auth.admin.delete_user(user_id)
         return {"message": "Account deleted successfully"}
