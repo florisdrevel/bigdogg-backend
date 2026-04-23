@@ -5,6 +5,7 @@ resend.api_key = settings.resend_api_key
 from pydantic import BaseModel, EmailStr
 from app.database import supabase
 import stripe
+import requests as http_requests
 stripe.api_key = settings.stripe_secret_key
 
 router = APIRouter()
@@ -155,7 +156,6 @@ async def change_password(request: Request):
         if not new_password or len(new_password) < 8:
             raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
         supabase.auth.admin.update_user_by_id(user_id, {"password": new_password})
-        # Send confirmation email
         try:
             user_data = supabase.auth.get_user(token)
             email = user_data.user.email if user_data.user else None
@@ -219,12 +219,20 @@ async def delete_account(request: Request):
         user_id = user.user.id
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    # Grab email now, before we delete anything
+    user_email = None
     try:
-        # Cancel Stripe subscription if active
+        user_email = user.user.email
+    except Exception:
+        pass
+
+    try:
+        # 1. Cancel Stripe subscription if active (non-fatal)
         try:
-            sub_result = supabase.table("subscriptions")\
-                .select("stripe_subscription_id")\
-                .eq("user_id", user_id)\
+            sub_result = supabase.table("subscriptions") \
+                .select("stripe_subscription_id") \
+                .eq("user_id", user_id) \
                 .execute()
             if sub_result.data:
                 stripe_sub_id = sub_result.data[0].get("stripe_subscription_id")
@@ -233,32 +241,30 @@ async def delete_account(request: Request):
         except Exception as e:
             print(f"Stripe cancellation error (non-fatal): {e}")
 
-        # Delete invoice_lines first (linked via invoice_id, not user_id)
+        # 2. Delete invoice_lines first (no user_id column, linked via invoice_id)
         try:
             invoices = supabase.table("invoices").select("id").eq("user_id", user_id).execute()
             if invoices.data:
-                invoice_ids = [i["id"] for i in invoices.data]
-                for inv_id in invoice_ids:
-                    supabase.table("invoice_lines").delete().eq("invoice_id", inv_id).execute()
+                for inv in invoices.data:
+                    supabase.table("invoice_lines").delete().eq("invoice_id", inv["id"]).execute()
         except Exception:
             pass
 
-        # Delete all user data including subscriptions
-        for table in ["invoices", "expenses", "clients", "products", "user_profiles", "hours", "investments", "projects", "subscriptions"]:
+        # 3. Delete all user data
+        for table in ["invoices", "expenses", "clients", "products", "user_profiles",
+                      "hours", "investments", "projects", "subscriptions"]:
             try:
                 supabase.table(table).delete().eq("user_id", user_id).execute()
             except Exception:
                 pass
 
-        # Send goodbye email before deleting auth user
+        # 4. Send goodbye email (non-fatal)
         try:
-            user_data = supabase.auth.admin.get_user_by_id(user_id)
-            email = user_data.user.email if user_data.user else None
-            if email:
+            if user_email:
                 from datetime import datetime
                 resend.Emails.send({
                     "from": "BigDogg <info@bigdogg.nl>",
-                    "to": [email],
+                    "to": [user_email],
                     "subject": "Je BigDogg account is verwijderd",
                     "html": f"""<!DOCTYPE html>
 <html>
@@ -298,8 +304,19 @@ async def delete_account(request: Request):
         except Exception:
             pass
 
-        # Delete the auth user
-        supabase.auth.admin.delete_user(user_id)
+        # 5. Delete auth user via direct REST call (bypasses Python client version quirks)
+        delete_resp = http_requests.delete(
+            f"{settings.supabase_url}/auth/v1/admin/users/{user_id}",
+            headers={
+                "apikey": settings.supabase_service_key,
+                "Authorization": f"Bearer {settings.supabase_service_key}",
+            },
+            timeout=10,
+        )
+        if delete_resp.status_code not in (200, 204):
+            raise Exception(f"Auth delete failed: {delete_resp.status_code} — {delete_resp.text}")
+
         return {"message": "Account deleted successfully"}
+
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
