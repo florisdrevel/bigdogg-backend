@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from typing import Optional
 from app.database import supabase
 from app.config import settings
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 import stripe
 import json
 
@@ -13,6 +13,12 @@ stripe.api_key = settings.stripe_secret_key
 APP_URL = "https://bigdogg.nl"
 PRICE_AMOUNT = 999  # €9.99
 PRICE_CURRENCY = "eur"
+
+# BigDogg subscription expense (€9.99 incl. 21% BTW)
+# ex BTW = 9.99 / 1.21 = 8.26, BTW = 9.99 - 8.26 = 1.73
+BIGDOGG_AMOUNT_EX_BTW = 8.26
+BIGDOGG_BTW_AMOUNT = 1.73
+BIGDOGG_BTW_RATE = 21
 
 
 class CheckoutRequest(BaseModel):
@@ -124,6 +130,20 @@ async def create_checkout(request: Request, data: CheckoutRequest = None):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+def _insert_bigdogg_expense(user_id: str, label: str) -> None:
+    """Insert BigDogg Pro subscription as a bookkeeping expense for the user."""
+    supabase.table("expenses").insert({
+        "user_id": user_id,
+        "description": "BigDogg Pro abonnement",
+        "amount_ex_btw": BIGDOGG_AMOUNT_EX_BTW,
+        "btw_amount": BIGDOGG_BTW_AMOUNT,
+        "btw_rate": BIGDOGG_BTW_RATE,
+        "expense_date": str(date.today()),
+        "category": "Software & abonnementen",
+    }).execute()
+    print(f"BigDogg expense inserted for user {user_id} ({label})")
+
+
 @router.post("/webhook")
 async def stripe_webhook(request: Request):
     payload = await request.body()
@@ -180,6 +200,12 @@ async def stripe_webhook(request: Request):
                         "subscription_ends_at": ends_at.isoformat(),
                     }).execute()
 
+                # Insert first month's BigDogg expense
+                try:
+                    _insert_bigdogg_expense(user_id, "initial checkout")
+                except Exception as e:
+                    print(f"BigDogg expense insert error (non-fatal): {e}")
+
         elif event_type == "invoice.payment_succeeded":
             invoice = event["data"]["object"]
             if hasattr(invoice, 'to_dict'):
@@ -188,6 +214,10 @@ async def stripe_webhook(request: Request):
                 invoice = dict(invoice)
 
             customer_id = invoice.get("customer")
+            # "subscription_create" = first payment, already handled by checkout.session.completed
+            # "subscription_cycle" = monthly renewal — insert expense here
+            billing_reason = invoice.get("billing_reason", "")
+
             if customer_id:
                 ends_at = datetime.now(timezone.utc) + timedelta(days=30)
                 supabase.table("subscriptions")\
@@ -197,6 +227,17 @@ async def stripe_webhook(request: Request):
                     })\
                     .eq("stripe_customer_id", customer_id)\
                     .execute()
+
+                if billing_reason == "subscription_cycle":
+                    try:
+                        sub_row = supabase.table("subscriptions")\
+                            .select("user_id")\
+                            .eq("stripe_customer_id", customer_id)\
+                            .execute()
+                        if sub_row.data:
+                            _insert_bigdogg_expense(sub_row.data[0]["user_id"], "renewal")
+                    except Exception as e:
+                        print(f"BigDogg expense insert error (non-fatal): {e}")
 
         elif event_type in ("customer.subscription.deleted", "customer.subscription.paused"):
             subscription = event["data"]["object"]
