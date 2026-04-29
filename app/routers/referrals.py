@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Request
 from app.database import supabase
 import secrets
 import string
+import traceback
 
 router = APIRouter()
 
@@ -45,6 +46,7 @@ async def generate_referral(request: Request):
             return {"code": existing.data[0]["code"]}
 
         # Try a few times to handle the rare uniqueness collision
+        last_err: Exception | None = None
         for _ in range(8):
             code = _generate_code()
             try:
@@ -54,18 +56,31 @@ async def generate_referral(request: Request):
                 }).execute()
                 return {"code": code}
             except Exception as e:
+                last_err = e
                 msg = str(e).lower()
                 if "duplicate" in msg or "unique" in msg:
                     continue
-                raise
+                # Non-uniqueness error — surface it
+                print(f"[referrals.generate] insert error for user {user_id}: {type(e).__name__}: {e}")
+                traceback.print_exc()
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"insert failed: {type(e).__name__}: {e}",
+                )
 
+        # Eight collisions in a row is essentially impossible — surface as 500
         raise HTTPException(
-            status_code=500, detail="Could not generate a unique code"
+            status_code=500,
+            detail=f"could not generate a unique code (last error: {last_err})",
         )
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[referrals.generate] unhandled error for user {user_id}: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500, detail=f"{type(e).__name__}: {e}"
+        )
 
 
 @router.get("/stats")
@@ -91,4 +106,8 @@ async def referral_stats(request: Request):
 
         return {"code": code, "signups": signups, "converted": converted}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[referrals.stats] error for user {user_id}: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500, detail=f"{type(e).__name__}: {e}"
+        )
