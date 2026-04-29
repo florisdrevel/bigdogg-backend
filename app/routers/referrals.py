@@ -85,15 +85,32 @@ async def generate_referral(request: Request):
 
 @router.get("/stats")
 async def referral_stats(request: Request):
-    """Returns the user's code and counts of signups + paid conversions."""
+    """Returns the user's code, signup + conversion counts, and their
+    earned/applied bonus state. Also opportunistically grants any owed
+    bonus so the user sees up-to-date numbers when they open Settings.
+    """
     user_id = get_user_id(request)
     try:
+        # Trigger any pending bonus first so the response reflects reality
+        try:
+            from app.routers.subscription import maybe_grant_referral_bonus
+            maybe_grant_referral_bonus(user_id)
+        except Exception as bonus_err:
+            print(f"[referrals.stats] grant probe error: {bonus_err}")
+
         code_result = supabase.table("referrals")\
             .select("code")\
             .eq("referrer_user_id", user_id)\
             .execute()
         if not code_result.data:
-            return {"code": None, "signups": 0, "converted": 0}
+            return {
+                "code": None,
+                "signups": 0,
+                "converted": 0,
+                "bonus_months_earned": 0,
+                "bonus_months_max": 3,
+                "bonus_active_until": None,
+            }
         code = code_result.data[0]["code"]
 
         signups_result = supabase.table("referral_signups")\
@@ -104,7 +121,26 @@ async def referral_stats(request: Request):
         signups = len(rows)
         converted = sum(1 for r in rows if r.get("converted"))
 
-        return {"code": code, "signups": signups, "converted": converted}
+        # Pull the bonus columns from subscriptions
+        sub_result = supabase.table("subscriptions")\
+            .select("bonus_months_applied, bonus_active_until")\
+            .eq("user_id", user_id)\
+            .execute()
+        bonus_applied = 0
+        bonus_active_until = None
+        if sub_result.data:
+            sub_row = sub_result.data[0]
+            bonus_applied = sub_row.get("bonus_months_applied") or 0
+            bonus_active_until = sub_row.get("bonus_active_until")
+
+        return {
+            "code": code,
+            "signups": signups,
+            "converted": converted,
+            "bonus_months_earned": bonus_applied,
+            "bonus_months_max": 3,
+            "bonus_active_until": bonus_active_until,
+        }
     except Exception as e:
         print(f"[referrals.stats] error for user {user_id}: {type(e).__name__}: {e}")
         traceback.print_exc()

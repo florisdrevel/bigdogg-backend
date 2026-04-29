@@ -43,3 +43,14 @@ create index if not exists referral_signups_new_user_id_idx
 -- expenses) use.
 alter table public.referrals disable row level security;
 alter table public.referral_signups disable row level security;
+
+-- ─── Bonus tracking on subscriptions ──────────────────────
+-- Per 2 successful referrals the referrer earns 1 free pro month.
+-- Lifetime cap of 3 bonuses. Bonuses are applied as either:
+--   - bonus_active_until extension (trial / non-paid users) -> unlocks pro
+--   - Stripe customer balance credit (paid users) -> zeroes next invoice
+alter table public.subscriptions
+    add column if not exists bonus_active_until timestamptz,
+    add column if not exists bonus_months_applied integer not null default 0;
+
+notify pgrst, 'reload schema';

@@ -39,16 +39,171 @@ def get_user_id(request: Request) -> str:
 
 
 def require_active_paid(user_id: str):
-    """Raises 403 if user is not on active paid tier."""
+    """Raises 403 if user is not on active paid tier OR a referral bonus."""
     result = supabase.table("subscriptions")\
-        .select("status")\
+        .select("status, bonus_active_until")\
         .eq("user_id", user_id)\
         .execute()
     if not result.data:
         raise HTTPException(status_code=403, detail="paid_tier_required")
-    status = result.data[0].get("status")
-    if status != "active":
-        raise HTTPException(status_code=403, detail="paid_tier_required")
+    row = result.data[0]
+    if row.get("status") == "active":
+        return
+    bonus_until = row.get("bonus_active_until")
+    if bonus_until:
+        try:
+            until = datetime.fromisoformat(
+                bonus_until.replace("Z", "+00:00")
+            )
+            if until > datetime.now(timezone.utc):
+                return
+        except Exception:
+            pass
+    raise HTTPException(status_code=403, detail="paid_tier_required")
+
+
+# ─── Referral bonus granting ──────────────────────────────
+# Pyramid-style: per 2 successful signups via the user's referral code,
+# the user earns 1 free pro month. Capped at 3 lifetime bonuses.
+REFERRAL_BONUS_PER_N_SIGNUPS = 2
+REFERRAL_BONUS_MAX_GRANTS = 3
+REFERRAL_BONUS_DAYS = 30
+
+
+def maybe_grant_referral_bonus(referrer_user_id: str) -> dict:
+    """Recomputes the referrer's bonus eligibility and grants any owed.
+
+    Returns a dict with the resulting state for callers to surface in /stats:
+        {
+            "signups": int,
+            "eligible": int,        # bonuses owed in total (capped at 3)
+            "applied": int,         # bonuses we have now applied
+            "newly_granted": int,   # how many we just granted in this call
+            "bonus_active_until": Optional[isoformat],
+        }
+
+    Idempotent: calling twice in a row only grants new bonuses on the first call.
+    Failures are logged and the function returns gracefully without raising.
+    """
+    state = {
+        "signups": 0,
+        "eligible": 0,
+        "applied": 0,
+        "newly_granted": 0,
+        "bonus_active_until": None,
+    }
+    try:
+        ref_row = supabase.table("referrals")\
+            .select("code")\
+            .eq("referrer_user_id", referrer_user_id)\
+            .execute()
+        if not ref_row.data:
+            return state
+        code = ref_row.data[0]["code"]
+
+        signups_result = supabase.table("referral_signups")\
+            .select("id")\
+            .eq("referrer_code", code)\
+            .execute()
+        signup_count = len(signups_result.data or [])
+        eligible = min(
+            REFERRAL_BONUS_MAX_GRANTS,
+            signup_count // REFERRAL_BONUS_PER_N_SIGNUPS,
+        )
+
+        sub = supabase.table("subscriptions")\
+            .select(
+                "status, bonus_active_until, bonus_months_applied, "
+                "stripe_customer_id"
+            )\
+            .eq("user_id", referrer_user_id)\
+            .execute()
+        if not sub.data:
+            return state
+        sub_row = sub.data[0]
+        applied = sub_row.get("bonus_months_applied") or 0
+        current_until = sub_row.get("bonus_active_until")
+        state["signups"] = signup_count
+        state["eligible"] = eligible
+        state["applied"] = applied
+        state["bonus_active_until"] = current_until
+
+        if eligible <= applied:
+            return state
+
+        bonuses_to_grant = eligible - applied
+        status = sub_row.get("status")
+
+        if status == "active":
+            # Paid user: Stripe customer balance credit (negative = credit)
+            customer_id = sub_row.get("stripe_customer_id")
+            if not customer_id:
+                print(
+                    f"[referral-bonus] paid user {referrer_user_id} has no "
+                    "stripe_customer_id; skipping credit"
+                )
+                return state
+            try:
+                stripe.Customer.create_balance_transaction(
+                    customer_id,
+                    amount=-PRICE_AMOUNT * bonuses_to_grant,
+                    currency=PRICE_CURRENCY,
+                    description=(
+                        f"BigDogg referral bonus: "
+                        f"{bonuses_to_grant} maand(en) gratis"
+                    ),
+                )
+                print(
+                    f"[referral-bonus] granted {bonuses_to_grant} Stripe "
+                    f"credit(s) to paid user {referrer_user_id}"
+                )
+            except Exception as stripe_err:
+                print(
+                    f"[referral-bonus] Stripe credit failed for "
+                    f"{referrer_user_id}: {stripe_err}"
+                )
+                return state
+        else:
+            # Trial / expired / other: extend bonus_active_until
+            now = datetime.now(timezone.utc)
+            base = now
+            if current_until:
+                try:
+                    cu = datetime.fromisoformat(
+                        current_until.replace("Z", "+00:00")
+                    )
+                    if cu > base:
+                        base = cu
+                except Exception:
+                    pass
+            new_until = base + timedelta(
+                days=REFERRAL_BONUS_DAYS * bonuses_to_grant
+            )
+            supabase.table("subscriptions")\
+                .update({"bonus_active_until": new_until.isoformat()})\
+                .eq("user_id", referrer_user_id)\
+                .execute()
+            state["bonus_active_until"] = new_until.isoformat()
+            print(
+                f"[referral-bonus] extended bonus_active_until to "
+                f"{new_until.isoformat()} (+{bonuses_to_grant} month(s)) "
+                f"for {referrer_user_id}"
+            )
+
+        # Persist applied count
+        supabase.table("subscriptions")\
+            .update({"bonus_months_applied": eligible})\
+            .eq("user_id", referrer_user_id)\
+            .execute()
+
+        state["applied"] = eligible
+        state["newly_granted"] = bonuses_to_grant
+    except Exception as e:
+        print(
+            f"[referral-bonus] grant error for {referrer_user_id}: "
+            f"{type(e).__name__}: {e}"
+        )
+    return state
 
 
 @router.get("/status")
@@ -641,67 +796,24 @@ async def stripe_webhook(request: Request):
                     print(f"BigDogg expense insert error (non-fatal): {e}")
 
                 # Referral conversion: if this user signed up via someone's
-                # referral code, mark their signup as converted and extend
-                # the referrer's subscription by 30 days.
+                # referral code, mark their signup as converted (for stats
+                # display only). Bonuses are granted on signup, not on
+                # conversion, so we don't touch the referrer here.
                 try:
                     ref_lookup = supabase.table("referral_signups")\
-                        .select("id, referrer_user_id, converted")\
+                        .select("id, converted")\
                         .eq("new_user_id", user_id)\
                         .execute()
                     if ref_lookup.data and not ref_lookup.data[0].get("converted"):
-                        signup_row = ref_lookup.data[0]
-                        now_iso = datetime.now(timezone.utc).isoformat()
-
                         supabase.table("referral_signups")\
-                            .update({"converted": True, "converted_at": now_iso})\
-                            .eq("id", signup_row["id"])\
+                            .update({
+                                "converted": True,
+                                "converted_at": datetime.now(timezone.utc).isoformat(),
+                            })\
+                            .eq("id", ref_lookup.data[0]["id"])\
                             .execute()
-
-                        referrer_id = signup_row["referrer_user_id"]
-                        if referrer_id:
-                            ref_sub = supabase.table("subscriptions")\
-                                .select("subscription_ends_at, status, trial_ends_at")\
-                                .eq("user_id", referrer_id)\
-                                .execute()
-                            if ref_sub.data:
-                                row = ref_sub.data[0]
-                                now = datetime.now(timezone.utc)
-                                # Pick the latest of: existing paid end, trial end, now.
-                                base_dt = now
-                                end_str = row.get("subscription_ends_at")
-                                if end_str:
-                                    try:
-                                        ed = datetime.fromisoformat(
-                                            end_str.replace("Z", "+00:00")
-                                        )
-                                        if ed > base_dt:
-                                            base_dt = ed
-                                    except Exception:
-                                        pass
-                                trial_str = row.get("trial_ends_at")
-                                if trial_str:
-                                    try:
-                                        td = datetime.fromisoformat(
-                                            trial_str.replace("Z", "+00:00")
-                                        )
-                                        if td > base_dt:
-                                            base_dt = td
-                                    except Exception:
-                                        pass
-                                new_end = base_dt + timedelta(days=30)
-                                supabase.table("subscriptions")\
-                                    .update({
-                                        "subscription_ends_at": new_end.isoformat()
-                                    })\
-                                    .eq("user_id", referrer_id)\
-                                    .execute()
-                                print(
-                                    f"Referral bonus: extended referrer "
-                                    f"{referrer_id} subscription_ends_at to "
-                                    f"{new_end.isoformat()}"
-                                )
                 except Exception as ref_err:
-                    print(f"Referral conversion error (non-fatal): {ref_err}")
+                    print(f"Referral converted-flag error (non-fatal): {ref_err}")
 
         elif event_type == "invoice.payment_succeeded":
             invoice = event["data"]["object"]

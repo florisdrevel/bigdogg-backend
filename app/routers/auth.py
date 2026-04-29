@@ -66,12 +66,26 @@ async def register(data: RegisterRequest):
                     .eq("code", ref_code)\
                     .execute()
                 if ref_lookup.data:
+                    referrer_user_id = ref_lookup.data[0]["referrer_user_id"]
                     supabase.table("referral_signups").insert({
                         "referrer_code": ref_code,
-                        "referrer_user_id": ref_lookup.data[0]["referrer_user_id"],
+                        "referrer_user_id": referrer_user_id,
                         "new_user_id": response.user.id,
                         "converted": False,
                     }).execute()
+                    # Recompute referrer's bonus eligibility (per 2 signups
+                    # they earn 1 free pro month, capped at 3). Failures
+                    # never block signup.
+                    try:
+                        from app.routers.subscription import (
+                            maybe_grant_referral_bonus,
+                        )
+                        maybe_grant_referral_bonus(referrer_user_id)
+                    except Exception as bonus_err:
+                        print(
+                            "Referral bonus grant error (non-fatal): "
+                            f"{bonus_err}"
+                        )
             except Exception as ref_err:
                 print(f"Referral signup tracking error (non-fatal): {ref_err}")
 
