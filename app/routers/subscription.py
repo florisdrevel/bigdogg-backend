@@ -347,6 +347,237 @@ async def send_trial_expiry_notifications(request: Request):
     }
 
 
+# ─── BTW deadline reminders ─────────────────────────────────
+# Dutch quarterly VAT (BTW) deadlines: month, day, label
+BTW_DEADLINES = [
+    (4, 30, "Q1"),   # 30 april
+    (7, 31, "Q2"),   # 31 juli
+    (10, 31, "Q3"),  # 31 oktober
+    (1, 31, "Q4"),   # 31 januari (vorig jaar)
+]
+BTW_REMINDER_DAYS_BEFORE = 7
+
+_DUTCH_MONTHS = {
+    1: "januari", 2: "februari", 3: "maart", 4: "april",
+    5: "mei", 6: "juni", 7: "juli", 8: "augustus",
+    9: "september", 10: "oktober", 11: "november", 12: "december",
+}
+_EN_MONTHS = {
+    1: "January", 2: "February", 3: "March", 4: "April",
+    5: "May", 6: "June", 7: "July", 8: "August",
+    9: "September", 10: "October", 11: "November", 12: "December",
+}
+
+
+def _format_dutch_date(d: date) -> str:
+    return f"{d.day} {_DUTCH_MONTHS[d.month]} {d.year}"
+
+
+def _format_english_date(d: date) -> str:
+    return f"{_EN_MONTHS[d.month]} {d.day}, {d.year}"
+
+
+def _send_btw_reminder_email(
+    email: str,
+    name: str,
+    quarter: str,
+    deadline: date,
+    language: str,
+) -> None:
+    """Send a BTW deadline reminder in the user's language (nl or en)."""
+    if language == "en":
+        subject = "Don't forget your VAT return — deadline in 7 days"
+        deadline_text = _format_english_date(deadline)
+        tagline = "Accounting for Dutch freelancers"
+        urgency = f"{quarter} VAT · {deadline_text}"
+        greeting = f"Hi {name},"
+        intro = (
+            f"Just a heads-up: your <strong>{quarter}</strong> VAT return is due "
+            f"on <strong>{deadline_text}</strong> — that's 7 days from now."
+        )
+        ready = "Your BTW report PDF is already waiting for you in BigDogg."
+        instructions = (
+            "Open BigDogg, go to the <strong>Overzicht</strong> tab, pick the right "
+            "quarter, and download the PDF. Then submit it via the Belastingdienst "
+            "portal before the deadline."
+        )
+        cta = "Open BigDogg"
+        footer_note = (
+            f"Friendly reminder — the {quarter} VAT return itself is your own "
+            "responsibility. BigDogg does the prep, you submit."
+        )
+    else:
+        subject = "Vergeet je BTW-aangifte niet — deadline over 7 dagen"
+        deadline_text = _format_dutch_date(deadline)
+        tagline = "Boekhouden voor ZZP'ers"
+        urgency = f"{quarter} BTW · {deadline_text}"
+        greeting = f"Hoi {name},"
+        intro = (
+            f"Even een seintje: je <strong>{quarter}</strong> BTW-aangifte moet "
+            f"uiterlijk <strong>{deadline_text}</strong> binnen zijn — over 7 dagen dus."
+        )
+        ready = "Je BTW-aangifte PDF staat al voor je klaar in BigDogg."
+        instructions = (
+            "Open BigDogg, ga naar het <strong>Overzicht</strong> tabblad, kies het "
+            "juiste kwartaal en download de PDF. Dien hem dan in via het "
+            "Belastingdienst portaal vóór de deadline."
+        )
+        cta = "Open BigDogg"
+        footer_note = (
+            f"Vriendelijke herinnering — de {quarter} aangifte zelf is je eigen "
+            "verantwoordelijkheid. BigDogg doet het voorwerk, jij dient hem in."
+        )
+
+    html_body = f"""<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#f5f3ef;font-family:Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f3ef;padding:40px 20px;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+
+        <!-- Header -->
+        <tr><td style="background:#1B3A4B;padding:28px 40px;text-align:center;">
+          <div style="font-size:26px;font-weight:900;color:#C9A96E;font-family:Arial,sans-serif;">BigDogg.</div>
+          <div style="color:#ffffff;opacity:0.7;font-size:12px;margin-top:4px;">{tagline}</div>
+        </td></tr>
+
+        <!-- Deadline banner -->
+        <tr><td style="background:#FEF3C7;padding:16px 40px;text-align:center;border-bottom:1px solid #E2DDD6;">
+          <div style="font-size:28px;">📅</div>
+          <div style="color:#92400E;font-size:18px;font-weight:bold;margin-top:6px;">{urgency}</div>
+        </td></tr>
+
+        <!-- Body -->
+        <tr><td style="padding:36px 40px;">
+          <p style="color:#1B3A4B;font-size:16px;margin:0 0 12px 0;">{greeting}</p>
+          <p style="color:#4A6572;font-size:15px;line-height:1.6;margin:0 0 20px 0;">{intro}</p>
+          <p style="color:#4A6572;font-size:15px;line-height:1.6;margin:0 0 24px 0;"><strong>{ready}</strong> {instructions}</p>
+
+          <!-- CTA -->
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr><td align="center">
+              <a href="https://bigdogg.nl" style="display:inline-block;background:#1B3A4B;color:#ffffff;text-decoration:none;padding:14px 36px;border-radius:10px;font-weight:bold;font-size:15px;">{cta}</a>
+            </td></tr>
+          </table>
+
+          <p style="color:#8FA8B4;font-size:12px;line-height:1.6;margin:28px 0 0 0;text-align:center;font-style:italic;">{footer_note}</p>
+        </td></tr>
+
+        <!-- Footer -->
+        <tr><td style="background:#f5f3ef;padding:20px 40px;text-align:center;border-top:1px solid #E2DDD6;">
+          <div style="color:#4A6572;font-size:12px;">BigDogg &middot; <a href="https://bigdogg.nl" style="color:#1B3A4B;">bigdogg.nl</a></div>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+    resend.Emails.send({
+        "from": "BigDogg <info@bigdogg.nl>",
+        "to": [email],
+        "subject": subject,
+        "html": html_body,
+    })
+
+
+@router.post("/cron/btw-reminders")
+async def send_btw_reminders(request: Request):
+    """
+    Daily cron — sends a BTW deadline reminder 7 days before each quarterly
+    deadline (30 april, 31 juli, 31 oktober, 31 januari) to all users with
+    subscription status 'trial' or 'active'. Uses the user's profile.language
+    field for NL/EN. Localised email content + branded template.
+
+    Header: x-cron-secret: <your_cron_secret>
+    Schedule: daily at 09:00 Europe/Amsterdam (cron-job.org)
+    """
+    auth = request.headers.get("x-cron-secret", "")
+    if auth != settings.cron_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    today = datetime.now(timezone.utc).date()
+
+    # Find a deadline exactly BTW_REMINDER_DAYS_BEFORE days from today.
+    matched = None
+    for month, day, quarter in BTW_DEADLINES:
+        # Same calendar year (handles 30 april, 31 juli, 31 oktober, and Q4 31 januari of current year)
+        try:
+            d = date(today.year, month, day)
+            if (d - today).days == BTW_REMINDER_DAYS_BEFORE:
+                matched = (d, quarter)
+                break
+        except ValueError:
+            continue
+
+    if not matched:
+        return {
+            "sent": 0,
+            "errors": 0,
+            "checked": 0,
+            "matched_deadline": None,
+            "message": "No BTW deadline 7 days from today",
+        }
+
+    deadline_date, quarter = matched
+    print(f"BTW reminder cron: {quarter} deadline on {deadline_date}, sending to trial+active users")
+
+    sent = 0
+    errors = 0
+    user_count = 0
+
+    try:
+        # Subscriptions where status in (trial, active)
+        result = supabase.table("subscriptions")\
+            .select("user_id, status")\
+            .in_("status", ["trial", "active"])\
+            .execute()
+        subs = result.data or []
+        user_count = len(subs)
+
+        for sub in subs:
+            try:
+                user_id = sub["user_id"]
+                user_data = supabase.auth.admin.get_user_by_id(user_id)
+                email = user_data.user.email if user_data.user else None
+                if not email:
+                    continue
+
+                profile_result = supabase.table("user_profiles")\
+                    .select("full_name, business_name, language")\
+                    .eq("id", user_id)\
+                    .execute()
+                profile = profile_result.data[0] if profile_result.data else {}
+                name = (
+                    profile.get("full_name")
+                    or profile.get("business_name")
+                    or email.split("@")[0]
+                )
+                language = (profile.get("language") or "nl").lower()
+                if language not in ("nl", "en"):
+                    language = "nl"
+
+                _send_btw_reminder_email(email, name, quarter, deadline_date, language)
+                sent += 1
+                print(f"BTW reminder sent to {email} ({language}, {quarter})")
+            except Exception as e:
+                errors += 1
+                print(f"BTW reminder error for user {sub.get('user_id')}: {e}")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "sent": sent,
+        "errors": errors,
+        "checked": user_count,
+        "matched_deadline": deadline_date.isoformat(),
+        "quarter": quarter,
+    }
+
+
 @router.post("/webhook")
 async def stripe_webhook(request: Request):
     payload = await request.body()
