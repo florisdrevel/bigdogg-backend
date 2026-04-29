@@ -3,6 +3,7 @@ import resend
 from app.config import settings
 resend.api_key = settings.resend_api_key
 from pydantic import BaseModel, EmailStr
+from typing import Optional
 from app.database import supabase
 import stripe
 import requests as http_requests
@@ -15,6 +16,7 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     password: str
     full_name: str
+    ref: Optional[str] = None  # referral code, optional
 
 
 class LoginRequest(BaseModel):
@@ -54,6 +56,24 @@ async def register(data: RegisterRequest):
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="An account with this email already exists. Please sign in instead."
             )
+
+        # Track referral if code present (non-fatal — never block signup on this)
+        if data.ref:
+            try:
+                ref_code = data.ref.strip().upper()
+                ref_lookup = supabase.table("referrals")\
+                    .select("referrer_user_id")\
+                    .eq("code", ref_code)\
+                    .execute()
+                if ref_lookup.data:
+                    supabase.table("referral_signups").insert({
+                        "referrer_code": ref_code,
+                        "referrer_user_id": ref_lookup.data[0]["referrer_user_id"],
+                        "new_user_id": response.user.id,
+                        "converted": False,
+                    }).execute()
+            except Exception as ref_err:
+                print(f"Referral signup tracking error (non-fatal): {ref_err}")
 
         return {
             "message": "Registration successful. Please check your email to confirm.",

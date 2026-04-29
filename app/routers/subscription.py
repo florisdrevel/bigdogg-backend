@@ -640,6 +640,69 @@ async def stripe_webhook(request: Request):
                 except Exception as e:
                     print(f"BigDogg expense insert error (non-fatal): {e}")
 
+                # Referral conversion: if this user signed up via someone's
+                # referral code, mark their signup as converted and extend
+                # the referrer's subscription by 30 days.
+                try:
+                    ref_lookup = supabase.table("referral_signups")\
+                        .select("id, referrer_user_id, converted")\
+                        .eq("new_user_id", user_id)\
+                        .execute()
+                    if ref_lookup.data and not ref_lookup.data[0].get("converted"):
+                        signup_row = ref_lookup.data[0]
+                        now_iso = datetime.now(timezone.utc).isoformat()
+
+                        supabase.table("referral_signups")\
+                            .update({"converted": True, "converted_at": now_iso})\
+                            .eq("id", signup_row["id"])\
+                            .execute()
+
+                        referrer_id = signup_row["referrer_user_id"]
+                        if referrer_id:
+                            ref_sub = supabase.table("subscriptions")\
+                                .select("subscription_ends_at, status, trial_ends_at")\
+                                .eq("user_id", referrer_id)\
+                                .execute()
+                            if ref_sub.data:
+                                row = ref_sub.data[0]
+                                now = datetime.now(timezone.utc)
+                                # Pick the latest of: existing paid end, trial end, now.
+                                base_dt = now
+                                end_str = row.get("subscription_ends_at")
+                                if end_str:
+                                    try:
+                                        ed = datetime.fromisoformat(
+                                            end_str.replace("Z", "+00:00")
+                                        )
+                                        if ed > base_dt:
+                                            base_dt = ed
+                                    except Exception:
+                                        pass
+                                trial_str = row.get("trial_ends_at")
+                                if trial_str:
+                                    try:
+                                        td = datetime.fromisoformat(
+                                            trial_str.replace("Z", "+00:00")
+                                        )
+                                        if td > base_dt:
+                                            base_dt = td
+                                    except Exception:
+                                        pass
+                                new_end = base_dt + timedelta(days=30)
+                                supabase.table("subscriptions")\
+                                    .update({
+                                        "subscription_ends_at": new_end.isoformat()
+                                    })\
+                                    .eq("user_id", referrer_id)\
+                                    .execute()
+                                print(
+                                    f"Referral bonus: extended referrer "
+                                    f"{referrer_id} subscription_ends_at to "
+                                    f"{new_end.isoformat()}"
+                                )
+                except Exception as ref_err:
+                    print(f"Referral conversion error (non-fatal): {ref_err}")
+
         elif event_type == "invoice.payment_succeeded":
             invoice = event["data"]["object"]
             if hasattr(invoice, 'to_dict'):
