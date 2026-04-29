@@ -134,37 +134,46 @@ def maybe_grant_referral_bonus(referrer_user_id: str) -> dict:
         bonuses_to_grant = eligible - applied
         status = sub_row.get("status")
 
+        # Strategy: paid users get a Stripe credit (saves them money on the
+        # next invoice). If the Stripe call fails for any reason — bad
+        # customer_id, test/live mismatch, transient API error — we fall
+        # back to extending bonus_active_until so the tracking is never lost
+        # and the user always sees the counter advance.
+        stripe_credit_applied = False
         if status == "active":
-            # Paid user: Stripe customer balance credit (negative = credit)
             customer_id = sub_row.get("stripe_customer_id")
-            if not customer_id:
+            if customer_id:
+                try:
+                    stripe.Customer.create_balance_transaction(
+                        customer_id,
+                        amount=-PRICE_AMOUNT * bonuses_to_grant,
+                        currency=PRICE_CURRENCY,
+                        description=(
+                            f"BigDogg referral bonus: "
+                            f"{bonuses_to_grant} maand(en) gratis"
+                        ),
+                    )
+                    stripe_credit_applied = True
+                    print(
+                        f"[referral-bonus] granted {bonuses_to_grant} Stripe "
+                        f"credit(s) to paid user {referrer_user_id}"
+                    )
+                except Exception as stripe_err:
+                    print(
+                        f"[referral-bonus] Stripe credit failed for "
+                        f"{referrer_user_id}: {stripe_err}. "
+                        "Falling back to bonus_active_until extension."
+                    )
+            else:
                 print(
                     f"[referral-bonus] paid user {referrer_user_id} has no "
-                    "stripe_customer_id; skipping credit"
+                    "stripe_customer_id; falling back to "
+                    "bonus_active_until extension."
                 )
-                return state
-            try:
-                stripe.Customer.create_balance_transaction(
-                    customer_id,
-                    amount=-PRICE_AMOUNT * bonuses_to_grant,
-                    currency=PRICE_CURRENCY,
-                    description=(
-                        f"BigDogg referral bonus: "
-                        f"{bonuses_to_grant} maand(en) gratis"
-                    ),
-                )
-                print(
-                    f"[referral-bonus] granted {bonuses_to_grant} Stripe "
-                    f"credit(s) to paid user {referrer_user_id}"
-                )
-            except Exception as stripe_err:
-                print(
-                    f"[referral-bonus] Stripe credit failed for "
-                    f"{referrer_user_id}: {stripe_err}"
-                )
-                return state
-        else:
-            # Trial / expired / other: extend bonus_active_until
+
+        if not stripe_credit_applied:
+            # Trial users, paid-but-broken-Stripe users, expired users —
+            # extend bonus_active_until so the bonus is always tracked.
             now = datetime.now(timezone.utc)
             base = now
             if current_until:
@@ -190,7 +199,7 @@ def maybe_grant_referral_bonus(referrer_user_id: str) -> dict:
                 f"for {referrer_user_id}"
             )
 
-        # Persist applied count
+        # Persist applied count regardless of which path applied the bonus
         supabase.table("subscriptions")\
             .update({"bonus_months_applied": eligible})\
             .eq("user_id", referrer_user_id)\
