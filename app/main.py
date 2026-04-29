@@ -5,6 +5,7 @@ from app.routers import auth, products, clients, invoices, ai, expenses, overvie
 from app.routers import import_invoices
 from app.routers import payments
 from app.routers import hours, investments, projects
+from app.routers import support
 import os
 
 
@@ -44,6 +45,7 @@ app.include_router(payments.router, prefix="/api/v1/payments", tags=["payments"]
 app.include_router(hours.router, prefix="/api/v1/hours", tags=["hours"])
 app.include_router(investments.router, prefix="/api/v1/investments", tags=["investments"])
 app.include_router(projects.router, prefix="/api/v1/projects", tags=["projects"])
+app.include_router(support.router, prefix="/api/v1/support", tags=["support"])
 
 
 @app.get("/health")
