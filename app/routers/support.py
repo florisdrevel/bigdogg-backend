@@ -1,10 +1,22 @@
 from fastapi import APIRouter, HTTPException, Body
 from app.config import settings
+import os
 import resend
 import html
+import traceback
 
 router = APIRouter()
 resend.api_key = settings.resend_api_key
+
+# Default to info@bigdogg.nl, but let the operator override via env var.
+# Comma-separated list also supported, e.g. "info@bigdogg.nl,founder@gmail.com".
+_DEFAULT_SUPPORT_INBOX = "info@bigdogg.nl"
+
+
+def _support_recipients() -> list[str]:
+    raw = os.getenv("SUPPORT_INBOX", _DEFAULT_SUPPORT_INBOX)
+    parts = [e.strip() for e in raw.split(",") if e.strip()]
+    return parts or [_DEFAULT_SUPPORT_INBOX]
 
 
 @router.post("")
@@ -51,18 +63,25 @@ async def submit_support(payload: dict = Body(...)):
         f"<hr><p><small>Reply directly to this email to respond to the customer.</small></p>"
     )
 
+    recipients = _support_recipients()
     try:
-        resend.Emails.send(
+        result = resend.Emails.send(
             {
                 "from": "BigDogg Support <info@bigdogg.nl>",
-                "to": ["info@bigdogg.nl"],
+                "to": recipients,
                 "reply_to": email,
                 "subject": subject,
                 "text": text_body,
                 "html": html_body,
             }
         )
-        return {"success": True}
+        # Log so we can confirm delivery via Railway logs.
+        print(
+            f"[support] sent to={recipients} reply_to={email} "
+            f"resend_id={result.get('id') if isinstance(result, dict) else result}"
+        )
+        return {"success": True, "to": recipients}
     except Exception as e:
-        print(f"Support email error: {e}")
-        raise HTTPException(status_code=500, detail="Could not send message")
+        print(f"[support] error: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Could not send message: {e}")
