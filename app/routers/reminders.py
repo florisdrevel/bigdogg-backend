@@ -31,39 +31,38 @@ def _send_overdue_notification(
     Does NOT email the client — the user decides whether to chase.
     """
     if language == "en":
-        subject = f"Invoice {invoice_number} is still unpaid by {client_name}"
+        subject = f"Invoice {invoice_number} has been outstanding for {days_overdue} days"
         tagline = "Accounting for Dutch freelancers"
-        urgency = (
-            f"Unpaid for {days_overdue} days"
-        )
+        urgency = f"Unpaid for {days_overdue} days"
         greeting = f"Hi {user_name},"
         intro = (
-            f"Heads-up: invoice <strong>{invoice_number}</strong> to "
-            f"<strong>{client_name}</strong> for <strong>€ {total_eur}</strong> "
-            f"is still unpaid {days_overdue} days after the invoice date."
+            f"<strong>{client_name}</strong> hasn't paid invoice "
+            f"<strong>{invoice_number}</strong> of <strong>€ {total_eur}</strong> yet. "
+            f"It's been outstanding for {days_overdue} days."
         )
         question = "Want to send a reminder?"
         instructions = (
-            "Open BigDogg, find the invoice in the list and tap "
-            "<strong>Stuur herinnering</strong>. We won't email the client "
-            "without you saying so."
+            "Open BigDogg to check the status. From the invoice detail you "
+            "can tap <strong>Stuur herinnering</strong> to email the client. "
+            "We'll never email them without you saying so."
         )
         cta = "Open BigDogg"
         footer = "We never email your clients automatically. You're in charge."
     else:
-        subject = f"Factuur {invoice_number} staat nog open bij {client_name}"
+        subject = f"Factuur {invoice_number} staat al {days_overdue} dagen open"
         tagline = "Boekhouden voor ZZP'ers"
         urgency = f"{days_overdue} dagen openstaand"
         greeting = f"Hoi {user_name},"
         intro = (
-            f"Even een seintje: factuur <strong>{invoice_number}</strong> aan "
-            f"<strong>{client_name}</strong> voor <strong>€ {total_eur}</strong> "
-            f"staat al {days_overdue} dagen open."
+            f"<strong>{client_name}</strong> heeft factuur "
+            f"<strong>{invoice_number}</strong> van <strong>€ {total_eur}</strong> "
+            f"nog niet betaald."
         )
         question = "Wil je een herinnering sturen?"
         instructions = (
-            "Open BigDogg, zoek de factuur op en tik op "
-            "<strong>Stuur herinnering</strong>. We mailen je klant nooit zomaar zelf."
+            "Open BigDogg om de status te bekijken. Vanuit de factuur kun je "
+            "op <strong>Stuur herinnering</strong> tikken om je klant te "
+            "mailen. We mailen je klant nooit zomaar zelf."
         )
         cta = "Open BigDogg"
         footer = (
@@ -159,14 +158,28 @@ def _notify_for_invoice(invoice: dict, days_overdue: int) -> bool:
     return True
 
 
+def _upsert_reminder(invoice_id: str, new_count: int) -> None:
+    """Record that we've sent the {new_count}-th nudge for this invoice."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    supabase.table("invoice_reminders")\
+        .upsert({
+            "invoice_id": invoice_id,
+            "reminder_count": new_count,
+            "last_sent_at": now_iso,
+        }, on_conflict="invoice_id")\
+        .execute()
+
+
 @router.post("/cron/payment-reminders")
 async def payment_reminders_cron(request: Request):
     """
     Daily cron — internal nudges to the ZZP'er for unpaid invoices.
 
-    Triggers:
-      - invoice_date == today - 14 AND reminder_count == 0
-      - invoice_date == today - 30 AND reminder_count == 1
+    Triggers (using the separate invoice_reminders table, not invoices.reminder_count):
+      - 14+ days old, status=sent, no row in invoice_reminders OR reminder_count=0
+        → send "14 days outstanding" nudge, set reminder_count=1
+      - 30+ days old, status=sent, reminder_count=1
+        → send "30 days outstanding" nudge, set reminder_count=2
 
     The cron does NOT email the client. It only emails the BigDogg user
     (the ZZP'er) so they decide whether to chase. The existing
@@ -181,45 +194,78 @@ async def payment_reminders_cron(request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     today = datetime.now(timezone.utc).date()
-    target_14 = today - timedelta(days=14)
-    target_30 = today - timedelta(days=30)
+    cutoff_14 = (today - timedelta(days=14)).isoformat()
+    cutoff_30 = (today - timedelta(days=30)).isoformat()
 
     sent_14 = 0
     sent_30 = 0
     errors = 0
+    checked_14 = 0
+    checked_30 = 0
 
     try:
-        # Day-14 unpaid, no reminders sent yet
-        r14 = supabase.table("invoices")\
-            .select("id, user_id, invoice_number, client_name, total_incl_btw, invoice_date, reminder_count, status")\
+        # ── 14+ day group ───────────────────────────────────────
+        candidates_14 = supabase.table("invoices")\
+            .select("id, user_id, invoice_number, client_name, total_incl_btw, invoice_date")\
             .eq("status", "sent")\
-            .eq("invoice_date", target_14.isoformat())\
+            .lte("invoice_date", cutoff_14)\
             .execute()
-        for inv in r14.data or []:
-            if (inv.get("reminder_count") or 0) != 0:
-                continue
-            try:
-                if _notify_for_invoice(inv, days_overdue=14):
-                    sent_14 += 1
-            except Exception as e:
-                errors += 1
-                print(f"14-day reminder error for invoice {inv.get('id')}: {e}")
+        candidates_14 = candidates_14.data or []
+        checked_14 = len(candidates_14)
 
-        # Day-30 unpaid, exactly one reminder already sent
-        r30 = supabase.table("invoices")\
-            .select("id, user_id, invoice_number, client_name, total_incl_btw, invoice_date, reminder_count, status")\
+        if candidates_14:
+            ids_14 = [inv["id"] for inv in candidates_14]
+            existing = supabase.table("invoice_reminders")\
+                .select("invoice_id, reminder_count")\
+                .in_("invoice_id", ids_14)\
+                .execute()
+            existing_map = {
+                r["invoice_id"]: (r.get("reminder_count") or 0)
+                for r in (existing.data or [])
+            }
+
+            for inv in candidates_14:
+                count = existing_map.get(inv["id"], 0)
+                if count != 0:
+                    continue  # already nudged for this invoice
+                try:
+                    if _notify_for_invoice(inv, days_overdue=14):
+                        _upsert_reminder(inv["id"], new_count=1)
+                        sent_14 += 1
+                except Exception as e:
+                    errors += 1
+                    print(f"14-day reminder error for invoice {inv.get('id')}: {e}")
+
+        # ── 30+ day group ───────────────────────────────────────
+        candidates_30 = supabase.table("invoices")\
+            .select("id, user_id, invoice_number, client_name, total_incl_btw, invoice_date")\
             .eq("status", "sent")\
-            .eq("invoice_date", target_30.isoformat())\
+            .lte("invoice_date", cutoff_30)\
             .execute()
-        for inv in r30.data or []:
-            if (inv.get("reminder_count") or 0) != 1:
-                continue
-            try:
-                if _notify_for_invoice(inv, days_overdue=30):
-                    sent_30 += 1
-            except Exception as e:
-                errors += 1
-                print(f"30-day reminder error for invoice {inv.get('id')}: {e}")
+        candidates_30 = candidates_30.data or []
+        checked_30 = len(candidates_30)
+
+        if candidates_30:
+            ids_30 = [inv["id"] for inv in candidates_30]
+            existing30 = supabase.table("invoice_reminders")\
+                .select("invoice_id, reminder_count")\
+                .in_("invoice_id", ids_30)\
+                .execute()
+            existing30_map = {
+                r["invoice_id"]: (r.get("reminder_count") or 0)
+                for r in (existing30.data or [])
+            }
+
+            for inv in candidates_30:
+                if existing30_map.get(inv["id"], 0) != 1:
+                    continue  # only nudge when 14-day already sent and 30-day not yet
+                try:
+                    if _notify_for_invoice(inv, days_overdue=30):
+                        _upsert_reminder(inv["id"], new_count=2)
+                        sent_30 += 1
+                except Exception as e:
+                    errors += 1
+                    print(f"30-day reminder error for invoice {inv.get('id')}: {e}")
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -228,6 +274,6 @@ async def payment_reminders_cron(request: Request):
         "sent_14_day": sent_14,
         "sent_30_day": sent_30,
         "errors": errors,
-        "checked_14": len(r14.data or []),
-        "checked_30": len(r30.data or []),
+        "checked_14": checked_14,
+        "checked_30": checked_30,
     }
