@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacybeleid – BigDogg</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f0f0f;
+            color: #e0e0e0;
+            min-height: 100vh;
+        }
+        header {
+            background: #1a1a1a;
+            border-bottom: 1px solid #2a2a2a;
+            padding: 20px 40px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .logo {
+            font-size: 24px;
+            font-weight: 800;
+            color: #ffffff;
+            text-decoration: none;
+            letter-spacing: -0.5px;
+        }
+        .logo span { color: #f97316; }
+        .lang-toggle {
+            display: flex;
+            gap: 8px;
+        }
+        .lang-btn {
+            padding: 8px 18px;
+            border-radius: 8px;
+            border: 1px solid #333;
+            background: transparent;
+            color: #999;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .lang-btn.active {
+            background: #f97316;
+            border-color: #f97316;
+            color: #fff;
+        }
+        .container {
+            max-width: 780px;
+            margin: 60px auto;
+            padding: 0 24px 80px;
+        }
+        h1 {
+            font-size: 36px;
+            font-weight: 800;
+            color: #ffffff;
+            margin-bottom: 8px;
+            letter-spacing: -0.5px;
+        }
+        .subtitle {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 48px;
+        }
+        h2 {
+            font-size: 18px;
+            font-weight: 700;
+            color: #ffffff;
+            margin: 36px 0 12px;
+        }
+        p, li {
+            font-size: 15px;
+            line-height: 1.75;
+            color: #aaa;
+        }
+        ul {
+            padding-left: 20px;
+            margin: 8px 0;
+        }
+        li { margin-bottom: 6px; }
+        a { color: #f97316; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .highlight-box {
+            background: #1a1a1a;
+            border: 1px solid #2a2a2a;
+            border-left: 3px solid #f97316;
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin: 16px 0;
+        }
+        .highlight-box p { color: #ccc; }
+        [data-lang] { display: none; }
+        [data-lang].active { display: block; }
+    </style>
+</head>
+<body>
+
+<header>
+    <a href="https://bigdogg.nl" class="logo">Big<span>Dogg</span></a>
+    <div class="lang-toggle">
+        <button class="lang-btn active" onclick="setLang('nl')">NL</button>
+        <button class="lang-btn" onclick="setLang('en')">EN</button>
+    </div>
+</header>
+
+<div class="container">
+
+    <!-- DUTCH -->
+    <div data-lang="nl" class="active">
+        <h1>Privacybeleid</h1>
+        <p class="subtitle">Laatst bijgewerkt: april 2025</p>
+
+        <p>BigDogg respecteert jouw privacy en gaat zorgvuldig om met jouw persoonsgegevens. In dit privacybeleid leggen we uit welke gegevens we verzamelen, waarom we dat doen en hoe we ze beschermen.</p>
+
+        <h2>1. Wie zijn wij?</h2>
+        <p>BigDogg is een factuurbeheerdienst voor Nederlandse zelfstandigen (ZZP'ers), aangeboden via <a href="https://bigdogg.nl">bigdogg.nl</a>. BigDogg is gevestigd in Nederland en valt onder de Algemene Verordening Gegevensbescherming (AVG).</p>
+
+        <h2>2. Welke gegevens verzamelen we?</h2>
+        <ul>
+            <li>Naam en e-mailadres (bij registratie)</li>
+            <li>Bedrijfsnaam, adres en BTW-nummer (voor factuurgegevens)</li>
+            <li>Bankrekeningnummer (optioneel, voor vermelding op facturen)</li>
+            <li>Factuur- en uitgavengegevens die je zelf invoert</li>
+            <li>Abonnementsgegevens (via Stripe)</li>
+        </ul>
+
+        <div class="highlight-box">
+            <p>Wij slaan <strong>geen</strong> betaalkaartgegevens op. Betalingen worden volledig verwerkt door Stripe. Wij ontvangen alleen een bevestiging van de transactie.</p>
+        </div>
+
+        <h2>3. Waarom verwerken we jouw gegevens?</h2>
+        <ul>
+            <li>Om de dienst te kunnen aanbieden en jouw facturen te beheren</li>
+            <li>Om je account te authenticeren via Supabase Auth</li>
+            <li>Om je abonnement te beheren en betalingen te verwerken via Stripe</li>
+            <li>Om transactionele e-mails te sturen (bevestigingen, wachtwoordherstel) via Resend</li>
+            <li>Om te voldoen aan wettelijke verplichtingen</li>
+        </ul>
+
+        <h2>4. Hoe lang bewaren we jouw gegevens?</h2>
+        <p>Wij bewaren jouw gegevens zolang je een actief account hebt. Als je jouw account verwijdert via de instellingen, worden <strong>alle</strong> jouw gegevens permanent en onherroepelijk gewist, inclusief facturen, uitgaven en profielgegevens. Je Stripe-abonnement wordt automatisch opgezegd.</p>
+
+        <h2>5. Delen we jouw gegevens?</h2>
+        <p>We delen jouw gegevens alleen met de volgende vertrouwde dienstverleners die noodzakelijk zijn voor de werking van BigDogg:</p>
+        <ul>
+            <li><strong>Supabase</strong> – databaseopslag en authenticatie (EU, Frankfurt)</li>
+            <li><strong>Stripe</strong> – betalingsverwerking</li>
+            <li><strong>Resend</strong> – transactionele e-mail</li>
+            <li><strong>Railway</strong> – serverhosting</li>
+            <li><strong>Anthropic</strong> – AI-functionaliteit voor factuurverwerking</li>
+        </ul>
+        <p>Wij verkopen jouw gegevens nooit aan derden.</p>
+
+        <h2>6. Jouw rechten (AVG)</h2>
+        <p>Als gebruiker heb je de volgende rechten:</p>
+        <ul>
+            <li>Recht op inzage in jouw gegevens</li>
+            <li>Recht op correctie van onjuiste gegevens</li>
+            <li>Recht op verwijdering (via accountverwijdering in de app)</li>
+            <li>Recht op bezwaar tegen verwerking</li>
+            <li>Recht op dataportabiliteit</li>
+        </ul>
+
+        <h2>7. Beveiliging</h2>
+        <p>Alle gegevens worden versleuteld opgeslagen en verstuurd via HTTPS. Wij passen technische en organisatorische maatregelen toe om jouw gegevens te beschermen tegen ongeautoriseerde toegang.</p>
+
+        <h2>8. Contact</h2>
+        <p>Heb je vragen over dit privacybeleid of wil je gebruik maken van jouw rechten? Stuur een e-mail naar <a href="mailto:privacy@bigdogg.nl">privacy@bigdogg.nl</a>.</p>
+    </div>
+
+    <!-- ENGLISH -->
+    <div data-lang="en">
+        <h1>Privacy Policy</h1>
+        <p class="subtitle">Last updated: April 2025</p>
+
+        <p>BigDogg respects your privacy and handles your personal data with care. This privacy policy explains what data we collect, why we collect it, and how we protect it.</p>
+
+        <h2>1. Who are we?</h2>
+        <p>BigDogg is an invoice management service for Dutch freelancers (ZZP'ers), offered via <a href="https://bigdogg.nl">bigdogg.nl</a>. BigDogg is based in the Netherlands and operates under the General Data Protection Regulation (GDPR).</p>
+
+        <h2>2. What data do we collect?</h2>
+        <ul>
+            <li>Name and email address (upon registration)</li>
+            <li>Company name, address and VAT number (for invoice data)</li>
+            <li>Bank account number (optional, for display on invoices)</li>
+            <li>Invoice and expense data you enter yourself</li>
+            <li>Subscription data (via Stripe)</li>
+        </ul>
+
+        <div class="highlight-box">
+            <p>We do <strong>not</strong> store payment card details. Payments are processed entirely by Stripe. We only receive a transaction confirmation.</p>
+        </div>
+
+        <h2>3. Why do we process your data?</h2>
+        <ul>
+            <li>To provide the service and manage your invoices</li>
+            <li>To authenticate your account via Supabase Auth</li>
+            <li>To manage your subscription and process payments via Stripe</li>
+            <li>To send transactional emails (confirmations, password reset) via Resend</li>
+            <li>To comply with legal obligations</li>
+        </ul>
+
+        <h2>4. How long do we retain your data?</h2>
+        <p>We retain your data for as long as you have an active account. If you delete your account via the settings, <strong>all</strong> your data is permanently and irreversibly erased, including invoices, expenses and profile data. Your Stripe subscription is automatically cancelled.</p>
+
+        <h2>5. Do we share your data?</h2>
+        <p>We only share your data with the following trusted service providers necessary for BigDogg to operate:</p>
+        <ul>
+            <li><strong>Supabase</strong> – database storage and authentication (EU, Frankfurt)</li>
+            <li><strong>Stripe</strong> – payment processing</li>
+            <li><strong>Resend</strong> – transactional email</li>
+            <li><strong>Railway</strong> – server hosting</li>
+            <li><strong>Anthropic</strong> – AI functionality for invoice processing</li>
+        </ul>
+        <p>We never sell your data to third parties.</p>
+
+        <h2>6. Your rights (GDPR)</h2>
+        <p>As a user you have the following rights:</p>
+        <ul>
+            <li>Right of access to your data</li>
+            <li>Right to rectification of incorrect data</li>
+            <li>Right to erasure (via account deletion in the app)</li>
+            <li>Right to object to processing</li>
+            <li>Right to data portability</li>
+        </ul>
+
+        <h2>7. Security</h2>
+        <p>All data is stored encrypted and transmitted via HTTPS. We apply technical and organisational measures to protect your data against unauthorised access.</p>
+
+        <h2>8. Contact</h2>
+        <p>Do you have questions about this privacy policy or would you like to exercise your rights? Send an email to <a href="mailto:privacy@bigdogg.nl">privacy@bigdogg.nl</a>.</p>
+    </div>
+
+</div>
+
+<script>
+    function setLang(lang) {
+        document.querySelectorAll('[data-lang]').forEach(el => {
+            el.classList.toggle('active', el.dataset.lang === lang);
+        });
+        document.querySelectorAll('.lang-btn').forEach(btn => {
+            btn.classList.toggle('active', btn.textContent.toLowerCase() === lang);
+        });
+        document.documentElement.lang = lang;
+    }
+</script>
+
+</body>
+</html>

@@ -1,11 +1,11 @@
 {
-    "name": "BigDogg",
-    "short_name": "BigDogg",
+    "name": "bigdogg_app",
+    "short_name": "bigdogg_app",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0F4C5C",
-    "theme_color": "#0F4C5C",
-    "description": "Slim factureren voor Nederlandse ZZP'ers",
+    "background_color": "#0175C2",
+    "theme_color": "#0175C2",
+    "description": "A new Flutter project.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
