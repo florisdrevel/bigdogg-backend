@@ -8,6 +8,7 @@ from app.routers import hours, investments, projects
 from app.routers import support
 from app.routers import reminders
 from app.routers import referrals
+from app.routers import quotes
 import os
 
 
@@ -50,6 +51,7 @@ app.include_router(projects.router, prefix="/api/v1/projects", tags=["projects"]
 app.include_router(support.router, prefix="/api/v1/support", tags=["support"])
 app.include_router(reminders.router, prefix="/api/v1/reminders", tags=["reminders"])
 app.include_router(referrals.router, prefix="/api/v1/referrals", tags=["referrals"])
+app.include_router(quotes.router, prefix="/api/v1/quotes", tags=["quotes"])
 
 
 @app.get("/health")
