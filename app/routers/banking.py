@@ -53,7 +53,7 @@ TINK_LINK_BASE = "https://link.tink.com/1.0"
 
 TOKEN_ENDPOINT = f"{TINK_API_BASE}/api/v1/oauth/token"
 USER_CREATE_ENDPOINT = f"{TINK_API_BASE}/api/v1/user/create"
-AUTHORIZATION_GRANT_ENDPOINT = f"{TINK_API_BASE}/api/v1/oauth/authorization-grant"
+AUTHORIZATION_GRANT_ENDPOINT = f"{TINK_API_BASE}/api/v1/oauth/authorization-grant/delegate"
 ACCOUNTS_ENDPOINT = f"{TINK_API_BASE}/data/v2/accounts"
 TRANSACTIONS_ENDPOINT = f"{TINK_API_BASE}/data/v2/transactions"
 TINK_LINK_CONNECT_URL = f"{TINK_LINK_BASE}/transactions/connect-accounts"
@@ -163,7 +163,9 @@ async def _generate_authorization_code(tink_user_id: str, hint: str) -> str:
         r = await client.post(
             AUTHORIZATION_GRANT_ENDPOINT,
             data={
+                "response_type": "code",
                 "user_id": tink_user_id,
+                "actor_client_id": settings.tink_client_id,
                 "id_hint": hint,
                 "scope": USER_SCOPES,
             },
