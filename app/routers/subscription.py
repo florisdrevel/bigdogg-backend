@@ -550,8 +550,8 @@ def _send_btw_reminder_email(
 ) -> None:
     """Send a BTW deadline reminder in the user's language (nl or en)."""
     if language == "en":
-        subject = "Don't forget your VAT return — deadline in 7 days"
         deadline_text = _format_english_date(deadline)
+        subject = f"Don't forget your VAT return — deadline {deadline_text}"
         tagline = "Accounting for Dutch freelancers"
         urgency = f"{quarter} VAT · {deadline_text}"
         greeting = f"Hi {name},"
@@ -571,8 +571,8 @@ def _send_btw_reminder_email(
             "responsibility. BigDogg does the prep, you submit."
         )
     else:
-        subject = "Vergeet je BTW-aangifte niet — deadline over 7 dagen"
         deadline_text = _format_dutch_date(deadline)
+        subject = f"Vergeet je BTW-aangifte niet — deadline {deadline_text}"
         tagline = "Boekhouden voor ZZP'ers"
         urgency = f"{quarter} BTW · {deadline_text}"
         greeting = f"Hoi {name},"
