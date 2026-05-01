@@ -19,5 +19,7 @@ class Settings:
     gmail_app_password: str = os.getenv("GMAIL_APP_PASSWORD", "")
     resend_api_key: str = os.getenv("RESEND_API_KEY", "")
     cron_secret: str = os.getenv("CRON_SECRET", "bigdogg-cron-2026")
+    tink_client_id: str = os.getenv("TINK_CLIENT_ID", "")
+    tink_client_secret: str = os.getenv("TINK_CLIENT_SECRET", "")
 
 settings = Settings()
