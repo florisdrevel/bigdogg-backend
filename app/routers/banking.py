@@ -271,7 +271,14 @@ async def connect_bank(request: Request):
         "authorization_code": grant_code,
         "state": state,
     })
-    return {"link_url": f"{TINK_LINK_CONNECT_URL}?{qs}"}
+    link_url = f"{TINK_LINK_CONNECT_URL}?{qs}"
+    cid = settings.tink_client_id or ""
+    cid_masked = f"{cid[:4]}...{cid[-4:]}" if len(cid) >= 8 else "<missing>"
+    print(
+        f"[tink] connect: client_id={cid_masked} tink_user_id={tink_user_id} "
+        f"redirect_uri={REDIRECT_URI} market={MARKET}"
+    )
+    return {"link_url": link_url}
 
 
 @router.get("/callback")
