@@ -59,8 +59,8 @@ TRANSACTIONS_ENDPOINT = f"{TINK_API_BASE}/data/v2/transactions"
 TINK_LINK_CONNECT_URL = f"{TINK_LINK_BASE}/transactions/connect-accounts"
 
 REDIRECT_URI = "https://bigdogg-production.up.railway.app/api/v1/banking/callback"
-APP_RETURN_OK = "https://bigdogg.nl/#/settings?bank_connected=true"
-APP_RETURN_ERR = "https://bigdogg.nl/#/settings?bank_error="
+APP_RETURN_OK = "https://bigdogg.nl/#/dashboard?bank=success"
+APP_RETURN_ERR = "https://bigdogg.nl/#/dashboard?bank_error="
 
 MARKET = "NL"
 LOCALE = "en_US"
