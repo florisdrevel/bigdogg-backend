@@ -12,7 +12,7 @@ import re
 router = APIRouter()
 
 # Frontend asset deploy marker — bumped to force Railway redeploy.
-_DEPLOY_MARKER = "2026-05-02"
+_DEPLOY_MARKER = "2026-05-02-projects-toggle-fix"
 
 
 def get_user_id(request: Request) -> str:
