@@ -11,6 +11,9 @@ import re
 
 router = APIRouter()
 
+# Frontend asset deploy marker — bumped to force Railway redeploy.
+_DEPLOY_MARKER = "2026-05-02"
+
 
 def get_user_id(request: Request) -> str:
     auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
