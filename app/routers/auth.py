@@ -72,7 +72,9 @@ def _send_new_device_email(email: str, user_agent: str, ip: str) -> None:
     device   = _describe_device(user_agent)
     location = _ip_location(ip)
     when     = datetime.now(timezone.utc).strftime("%d-%m-%Y, %H:%M UTC")
+    change_pw_url = "https://bigdogg.nl/#/login"
 
+    # ── Plain-text body (fallback for clients that strip HTML) ──
     location_line = f" Locatie: {location}.\n" if location else ""
     text_body = (
         f"Hoi,\n\n"
@@ -81,16 +83,68 @@ def _send_new_device_email(email: str, user_agent: str, ip: str) -> None:
         f"{location_line}"
         f"\nWas jij dit? Dan hoef je niets te doen.\n\n"
         f"Was jij dit NIET? Wijzig dan direct je wachtwoord via:\n"
-        f"https://bigdogg.nl/#/login\n\n"
+        f"{change_pw_url}\n\n"
         f"Vragen? Mail info@bigdogg.nl\n\n"
         f"Met vriendelijke groet,\nBigDogg\n\n---\nbigdogg.nl\n"
     )
+
+    # ── Branded HTML body (BigDogg teal/gold, same vibe as quote email) ──
+    location_html = (
+        f'<tr><td style="padding:6px 0;color:#4A6572;font-size:13px;">'
+        f'<strong style="color:#1B3A4B;">Locatie:</strong> {location}</td></tr>'
+    ) if location else ""
+    html_body = f"""<!DOCTYPE html>
+<html lang="nl">
+<body style="margin:0;padding:0;background:#F5F3EF;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#1B3A4B;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F5F3EF;padding:32px 16px;">
+    <tr><td align="center">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border-radius:12px;border:1px solid #E2DDD6;overflow:hidden;">
+        <tr><td align="center" style="padding:28px 28px 8px 28px;">
+          <img src="https://bigdogg.nl/icons/Icon-512.png" alt="BigDogg" width="64" height="64" style="display:block;border-radius:14px;" />
+          <h1 style="margin:14px 0 0 0;font-size:20px;font-weight:800;color:#1B3A4B;letter-spacing:-0.3px;">Nieuwe inlog op je account</h1>
+        </td></tr>
+        <tr><td style="padding:8px 28px 4px 28px;">
+          <p style="margin:0 0 14px 0;font-size:14px;line-height:1.6;color:#4A6572;">
+            We zagen zojuist een nieuwe inlog op je BigDogg-account.
+          </p>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F5F3EF;border-radius:10px;padding:14px 16px;">
+            <tr><td style="padding:6px 0;color:#4A6572;font-size:13px;"><strong style="color:#1B3A4B;">Apparaat:</strong> {device}</td></tr>
+            <tr><td style="padding:6px 0;color:#4A6572;font-size:13px;"><strong style="color:#1B3A4B;">IP:</strong> {ip}</td></tr>
+            {location_html}
+            <tr><td style="padding:6px 0;color:#4A6572;font-size:13px;"><strong style="color:#1B3A4B;">Tijdstip:</strong> {when}</td></tr>
+          </table>
+          <p style="margin:18px 0 6px 0;font-size:14px;line-height:1.6;color:#1B3A4B;">
+            <strong>Was jij dit?</strong> Dan hoef je niets te doen.
+          </p>
+          <p style="margin:0 0 18px 0;font-size:14px;line-height:1.6;color:#1B3A4B;">
+            <strong>Was jij dit NIET?</strong> Wijzig direct je wachtwoord via de knop hieronder.
+          </p>
+        </td></tr>
+        <tr><td align="center" style="padding:0 28px 28px 28px;">
+          <a href="{change_pw_url}" style="display:inline-block;background:#C9A96E;color:#ffffff;text-decoration:none;padding:13px 28px;border-radius:8px;font-weight:700;font-size:15px;">
+            Wachtwoord wijzigen
+          </a>
+        </td></tr>
+        <tr><td style="padding:0 28px 24px 28px;border-top:1px solid #E2DDD6;">
+          <p style="margin:14px 0 0 0;font-size:12px;line-height:1.5;color:#4A6572;">
+            Vragen of klopt iets niet? Mail
+            <a href="mailto:info@bigdogg.nl" style="color:#1B3A4B;">info@bigdogg.nl</a>.
+          </p>
+        </td></tr>
+      </table>
+      <p style="margin:14px 0 0 0;font-size:11px;color:#9CA3AF;">BigDogg · bigdogg.nl</p>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
     try:
         resend.Emails.send({
             "from": "BigDogg <info@bigdogg.nl>",
             "to": [email],
             "subject": "Nieuwe inlog op je BigDogg-account",
             "text": text_body,
+            "html": html_body,
         })
         print(f"[auth/devices] new-device email sent to {email} (location={location or 'unknown'})")
     except Exception as e:
