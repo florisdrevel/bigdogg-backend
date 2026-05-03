@@ -43,6 +43,7 @@ def create_notification(
 ) -> None:
     """Best-effort insert. Used from other routers."""
     if not user_id or not notification_type or not title:
+        print(f"[notifications] skipped — missing user_id/type/title")
         return
     try:
         supabase.table("notifications").insert({
@@ -52,6 +53,7 @@ def create_notification(
             "body":    body,
             "data":    data,
         }).execute()
+        print(f"[notifications] inserted type={notification_type} for user={user_id[:8]}…")
     except Exception as e:
         msg = str(e).lower()
         if "row-level security" in msg or "42501" in msg:
