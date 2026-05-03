@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File
-from typing import List, Optional
+from typing import List
 from datetime import date, timedelta
 from app.database import supabase
 from app.config import settings
@@ -10,9 +10,6 @@ import json
 import re
 
 router = APIRouter()
-
-# Frontend asset deploy marker — bumped to force Railway redeploy.
-_DEPLOY_MARKER = "2026-05-02-walkthrough-toggles"
 
 
 def get_user_id(request: Request) -> str:
@@ -35,52 +32,6 @@ def _extract_json(text: str) -> dict:
     text = re.sub(r'"\s*\n\s*"', '",\n  "', text)
     text = re.sub(r'(\d)\s*\n\s*"', r'\1,\n  "', text)
     return json.loads(text)
-
-
-def _log_file_import(
-    user_id: str,
-    filename: str,
-    import_type: str,
-    *,
-    imported: int = 0,
-    duplicates: int = 0,
-    failed: int = 0,
-    error: Optional[str] = None,
-) -> None:
-    """
-    Records one row in file_imports per uploaded file. Status is derived:
-      - failed   → file errored out before any record was written
-      - success  → at least one record imported, nothing else went wrong
-      - partial  → mixed (e.g. duplicates, or some succeeded some failed)
-
-    All errors are swallowed: if the file_imports table doesn't exist yet
-    (migration not applied) we do NOT want to break the user's import flow.
-    """
-    if failed > 0 and imported == 0 and duplicates == 0:
-        status = "failed"
-    elif imported > 0 and (duplicates > 0 or failed > 0):
-        status = "partial"
-    elif imported > 0:
-        status = "success"
-    elif duplicates > 0 and failed == 0:
-        # Pure duplicate — nothing imported, nothing failed.
-        status = "partial"
-    else:
-        status = "failed"
-
-    try:
-        supabase.table("file_imports").insert({
-            "user_id": user_id,
-            "filename": filename,
-            "import_type": import_type,
-            "records_imported": imported,
-            "records_duplicate": duplicates,
-            "records_failed": failed,
-            "status": status,
-            "error_message": error,
-        }).execute()
-    except Exception as e:
-        print(f"[file_imports] log skipped ({type(e).__name__}): {e}")
 
 
 async def _parse_invoice_file(content: bytes, filename: str, content_type: str) -> dict:
@@ -220,7 +171,6 @@ async def import_invoices(
                     "invoice_number": invoice_number,
                     "reason": "Invoice number already exists"
                 })
-                _log_file_import(user_id, filename, "invoice", duplicates=1)
                 continue
 
             existing_by_amount = supabase.table("invoices")\
@@ -236,7 +186,6 @@ async def import_invoices(
                     "invoice_number": invoice_number,
                     "reason": "Same date and amount already exists"
                 })
-                _log_file_import(user_id, filename, "invoice", duplicates=1)
                 continue
 
             try:
@@ -266,12 +215,10 @@ async def import_invoices(
                 "total": total,
                 "date": invoice_date,
             })
-            _log_file_import(user_id, filename, "invoice", imported=1)
 
         except Exception as e:
             print(f"IMPORT ERROR for {filename}: {e}")
             failed.append({"filename": filename, "error": str(e)})
-            _log_file_import(user_id, filename, "invoice", failed=1, error=str(e))
 
     return {
         "imported": imported,
@@ -361,7 +308,6 @@ async def import_expenses(
                     "description": full_description,
                     "reason": "Same date and amount already exists"
                 })
-                _log_file_import(user_id, filename, "expense", duplicates=1)
                 continue
 
             supabase.table("expenses").insert({
@@ -380,12 +326,10 @@ async def import_expenses(
                 "total": total,
                 "date": expense_date,
             })
-            _log_file_import(user_id, filename, "expense", imported=1)
 
         except Exception as e:
             print(f"IMPORT EXPENSE ERROR for {filename}: {e}")
             failed.append({"filename": filename, "error": str(e)})
-            _log_file_import(user_id, filename, "expense", failed=1, error=str(e))
 
     return {
         "imported": imported,
@@ -397,37 +341,6 @@ async def import_expenses(
     }
 
 
-@router.get("/file-imports")
-async def list_file_imports(request: Request):
-    """
-    Unified history of every file the user has uploaded through either
-    the invoice import or expense import flow. Powers the "Imported files"
-    section on the profile screen.
-    """
-    user_id = get_user_id(request)
-    try:
-        result = supabase.table("file_imports")\
-            .select("*")\
-            .eq("user_id", user_id)\
-            .order("imported_at", desc=True)\
-            .limit(200)\
-            .execute()
-        return {"file_imports": result.data or []}
-    except Exception as e:
-        # Most likely cause: migration not yet applied. Surface gracefully.
-        print(f"[file_imports] list failed: {e}")
-        return {"file_imports": [], "warning": "file_imports table missing"}
-
-
-@router.delete("/file-imports/{record_id}")
-async def delete_file_import(record_id: str, request: Request):
-    user_id = get_user_id(request)
-    try:
-        supabase.table("file_imports")\
-            .delete()\
-            .eq("id", record_id)\
-            .eq("user_id", user_id)\
-            .execute()
-        return {"success": True}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+# Removed: /file-imports endpoints. The "Imported files" UI section was
+# pulled — duplicates are blocked at insert time and users find imported
+# items via the normal Invoices/Expenses lists.

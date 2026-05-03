@@ -3,6 +3,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional, List
 from app.database import supabase
+from app.config import settings
 from datetime import date, timedelta, datetime, timezone
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
@@ -14,6 +15,7 @@ from reportlab.platypus import (
 from reportlab.lib.enums import TA_CENTER
 import io
 import urllib.request
+import resend
 
 router = APIRouter()
 
@@ -64,19 +66,35 @@ def get_user_id(request: Request) -> str:
 
 
 def generate_quote_number(user_id: str) -> str:
+    """
+    New quote numbers use the full word OFFERTE- as prefix so emails read
+    naturally ("onze offerte OFFERTE-2026-000007" beats the old
+    "onze offerte OFF-2026-000007" which looked like a typo).
+
+    Existing OFF-YYYY-... numbers stay as they are. The search counts ANY
+    quote in the current year so the OFFERTE- sequence picks up where the
+    legacy OFF- numbering left off — no duplicate sequence values.
+    """
     year = date.today().year
-    prefix = f"OFF-{year}-"
+    new_prefix = f"OFFERTE-{year}-"
+
+    # Highest existing sequence this year, regardless of prefix.
     result = supabase.table("quotes")\
         .select("quote_number")\
         .eq("user_id", user_id)\
-        .like("quote_number", f"{prefix}%")\
-        .order("quote_number", desc=True)\
-        .limit(1)\
+        .or_(f"quote_number.like.OFFERTE-{year}-%,quote_number.like.OFF-{year}-%")\
         .execute()
-    if result.data:
-        last_seq = int(result.data[0]["quote_number"].split("-")[2])
-        return f"{prefix}{str(last_seq + 1).zfill(6)}"
-    return f"{prefix}000001"
+
+    next_seq = 1
+    for row in (result.data or []):
+        try:
+            seq = int(row["quote_number"].split("-")[-1])
+            if seq + 1 > next_seq:
+                next_seq = seq + 1
+        except (ValueError, IndexError):
+            continue
+
+    return f"{new_prefix}{str(next_seq).zfill(6)}"
 
 
 def _compute_totals(lines: List[QuoteLine]) -> tuple[float, float, float]:
@@ -587,3 +605,155 @@ def _generate_quote_pdf(quote, lines, profile, client, sender_email=""):
 
     doc.build(story)
     return buffer.getvalue()
+
+
+# ─── Public quote endpoints (no auth — token-gated) ────────────
+# These three endpoints power the recipient-facing landing page at
+# https://bigdogg.nl/#/q/<share_token>. The token is an unguessable UUID
+# stored on the quotes row; possession of the URL implies authorization
+# to view and act on the quote.
+
+def _public_quote_payload(quote: dict, lines: list, profile: dict) -> dict:
+    """Return only the fields safe to expose to a non-authenticated client."""
+    return {
+        "quote_number":   quote.get("quote_number"),
+        "quote_date":     quote.get("quote_date"),
+        "valid_until":    quote.get("valid_until"),
+        "status":         quote.get("status"),
+        "subtotal_ex_btw": quote.get("subtotal_ex_btw"),
+        "btw_amount":     quote.get("btw_amount"),
+        "total_incl_btw": quote.get("total_incl_btw"),
+        "notes":          quote.get("notes"),
+        "client_name":    quote.get("client_name"),
+        "client_company": quote.get("client_company"),
+        "from_business":  profile.get("business_name") or profile.get("full_name") or "",
+        "from_email":     profile.get("email") or "",
+        "from_address":   profile.get("address"),
+        "from_postcode":  profile.get("postcode"),
+        "from_city":      profile.get("city"),
+        "from_kvk":       profile.get("kvk_number"),
+        "from_btw":       profile.get("btw_number"),
+        "from_iban":      profile.get("iban"),
+        "from_logo_url":  profile.get("logo_url"),
+        "lines": [
+            {
+                "description":      l.get("description"),
+                "quantity":         l.get("quantity"),
+                "unit_price_ex_btw": l.get("unit_price_ex_btw"),
+                "btw_rate":         l.get("btw_rate"),
+                "line_total_ex_btw": l.get("line_total_ex_btw"),
+                "unit":             l.get("unit"),
+            }
+            for l in lines
+        ],
+    }
+
+
+def _lookup_quote_by_token(token: str) -> dict:
+    quote_result = supabase.table("quotes")\
+        .select("*").eq("share_token", token).limit(1).execute()
+    if not quote_result.data:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    return quote_result.data[0]
+
+
+def _notify_freelancer(quote: dict, decision: str) -> None:
+    """Email the freelancer (quote author) when the client accepts/declines."""
+    if not settings.resend_api_key:
+        return
+    try:
+        user_id = quote.get("user_id")
+        # Auth user has the email
+        try:
+            user_resp = supabase.auth.admin.get_user_by_id(user_id)
+            freelancer_email = (user_resp.user.email if user_resp and user_resp.user else "") or ""
+        except Exception:
+            freelancer_email = ""
+        if not freelancer_email:
+            return
+
+        profile_result = supabase.table("user_profiles")\
+            .select("business_name, full_name").eq("id", user_id).execute()
+        profile = profile_result.data[0] if profile_result.data else {}
+        sender_name = profile.get("business_name") or profile.get("full_name") or "BigDogg"
+        client_name = quote.get("client_name") or "je klant"
+        quote_number = quote.get("quote_number") or "?"
+        total = quote.get("total_incl_btw") or 0
+
+        if decision == "accepted":
+            subject = f"{client_name} heeft offerte {quote_number} geaccepteerd"
+            body = (
+                f"Hoi {sender_name.split()[0]},\n\n"
+                f"Goed nieuws — {client_name} heeft je offerte {quote_number} "
+                f"(€ {total}) geaccepteerd.\n\n"
+                f"Je kunt 'm nu in BigDogg met één tik omzetten naar een factuur.\n\n"
+                f"Met vriendelijke groet,\nBigDogg\n\n---\nbigdogg.nl"
+            )
+        else:
+            subject = f"{client_name} heeft offerte {quote_number} afgewezen"
+            body = (
+                f"Hoi {sender_name.split()[0]},\n\n"
+                f"{client_name} heeft je offerte {quote_number} "
+                f"(€ {total}) afgewezen.\n\n"
+                f"Geen zorgen — je kunt altijd een nieuwe offerte sturen.\n\n"
+                f"Met vriendelijke groet,\nBigDogg\n\n---\nbigdogg.nl"
+            )
+
+        resend.api_key = settings.resend_api_key
+        resend.Emails.send({
+            "from": "BigDogg <info@bigdogg.nl>",
+            "to": [freelancer_email],
+            "subject": subject,
+            "text": body,
+        })
+    except Exception as e:
+        # Don't let a missing notification break the accept/decline flow.
+        print(f"[quotes] freelancer notification failed: {e}")
+
+
+@router.get("/public/{token}")
+async def public_quote(token: str):
+    """Read-only quote view for the recipient landing page."""
+    quote = _lookup_quote_by_token(token)
+    lines_result = supabase.table("quote_lines")\
+        .select("*").eq("quote_id", quote["id"]).execute()
+    profile_result = supabase.table("user_profiles")\
+        .select("*").eq("id", quote["user_id"]).execute()
+    profile = profile_result.data[0] if profile_result.data else {}
+    return _public_quote_payload(quote, lines_result.data or [], profile)
+
+
+@router.post("/public/{token}/accept")
+async def public_quote_accept(token: str):
+    quote = _lookup_quote_by_token(token)
+    if quote["status"] in ("accepted", "converted"):
+        return {"success": True, "status": quote["status"], "already": True}
+    if quote["status"] == "declined":
+        raise HTTPException(status_code=409, detail="Deze offerte is al afgewezen.")
+    supabase.table("quotes")\
+        .update({
+            "status": "accepted",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })\
+        .eq("id", quote["id"]).execute()
+    quote["status"] = "accepted"
+    _notify_freelancer(quote, "accepted")
+    return {"success": True, "status": "accepted"}
+
+
+@router.post("/public/{token}/decline")
+async def public_quote_decline(token: str):
+    quote = _lookup_quote_by_token(token)
+    if quote["status"] == "declined":
+        return {"success": True, "status": "declined", "already": True}
+    if quote["status"] in ("accepted", "converted"):
+        raise HTTPException(status_code=409, detail="Deze offerte is al geaccepteerd.")
+    supabase.table("quotes")\
+        .update({
+            "status": "declined",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })\
+        .eq("id", quote["id"]).execute()
+    quote["status"] = "declined"
+    _notify_freelancer(quote, "declined")
+    return {"success": True, "status": "declined"}
