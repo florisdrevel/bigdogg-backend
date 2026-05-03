@@ -19,6 +19,19 @@ MID_GREY = colors.HexColor('#E2DDD6')
 TEXT_SECONDARY = colors.HexColor('#4A6572')
 
 
+def _safe_hex(hex_str, fallback):
+    """Parse a user-supplied #RRGGBB hex; fall back on anything malformed."""
+    if not hex_str:
+        return fallback
+    s = str(hex_str).strip()
+    if not s.startswith('#'):
+        s = '#' + s
+    try:
+        return colors.HexColor(s)
+    except Exception:
+        return fallback
+
+
 @router.get("/{invoice_id}")
 async def generate_invoice_pdf(invoice_id: str, request: Request, token: str = Query(None)):
     auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
@@ -83,6 +96,10 @@ async def generate_invoice_pdf(invoice_id: str, request: Request, token: str = Q
 def _generate_pdf(invoice, lines, profile, client, sender_email=''):
     buffer = io.BytesIO()
 
+    # User-customisable accent colors. Default = BigDogg teal/gold.
+    primary = _safe_hex(profile.get('invoice_primary_color'), TEAL)
+    accent  = _safe_hex(profile.get('invoice_accent_color'),  GOLD)
+
     doc = SimpleDocTemplate(
         buffer,
         pagesize=A4,
@@ -94,12 +111,12 @@ def _generate_pdf(invoice, lines, profile, client, sender_email=''):
 
     story = []
 
-    title_style = ParagraphStyle('Title', fontName='Helvetica-Bold', fontSize=28, textColor=TEAL, spaceAfter=2*mm)
+    title_style = ParagraphStyle('Title', fontName='Helvetica-Bold', fontSize=28, textColor=primary, spaceAfter=2*mm)
     subtitle_style = ParagraphStyle('Subtitle', fontName='Helvetica', fontSize=10, textColor=TEXT_SECONDARY, spaceAfter=1*mm)
     label_style = ParagraphStyle('Label', fontName='Helvetica-Bold', fontSize=8, textColor=TEXT_SECONDARY, spaceAfter=1*mm, leading=12)
-    value_style = ParagraphStyle('Value', fontName='Helvetica', fontSize=10, textColor=TEAL, spaceAfter=1*mm, leading=14)
-    value_bold_style = ParagraphStyle('ValueBold', fontName='Helvetica-Bold', fontSize=10, textColor=TEAL, spaceAfter=1*mm, leading=14)
-    number_style = ParagraphStyle('Number', fontName='Helvetica-Bold', fontSize=20, textColor=TEAL, spaceAfter=2*mm)
+    value_style = ParagraphStyle('Value', fontName='Helvetica', fontSize=10, textColor=primary, spaceAfter=1*mm, leading=14)
+    value_bold_style = ParagraphStyle('ValueBold', fontName='Helvetica-Bold', fontSize=10, textColor=primary, spaceAfter=1*mm, leading=14)
+    number_style = ParagraphStyle('Number', fontName='Helvetica-Bold', fontSize=20, textColor=primary, spaceAfter=2*mm)
 
     page_width = A4[0] - 40*mm
 
@@ -113,7 +130,7 @@ def _generate_pdf(invoice, lines, profile, client, sender_email=''):
     else:
         name_font_size = 14
 
-    name_style = ParagraphStyle('Name', fontName='Helvetica-Bold', fontSize=name_font_size, textColor=TEAL, spaceAfter=2*mm)
+    name_style = ParagraphStyle('Name', fontName='Helvetica-Bold', fontSize=name_font_size, textColor=primary, spaceAfter=2*mm)
 
     # Try to load logo
     logo_url = profile.get('logo_url')
@@ -148,7 +165,7 @@ def _generate_pdf(invoice, lines, profile, client, sender_email=''):
     ]))
     story.append(header_table)
     story.append(Spacer(1, 5*mm))
-    story.append(HRFlowable(width="100%", thickness=3, color=GOLD, spaceAfter=6*mm))
+    story.append(HRFlowable(width="100%", thickness=3, color=accent, spaceAfter=6*mm))
 
     sender_lines = []
     if profile.get('full_name'):
@@ -218,7 +235,7 @@ def _generate_pdf(invoice, lines, profile, client, sender_email=''):
     col_widths = [page_width*0.40, page_width*0.10, page_width*0.18, page_width*0.10, page_width*0.22]
     lines_table = Table(table_data, colWidths=col_widths)
     lines_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), TEAL),
+        ('BACKGROUND', (0, 0), (-1, 0), primary),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTSIZE', (0, 0), (-1, 0), 8),
@@ -230,7 +247,7 @@ def _generate_pdf(invoice, lines, profile, client, sender_email=''):
         ('TOPPADDING', (0, 1), (-1, -1), 7),
         ('BOTTOMPADDING', (0, 1), (-1, -1), 7),
         ('LEFTPADDING', (0, 1), (-1, -1), 6),
-        ('TEXTCOLOR', (0, 1), (-1, -1), TEAL),
+        ('TEXTCOLOR', (0, 1), (-1, -1), primary),
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, LIGHT_GREY]),
         ('ALIGN', (1, 0), (-1, -1), 'RIGHT'),
         ('ALIGN', (0, 0), (0, -1), 'LEFT'),
@@ -253,11 +270,11 @@ def _generate_pdf(invoice, lines, profile, client, sender_email=''):
         ('FONTNAME', (0, 0), (-1, 1), 'Helvetica'),
         ('FONTNAME', (0, 2), (-1, 2), 'Helvetica-Bold'),
         ('FONTSIZE', (0, 0), (-1, -1), 10),
-        ('TEXTCOLOR', (0, 0), (-1, -1), TEAL),
+        ('TEXTCOLOR', (0, 0), (-1, -1), primary),
         ('ALIGN', (1, 0), (-1, -1), 'RIGHT'),
         ('TOPPADDING', (0, 0), (-1, -1), 4),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-        ('LINEABOVE', (1, 2), (-1, 2), 1.5, GOLD),
+        ('LINEABOVE', (1, 2), (-1, 2), 1.5, accent),
         ('BACKGROUND', (1, 2), (-1, 2), LIGHT_GREY),
         ('FONTSIZE', (0, 2), (-1, 2), 12),
     ]))

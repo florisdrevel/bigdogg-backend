@@ -5,11 +5,94 @@ resend.api_key = settings.resend_api_key
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 from app.database import supabase
+from datetime import datetime, timezone
+import hashlib
+import re
 import stripe
 import requests as http_requests
 stripe.api_key = settings.stripe_secret_key
 
 router = APIRouter()
+
+
+# ─── New-device login notifications ─────────────────────────────
+def _device_fingerprint(user_agent: str) -> str:
+    """Stable hash of the device class.
+
+    Strip version numbers from the User-Agent so a Chrome point-update
+    doesn't look like a new device, then SHA-256 the result.
+    """
+    ua = (user_agent or "").lower()
+    normalized = re.sub(r'\d+\.\d+(\.\d+)*', 'X', ua)[:200]
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:32]
+
+
+def _describe_device(user_agent: str) -> str:
+    ua = (user_agent or "").lower()
+    if "iphone" in ua:    return "een iPhone"
+    if "ipad" in ua:      return "een iPad"
+    if "android" in ua:   return "een Android-apparaat"
+    if "mac" in ua:       return "een Mac"
+    if "windows" in ua:   return "een Windows-pc"
+    if "linux" in ua:     return "een Linux-apparaat"
+    return "een onbekend apparaat"
+
+
+def _send_new_device_email(email: str, user_agent: str, ip: str) -> None:
+    if not settings.resend_api_key or not email:
+        return
+    device = _describe_device(user_agent)
+    when = datetime.now(timezone.utc).strftime("%d-%m-%Y, %H:%M UTC")
+    text_body = (
+        f"Hoi,\n\n"
+        f"We zagen zojuist een nieuwe inlog op je BigDogg-account vanaf "
+        f"{device} (IP: {ip}) op {when}.\n\n"
+        f"Was jij dit? Dan hoef je niets te doen.\n\n"
+        f"Was jij dit NIET? Wijzig dan direct je wachtwoord via:\n"
+        f"https://bigdogg.nl/#/login\n\n"
+        f"Vragen? Mail info@bigdogg.nl\n\n"
+        f"Met vriendelijke groet,\nBigDogg\n\n---\nbigdogg.nl\n"
+    )
+    try:
+        resend.Emails.send({
+            "from": "BigDogg <info@bigdogg.nl>",
+            "to": [email],
+            "subject": "Nieuwe inlog op je BigDogg-account",
+            "text": text_body,
+        })
+    except Exception as e:
+        print(f"[auth/devices] notify email failed: {e}")
+
+
+def _record_login_and_maybe_notify(
+    user_id: str, email: str, ip: str, user_agent: str
+) -> None:
+    """
+    Find or create the (user, fingerprint) row. Send a notification email
+    on first sight only. All errors are swallowed — security is nice to
+    have, but a missing user_devices table mustn't break logins.
+    """
+    fingerprint = _device_fingerprint(user_agent)
+    try:
+        existing = supabase.table("user_devices")\
+            .select("id").eq("user_id", user_id)\
+            .eq("fingerprint", fingerprint).execute()
+        now = datetime.now(timezone.utc).isoformat()
+        if existing.data:
+            supabase.table("user_devices").update({
+                "last_seen": now,
+                "last_ip":   ip,
+            }).eq("id", existing.data[0]["id"]).execute()
+        else:
+            supabase.table("user_devices").insert({
+                "user_id":     user_id,
+                "fingerprint": fingerprint,
+                "user_agent":  (user_agent or "")[:500],
+                "last_ip":     ip,
+            }).execute()
+            _send_new_device_email(email, user_agent, ip)
+    except Exception as e:
+        print(f"[auth/devices] tracking skipped: {e}")
 
 
 class RegisterRequest(BaseModel):
@@ -103,7 +186,7 @@ async def register(data: RegisterRequest):
 
 
 @router.post("/login")
-async def login(data: LoginRequest):
+async def login(data: LoginRequest, request: Request):
     try:
         response = supabase.auth.sign_in_with_password({
             "email": data.email,
@@ -121,6 +204,16 @@ async def login(data: LoginRequest):
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Please confirm your email address before signing in. Check your inbox."
             )
+
+        # New-device notification: hash the User-Agent, look up in
+        # user_devices; if unseen, insert and email the user.
+        forwarded = request.headers.get("x-forwarded-for", "")
+        ip = (forwarded.split(",")[0].strip() if forwarded
+              else (request.client.host if request.client else "unknown"))
+        user_agent = request.headers.get("user-agent", "")
+        _record_login_and_maybe_notify(
+            response.user.id, response.user.email, ip, user_agent
+        )
 
         return {
             "access_token": response.session.access_token,

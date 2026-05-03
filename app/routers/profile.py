@@ -18,6 +18,10 @@ class ProfileUpdate(BaseModel):
     iban: Optional[str] = None
     language: Optional[str] = None
     onboarding_complete: Optional[bool] = None
+    # Hex strings like "#1B3A4B". Used as the line/header color and the
+    # accent (totals row, OFFERTE/FACTUUR label) on PDF invoices/quotes.
+    invoice_primary_color: Optional[str] = None
+    invoice_accent_color: Optional[str] = None
 
 
 def get_user_id(request: Request) -> str:
