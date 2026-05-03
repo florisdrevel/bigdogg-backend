@@ -38,16 +38,48 @@ def _describe_device(user_agent: str) -> str:
     return "een onbekend apparaat"
 
 
+def _ip_location(ip: str) -> str:
+    """Best-effort IP geolocation via ipapi.co (free, no API key).
+
+    Returns 'City, Country' (or just country, or empty) — never raises.
+    Hard 2-second timeout so a slow geo lookup can't slow down login.
+    """
+    if not ip or ip in ("unknown", "127.0.0.1", "::1") or ip.startswith("10."):
+        return ""
+    try:
+        import urllib.request as _ur
+        import json as _json
+        req = _ur.Request(
+            f"https://ipapi.co/{ip}/json/",
+            headers={"User-Agent": "BigDogg/1.0"},
+        )
+        with _ur.urlopen(req, timeout=2) as r:
+            data = _json.loads(r.read())
+        city    = (data.get("city")         or "").strip()
+        country = (data.get("country_name") or "").strip()
+        if city and country:
+            return f"{city}, {country}"
+        return country or city or ""
+    except Exception as e:
+        print(f"[auth/devices] geolocation skipped: {e}")
+        return ""
+
+
 def _send_new_device_email(email: str, user_agent: str, ip: str) -> None:
     if not settings.resend_api_key or not email:
+        print(f"[auth/devices] email skipped — resend_api_key={bool(settings.resend_api_key)} email_present={bool(email)}")
         return
-    device = _describe_device(user_agent)
-    when = datetime.now(timezone.utc).strftime("%d-%m-%Y, %H:%M UTC")
+    device   = _describe_device(user_agent)
+    location = _ip_location(ip)
+    when     = datetime.now(timezone.utc).strftime("%d-%m-%Y, %H:%M UTC")
+
+    location_line = f" Locatie: {location}.\n" if location else ""
     text_body = (
         f"Hoi,\n\n"
         f"We zagen zojuist een nieuwe inlog op je BigDogg-account vanaf "
-        f"{device} (IP: {ip}) op {when}.\n\n"
-        f"Was jij dit? Dan hoef je niets te doen.\n\n"
+        f"{device} (IP: {ip}) op {when}.\n"
+        f"{location_line}"
+        f"\nWas jij dit? Dan hoef je niets te doen.\n\n"
         f"Was jij dit NIET? Wijzig dan direct je wachtwoord via:\n"
         f"https://bigdogg.nl/#/login\n\n"
         f"Vragen? Mail info@bigdogg.nl\n\n"
@@ -60,6 +92,7 @@ def _send_new_device_email(email: str, user_agent: str, ip: str) -> None:
             "subject": "Nieuwe inlog op je BigDogg-account",
             "text": text_body,
         })
+        print(f"[auth/devices] new-device email sent to {email} (location={location or 'unknown'})")
     except Exception as e:
         print(f"[auth/devices] notify email failed: {e}")
 
@@ -83,6 +116,7 @@ def _record_login_and_maybe_notify(
                 "last_seen": now,
                 "last_ip":   ip,
             }).eq("id", existing.data[0]["id"]).execute()
+            print(f"[auth/devices] known device for {email} fp={fingerprint[:8]}…")
         else:
             supabase.table("user_devices").insert({
                 "user_id":     user_id,
@@ -90,9 +124,16 @@ def _record_login_and_maybe_notify(
                 "user_agent":  (user_agent or "")[:500],
                 "last_ip":     ip,
             }).execute()
+            print(f"[auth/devices] NEW device for {email} fp={fingerprint[:8]}… → sending email")
             _send_new_device_email(email, user_agent, ip)
     except Exception as e:
-        print(f"[auth/devices] tracking skipped: {e}")
+        # Most likely: user_devices migration not yet applied. Surface that
+        # clearly so it's easy to spot in Railway logs.
+        msg = str(e).lower()
+        if "user_devices" in msg or "relation" in msg or "does not exist" in msg or "schema cache" in msg:
+            print(f"[auth/devices] table missing — RUN migrations/user_devices.sql ({e})")
+        else:
+            print(f"[auth/devices] tracking skipped: {e}")
 
 
 class RegisterRequest(BaseModel):
