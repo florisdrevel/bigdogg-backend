@@ -65,8 +65,21 @@ APP_RETURN_ERR = "https://bigdogg.nl/#/dashboard?bank_error="
 MARKET = "NL"
 LOCALE = "en_US"
 
-# Scopes the user grants when connecting their bank.
-USER_SCOPES = "transactions:read,accounts:read,credentials:read,user:read"
+# Scopes the user grants when connecting their bank. Tink Link's
+# connect-accounts flow needs the WRITE scopes (credentials:write,
+# credentials:refresh, providers:read, authorization:read) to actually
+# create credentials — read-only scopes triggered the Link UI error
+# REQUEST_FAILED_FETCH_EXISTING_USER on freshly-created users.
+USER_SCOPES = (
+    "transactions:read,"
+    "accounts:read,"
+    "credentials:read,"
+    "credentials:write,"
+    "credentials:refresh,"
+    "providers:read,"
+    "authorization:read,"
+    "user:read"
+)
 
 # Scopes used when authenticating the app itself (client_credentials).
 APP_SCOPES = "user:create,user:read,authorization:grant"
