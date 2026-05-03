@@ -198,6 +198,19 @@ async def complete_onboarding(token: str, client: ClientOnboarding):
             .eq("token", token)\
             .execute()
 
+        from app.routers.notifications import create_notification
+        new_client = result.data[0] if result.data else {}
+        display_name = (
+            client.company_name or client.contact_name or "Een nieuwe klant"
+        )
+        create_notification(
+            user_id=user_id,
+            notification_type="client_onboarded",
+            title="Nieuwe klant 👋",
+            body=f"{display_name} heeft het onboarding-formulier ingevuld.",
+            data={"client_id": new_client.get("id")},
+        )
+
         return {"message": "Client added successfully", "client": result.data[0]}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

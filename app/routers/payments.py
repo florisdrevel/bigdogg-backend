@@ -159,6 +159,15 @@ def _mark_invoice_paid(invoice_id: str):
 </html>""",
                     })
                     print(f"Payment notification email sent to {email}")
+                # In-app notification for the bell-icon dropdown.
+                from app.routers.notifications import create_notification
+                create_notification(
+                    user_id=uid,
+                    notification_type="invoice_paid",
+                    title="Je bent betaald! 💰",
+                    body=f"{client_name} betaalde factuur {inv_num} (€ {float(total):.2f}).",
+                    data={"invoice_id": invoice_id, "invoice_number": inv_num},
+                )
         except Exception as email_err:
             print(f"Could not send payment notification email: {email_err}")
 

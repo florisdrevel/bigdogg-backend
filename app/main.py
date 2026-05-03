@@ -10,6 +10,7 @@ from app.routers import reminders
 from app.routers import referrals
 from app.routers import quotes
 from app.routers import banking
+from app.routers import notifications
 import os
 
 
@@ -54,6 +55,7 @@ app.include_router(reminders.router, prefix="/api/v1/reminders", tags=["reminder
 app.include_router(referrals.router, prefix="/api/v1/referrals", tags=["referrals"])
 app.include_router(quotes.router, prefix="/api/v1/quotes", tags=["quotes"])
 app.include_router(banking.router, prefix="/api/v1/banking", tags=["banking"])
+app.include_router(notifications.router, prefix="/api/v1/notifications", tags=["notifications"])
 
 
 @app.get("/health")

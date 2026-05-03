@@ -755,6 +755,14 @@ async def public_quote_accept(token: str):
         .eq("id", quote["id"]).execute()
     quote["status"] = "accepted"
     _notify_freelancer(quote, "accepted")
+    from app.routers.notifications import create_notification
+    create_notification(
+        user_id=quote.get("user_id"),
+        notification_type="quote_accepted",
+        title="Offerte geaccepteerd 🎉",
+        body=f"{quote.get('client_name') or 'Je klant'} heeft offerte {quote.get('quote_number')} geaccepteerd.",
+        data={"quote_id": quote["id"], "quote_number": quote.get("quote_number")},
+    )
     return {"success": True, "status": "accepted"}
 
 
@@ -773,4 +781,12 @@ async def public_quote_decline(token: str):
         .eq("id", quote["id"]).execute()
     quote["status"] = "declined"
     _notify_freelancer(quote, "declined")
+    from app.routers.notifications import create_notification
+    create_notification(
+        user_id=quote.get("user_id"),
+        notification_type="quote_declined",
+        title="Offerte afgewezen",
+        body=f"{quote.get('client_name') or 'Je klant'} heeft offerte {quote.get('quote_number')} afgewezen.",
+        data={"quote_id": quote["id"], "quote_number": quote.get("quote_number")},
+    )
     return {"success": True, "status": "declined"}
