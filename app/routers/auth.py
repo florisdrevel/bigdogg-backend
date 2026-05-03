@@ -127,10 +127,12 @@ def _record_login_and_maybe_notify(
             print(f"[auth/devices] NEW device for {email} fp={fingerprint[:8]}… → sending email")
             _send_new_device_email(email, user_agent, ip)
     except Exception as e:
-        # Most likely: user_devices migration not yet applied. Surface that
-        # clearly so it's easy to spot in Railway logs.
+        # Common causes: missing migration or missing RLS policy. The
+        # error string from PostgREST tells us which.
         msg = str(e).lower()
-        if "user_devices" in msg or "relation" in msg or "does not exist" in msg or "schema cache" in msg:
+        if "row-level security" in msg or "42501" in msg:
+            print(f"[auth/devices] RLS rejected — RUN migrations/user_devices_rls.sql ({e})")
+        elif "does not exist" in msg or "relation" in msg or "pgrst" in msg:
             print(f"[auth/devices] table missing — RUN migrations/user_devices.sql ({e})")
         else:
             print(f"[auth/devices] tracking skipped: {e}")
