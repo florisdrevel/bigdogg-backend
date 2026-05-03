@@ -53,7 +53,7 @@ TINK_LINK_BASE = "https://link.tink.com/1.0"
 
 TOKEN_ENDPOINT = f"{TINK_API_BASE}/api/v1/oauth/token"
 USER_CREATE_ENDPOINT = f"{TINK_API_BASE}/api/v1/user/create"
-AUTHORIZATION_GRANT_ENDPOINT = f"{TINK_API_BASE}/api/v1/oauth/authorization-grant/delegate"
+AUTHORIZATION_GRANT_ENDPOINT = f"{TINK_API_BASE}/api/v1/oauth/authorization-grant"
 ACCOUNTS_ENDPOINT = f"{TINK_API_BASE}/data/v2/accounts"
 TRANSACTIONS_ENDPOINT = f"{TINK_API_BASE}/data/v2/transactions"
 TINK_LINK_CONNECT_URL = f"{TINK_LINK_BASE}/transactions/connect-accounts"
@@ -170,15 +170,19 @@ async def _get_or_create_tink_user(bigdogg_user_id: str) -> str:
 
 
 async def _generate_authorization_code(tink_user_id: str, hint: str) -> str:
-    """Mint a one-time authorization code that Tink Link will consume."""
+    """Mint a one-time authorization code that Tink Link will consume.
+
+    Uses /authorization-grant (not /delegate) — the same-app permanent users
+    flow Tink Link's connect-accounts URL expects. /delegate is for handing
+    access to a partner client and was triggering Tink Link's
+    REQUEST_FAILED_FETCH_EXISTING_USER on consumption.
+    """
     app_token = await _get_app_access_token()
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         r = await client.post(
             AUTHORIZATION_GRANT_ENDPOINT,
             data={
-                "response_type": "code",
                 "user_id": tink_user_id,
-                "actor_client_id": settings.tink_client_id,
                 "id_hint": hint,
                 "scope": USER_SCOPES,
             },
