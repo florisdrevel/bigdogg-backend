@@ -394,15 +394,70 @@ async def banking_callback(
 # between SUGGEST and AUTO we attach the match as a hint the user can
 # confirm in one tap. Below SUGGEST we show nothing.
 MATCH_AUTO_SCORE = 80
-MATCH_SUGGEST_SCORE = 50
+MATCH_SUGGEST_SCORE = 55
+
+# Stripe fee model used to predict the amount that arrives in the
+# freelancer's bank account when a customer pays a BigDogg invoice via
+# Stripe. Using their published European-card schedule:
+#   - 1.5% + €0.25 for European cards / iDEAL / SEPA
+#   - 2.9% + €0.25 for international/non-European cards
+# We probe both rates so a transaction that lines up with EITHER counts
+# as a Stripe-fee match.
+STRIPE_FEE_VARIANTS = [
+    (0.015, 0.25),   # European card / iDEAL / SEPA
+    (0.029, 0.25),   # International / non-European
+]
 
 
 def _amount_close(a: float, b: float, tol: float = 0.01) -> bool:
     return abs(a - b) <= tol
 
 
+def _looks_like_stripe_payout(haystack: str) -> bool:
+    """Best-effort detection of a Stripe payout in a transaction description.
+    Stripe's bank-statement strings vary by country and processor — we
+    catch the common variants seen on Dutch ZZP accounts."""
+    if not haystack:
+        return False
+    needles = ("stripe", "stripe payments", "str.pe", "stripe.com")
+    return any(n in haystack for n in needles)
+
+
+def _stripe_fee_match(tx_amount: float, invoice_total: float) -> Optional[float]:
+    """If the transaction amount could be the after-fee net of `invoice_total`
+    via Stripe, return how close it is (in EUR, abs). Else None.
+
+    A "match" here means the actual received amount is within €0.10 of
+    one of Stripe's fee-adjusted predictions. €0.10 absorbs rounding +
+    edge cases like Stripe Tax surcharge or partial captures.
+    """
+    if invoice_total <= 0:
+        return None
+    best_diff: Optional[float] = None
+    for rate, fixed in STRIPE_FEE_VARIANTS:
+        predicted_net = invoice_total * (1 - rate) - fixed
+        diff = abs(tx_amount - predicted_net)
+        if diff <= 0.10 and (best_diff is None or diff < best_diff):
+            best_diff = diff
+    return best_diff
+
+
 def _score_invoice_match(tx: dict, invoice: dict) -> int:
-    """Returns a confidence score 0-100 for tx → invoice (income only)."""
+    """Returns a confidence score 0-100 for tx → invoice (income only).
+
+    Scoring components (additive, capped at 100):
+      Invoice number in tx description           +90  (near-certain)
+      Exact amount match (≤ €0.01)               +60
+      Within 0.5% of invoice total               +50
+      Looks like Stripe-fee net of invoice       +55  (+10 if "Stripe"
+                                                      is in description)
+      Within 5% (catch-all rounding window)      +20
+      Client name / company in description       +25
+      Date proximity:
+        ≤  7 days                                +10
+        ≤ 30 days                                 +5
+        ≤ 60 days                                 +2
+    """
     if (tx.get("amount") or 0) <= 0:
         return 0
     if (invoice.get("status") or "").lower() == "paid":
@@ -412,33 +467,56 @@ def _score_invoice_match(tx: dict, invoice: dict) -> int:
     desc = (tx.get("description") or "").lower()
     merchant = (tx.get("merchant") or "").lower()
     haystack = f"{desc} {merchant}".strip()
+    is_stripe = _looks_like_stripe_payout(haystack)
 
+    # 1) Invoice number explicitly mentioned: highest signal we have.
     inv_num = (invoice.get("invoice_number") or "").lower()
     if inv_num and inv_num in haystack:
-        score += 90  # near-certain match
+        score += 90
 
+    # 2) Amount matching with Stripe-fee tolerance.
     inv_total = float(invoice.get("total_incl_btw") or 0)
     tx_amount = float(tx.get("amount") or 0)
     if inv_total > 0:
-        if _amount_close(tx_amount, inv_total, 0.01):
-            score += 60
-        elif inv_total > 0 and abs(tx_amount - inv_total) / inv_total <= 0.01:
-            score += 30  # within 1%
+        diff = abs(tx_amount - inv_total)
+        diff_pct = diff / inv_total
+        if diff <= 0.01:
+            score += 60                                         # exact
+        elif diff_pct <= 0.005:
+            score += 50                                         # within 0.5%
+        else:
+            # Probe the Stripe-fee shape. Only useful when the received
+            # amount is *less* than the invoice (fees subtract, never add).
+            stripe_diff = _stripe_fee_match(tx_amount, inv_total) if tx_amount < inv_total else None
+            if stripe_diff is not None:
+                score += 55
+                if is_stripe:
+                    score += 10                                 # extra confidence
+            elif diff_pct <= 0.05:
+                score += 20                                     # rough match
 
+    # 3) Client name / company.
     for key in ("client_name", "client_company"):
         cand = (invoice.get(key) or "").strip().lower()
         if cand and len(cand) >= 3 and cand in haystack:
             score += 25
             break
 
+    # 4) Date proximity. Banks usually settle within a week of invoice
+    # date for prompt payers; longer gaps still possible but weaker.
     inv_date = invoice.get("invoice_date") or ""
     tx_date = tx.get("date") or ""
     if inv_date and tx_date:
         try:
             id_d = datetime.strptime(inv_date, "%Y-%m-%d").date()
             tx_d = datetime.strptime(tx_date, "%Y-%m-%d").date()
-            if abs((tx_d - id_d).days) <= 60:
+            days = abs((tx_d - id_d).days)
+            if days <= 7:
+                score += 10
+            elif days <= 30:
                 score += 5
+            elif days <= 60:
+                score += 2
         except Exception:
             pass
 
