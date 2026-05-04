@@ -36,7 +36,7 @@ The redirect URI registered in the Tink console must be exactly:
 from fastapi import APIRouter, HTTPException, Request, Query
 from fastapi.responses import RedirectResponse
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Optional, Tuple
 from urllib.parse import urlencode
 import secrets
 import httpx
@@ -128,16 +128,8 @@ async def _get_app_access_token(scope: str = APP_SCOPES) -> str:
     return r.json()["access_token"]
 
 
-async def _get_or_create_tink_user(bigdogg_user_id: str) -> str:
-    """Return the persistent Tink user_id, creating the Tink user once."""
-    profile_result = supabase.table("user_profiles")\
-        .select("tink_user_id")\
-        .eq("id", bigdogg_user_id)\
-        .execute()
-    profile = profile_result.data[0] if profile_result.data else None
-    if profile and profile.get("tink_user_id"):
-        return profile["tink_user_id"]
-
+async def _create_tink_user(bigdogg_user_id: str) -> str:
+    """Create a fresh Tink user, persist its id, return it."""
     app_token = await _get_app_access_token()
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         r = await client.post(
@@ -157,11 +149,12 @@ async def _get_or_create_tink_user(bigdogg_user_id: str) -> str:
         raise HTTPException(status_code=502, detail="Tink user creation failed")
     tink_user_id = r.json()["user_id"]
 
-    if profile:
+    profile_result = supabase.table("user_profiles")\
+        .select("id").eq("id", bigdogg_user_id).execute()
+    if profile_result.data:
         supabase.table("user_profiles")\
             .update({"tink_user_id": tink_user_id})\
-            .eq("id", bigdogg_user_id)\
-            .execute()
+            .eq("id", bigdogg_user_id).execute()
     else:
         supabase.table("user_profiles")\
             .insert({"id": bigdogg_user_id, "tink_user_id": tink_user_id})\
@@ -169,13 +162,26 @@ async def _get_or_create_tink_user(bigdogg_user_id: str) -> str:
     return tink_user_id
 
 
-async def _generate_authorization_code(tink_user_id: str, hint: str) -> str:
+async def _get_or_create_tink_user(bigdogg_user_id: str) -> str:
+    """Return the persistent Tink user_id, creating it once if needed."""
+    profile_result = supabase.table("user_profiles")\
+        .select("tink_user_id")\
+        .eq("id", bigdogg_user_id)\
+        .execute()
+    profile = profile_result.data[0] if profile_result.data else None
+    if profile and profile.get("tink_user_id"):
+        return profile["tink_user_id"]
+    return await _create_tink_user(bigdogg_user_id)
+
+
+async def _generate_authorization_code(tink_user_id: str, hint: str) -> Tuple[Optional[str], Optional[dict]]:
     """Mint a one-time authorization code that Tink Link will consume.
 
-    Uses /authorization-grant (not /delegate) — the same-app permanent users
-    flow Tink Link's connect-accounts URL expects. /delegate is for handing
-    access to a partner client and was triggering Tink Link's
-    REQUEST_FAILED_FETCH_EXISTING_USER on consumption.
+    Returns (code, error_payload). On success, error_payload is None.
+    On failure, returns (None, parsed JSON or {"_status": code, "_text": text}).
+
+    Uses /authorization-grant — the same-app permanent users flow Tink Link's
+    connect-accounts URL expects.
     """
     app_token = await _get_app_access_token()
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
@@ -193,8 +199,13 @@ async def _generate_authorization_code(tink_user_id: str, hint: str) -> str:
         )
     if r.status_code >= 400:
         print(f"[tink] auth-grant error: {r.status_code} {r.text}")
-        raise HTTPException(status_code=502, detail="Tink authorization grant failed")
-    return r.json()["code"]
+        try:
+            err = r.json()
+        except Exception:
+            err = {"_status": r.status_code, "_text": r.text}
+        err.setdefault("_status", r.status_code)
+        return None, err
+    return r.json()["code"], None
 
 
 # ─── User access-token management ───────────────────────────────
@@ -260,7 +271,13 @@ async def _get_user_access_token(bigdogg_user_id: str) -> str:
 # ─── Endpoints ─────────────────────────────────────────────────
 @router.post("/connect")
 async def connect_bank(request: Request):
-    """Returns a Tink Link URL the app should open in a browser/webview."""
+    """Returns a Tink Link URL the app should open in a browser/webview.
+
+    Self-healing: if the cached Tink user_id was deleted on Tink's side
+    (sandbox reset, etc.), we wipe it from user_profiles, mint a fresh
+    Tink user, and retry once. Without this, the row stays poisoned forever
+    and every /connect call 502s with `oauth.user_id_does_not_exist`.
+    """
     bigdogg_user_id = get_user_id(request)
     _ensure_credentials_configured()
 
@@ -272,9 +289,26 @@ async def connect_bank(request: Request):
     hint = (profile.get("business_name") or profile.get("full_name") or "BigDogg user")[:60]
 
     tink_user_id = await _get_or_create_tink_user(bigdogg_user_id)
-    grant_code = await _generate_authorization_code(tink_user_id, hint)
-    state = secrets.token_urlsafe(32)
+    grant_code, err = await _generate_authorization_code(tink_user_id, hint)
 
+    if err is not None:
+        is_stale_user = (
+            err.get("errorCode") == "oauth.user_id_does_not_exist"
+            or err.get("_status") == 404
+        )
+        if is_stale_user:
+            print(f"[tink] cached tink_user_id {tink_user_id} is stale; recreating")
+            supabase.table("user_profiles")\
+                .update({"tink_user_id": None})\
+                .eq("id", bigdogg_user_id).execute()
+            tink_user_id = await _create_tink_user(bigdogg_user_id)
+            grant_code, err = await _generate_authorization_code(tink_user_id, hint)
+
+    if err is not None:
+        detail = err.get("errorMessage") or err.get("_text") or "Tink authorization grant failed"
+        raise HTTPException(status_code=502, detail=detail)
+
+    state = secrets.token_urlsafe(32)
     supabase.table("user_profiles")\
         .update({"tink_link_state": state})\
         .eq("id", bigdogg_user_id)\
