@@ -443,7 +443,10 @@ async def get_transactions(
         print(f"[tink] /transactions diag user={bigdogg_user_id[:8]}… NO PROFILE ROW")
     access_token = await _get_user_access_token(bigdogg_user_id)
 
-    params: dict = {"pageSize": page_size}
+    # Tink data/v2/transactions caps pageSize at 100. Clamp so callers
+    # asking for more do not 400 — we still return the (smaller) page
+    # rather than failing the whole request.
+    params: dict = {"pageSize": min(page_size, 100)}
     if page_token:
         params["pageToken"] = page_token
 
