@@ -373,6 +373,35 @@ async def banking_callback(
     return RedirectResponse(url=APP_RETURN_OK)
 
 
+def _normalize_tink_transaction(tx: dict) -> dict:
+    """Flatten Tink's verbose transaction shape into the fields BigDogg
+    cares about. Returns positive amounts for incoming and negative for
+    outgoing, in the natural decimal form (so 12.34 not "1234"/"100")."""
+    amount_obj = tx.get("amount") or {}
+    value_obj = amount_obj.get("value") or {}
+    try:
+        unscaled = int(value_obj.get("unscaledValue") or "0")
+        scale = int(value_obj.get("scale") or "0")
+        decimal_amount = unscaled / (10 ** scale) if scale else float(unscaled)
+    except Exception:
+        decimal_amount = 0.0
+
+    descriptions = tx.get("descriptions") or {}
+    dates = tx.get("dates") or {}
+    merchant_info = tx.get("merchantInformation") or {}
+
+    return {
+        "id": tx.get("id"),
+        "date": dates.get("booked") or dates.get("value"),
+        "description": descriptions.get("display") or descriptions.get("original") or "",
+        "merchant": merchant_info.get("merchantName"),
+        "amount": decimal_amount,
+        "currency": amount_obj.get("currencyCode") or "EUR",
+        "type": (tx.get("types") or {}).get("type"),
+        "status": tx.get("status"),
+    }
+
+
 @router.get("/transactions")
 async def get_transactions(
     request: Request,
@@ -395,7 +424,15 @@ async def get_transactions(
     if r.status_code >= 400:
         print(f"[tink] transactions error: {r.status_code} {r.text}")
         raise HTTPException(status_code=502, detail="Could not fetch transactions")
-    return r.json()
+
+    raw = r.json()
+    items = raw.get("transactions") or []
+    normalized = [_normalize_tink_transaction(t) for t in items]
+    normalized.sort(key=lambda t: t.get("date") or "", reverse=True)
+    return {
+        "transactions": normalized,
+        "next_page_token": raw.get("nextPageToken"),
+    }
 
 
 @router.get("/accounts")
