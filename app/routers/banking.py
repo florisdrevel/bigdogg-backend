@@ -292,12 +292,21 @@ async def connect_bank(request: Request):
     grant_code, err = await _generate_authorization_code(tink_user_id, hint)
 
     if err is not None:
+        # The cached tink_user_id is stale or belongs to a different
+        # Tink app: drop it, mint a fresh user under the current
+        # client_id, retry once.
         is_stale_user = (
-            err.get("errorCode") == "oauth.user_id_does_not_exist"
-            or err.get("_status") == 404
+            err.get("errorCode") in (
+                "oauth.user_id_does_not_exist",
+                "oauth.client_id_does_not_match_user",
+            )
+            or err.get("_status") in (401, 404)
         )
         if is_stale_user:
-            print(f"[tink] cached tink_user_id {tink_user_id} is stale; recreating")
+            print(
+                f"[tink] cached tink_user_id {tink_user_id} unusable "
+                f"(code={err.get('errorCode')}); recreating"
+            )
             supabase.table("user_profiles")\
                 .update({"tink_user_id": None})\
                 .eq("id", bigdogg_user_id).execute()
