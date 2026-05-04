@@ -1,43 +1,53 @@
 """
-Tink bank connection — Tink Money / Account Aggregation flow (NL only).
+Bank connection — GoCardless Bank Account Data (formerly Nordigen).
+
+Why we pivoted: Tink's sandbox kept failing on permanent-user flows
+(REQUEST_FAILED_FETCH_EXISTING_USER) and production access requires a
+sales conversation. GoCardless BAD is self-serve, free for low volume,
+and supports every NL bank out of the box (PSD2 license is theirs).
+
+Sign-up:
+  1. Register at https://bankaccountdata.gocardless.com (free).
+  2. Generate secret_id + secret_key in the dashboard.
+  3. Set Railway env vars:
+        GOCARDLESS_SECRET_ID
+        GOCARDLESS_SECRET_KEY
+  4. Add the redirect URL in the GoCardless dashboard:
+        https://bigdogg-production.up.railway.app/api/v1/banking/callback
 
 End-to-end flow:
-  1. App calls POST /api/v1/banking/connect.
-  2. Backend authenticates with Tink (client_credentials), creates a Tink
-     user for this BigDogg user if one doesn't exist yet, mints a one-time
-     authorization code, and returns a Tink Link URL.
-  3. App opens that URL. User picks their bank, authenticates via the
-     bank's hosted UI, and Tink redirects to:
-        GET /api/v1/banking/callback?code=...&credentials=...&state=...
-  4. Backend validates the state, exchanges the callback code for a
-     user access_token + refresh_token, stores them on user_profiles,
-     and 302s the user back into the app.
-  5. App calls GET /api/v1/banking/transactions to pull recent activity.
-     Tokens are auto-refreshed via the refresh_token when they expire.
+  1. App: GET /banking/institutions   → list of NL banks (id, name, logo)
+  2. User taps a bank.
+  3. App: POST /banking/connect {institution_id}
+                                → backend creates a requisition,
+                                  stores requisition_id on user_profiles,
+                                  returns the link_url to open.
+  4. App opens link_url in browser.
+  5. User picks the bank, authenticates, consents to PSD2 access.
+  6. GoCardless redirects to /banking/callback?ref=<state>.
+  7. Callback marks the user connected, fetches account ids, redirects
+     back into the app.
+  8. App: GET /banking/transactions   → all transactions across the
+                                  user's connected accounts (booked).
 
-Required environment variables (Railway):
-  - TINK_CLIENT_ID
-  - TINK_CLIENT_SECRET
+Tokens:
+  - GoCardless access tokens are app-level, 24h lifetime. We cache
+    them in-process and refresh on demand. No per-user token storage.
+  - Per-account access is valid for `access_valid_for_days` (default
+    90). After that, the user has to re-link.
 
-Required Supabase columns on user_profiles (see SQL block at the bottom
-of this file's deployment notes):
-  tink_user_id              text
-  tink_access_token         text
-  tink_refresh_token        text
-  tink_token_expires_at     timestamptz
-  tink_credentials_id       text
-  tink_connected_at         timestamptz
-  tink_link_state           text
-
-The redirect URI registered in the Tink console must be exactly:
-  https://bigdogg-production.up.railway.app/api/v1/banking/callback
+Required columns on user_profiles (see migrations/gocardless_columns.sql):
+  gc_requisition_id   text
+  gc_account_ids      jsonb
+  gc_institution_id   text
+  gc_connected_at     timestamptz
+  gc_link_state       text
 """
 
 from fastapi import APIRouter, HTTPException, Request, Query
 from fastapi.responses import RedirectResponse
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple
-from urllib.parse import urlencode
+from typing import Optional, List, Dict, Any
 import secrets
 import httpx
 
@@ -47,44 +57,28 @@ from app.config import settings
 
 router = APIRouter()
 
-# ─── Tink endpoints ─────────────────────────────────────────────
-TINK_API_BASE = "https://api.tink.com"
-TINK_LINK_BASE = "https://link.tink.com/1.0"
+# ─── GoCardless endpoints ───────────────────────────────────────
+GC_API_BASE = "https://bankaccountdata.gocardless.com/api/v2"
 
-TOKEN_ENDPOINT = f"{TINK_API_BASE}/api/v1/oauth/token"
-USER_CREATE_ENDPOINT = f"{TINK_API_BASE}/api/v1/user/create"
-AUTHORIZATION_GRANT_ENDPOINT = f"{TINK_API_BASE}/api/v1/oauth/authorization-grant"
-ACCOUNTS_ENDPOINT = f"{TINK_API_BASE}/data/v2/accounts"
-TRANSACTIONS_ENDPOINT = f"{TINK_API_BASE}/data/v2/transactions"
-TINK_LINK_CONNECT_URL = f"{TINK_LINK_BASE}/transactions/connect-accounts"
+GC_TOKEN_NEW = f"{GC_API_BASE}/token/new/"
+GC_TOKEN_REFRESH = f"{GC_API_BASE}/token/refresh/"
+GC_INSTITUTIONS = f"{GC_API_BASE}/institutions/"
+GC_AGREEMENTS = f"{GC_API_BASE}/agreements/enduser/"
+GC_REQUISITIONS = f"{GC_API_BASE}/requisitions/"
 
 REDIRECT_URI = "https://bigdogg-production.up.railway.app/api/v1/banking/callback"
 APP_RETURN_OK = "https://bigdogg.nl/#/dashboard?bank=success"
 APP_RETURN_ERR = "https://bigdogg.nl/#/dashboard?bank_error="
 
-MARKET = "NL"
-LOCALE = "en_US"
-
-# Scopes the user grants when connecting their bank. Tink Link's
-# connect-accounts flow needs the WRITE scopes (credentials:write,
-# credentials:refresh, providers:read, authorization:read) to actually
-# create credentials — read-only scopes triggered the Link UI error
-# REQUEST_FAILED_FETCH_EXISTING_USER on freshly-created users.
-USER_SCOPES = (
-    "transactions:read,"
-    "accounts:read,"
-    "credentials:read,"
-    "credentials:write,"
-    "credentials:refresh,"
-    "providers:read,"
-    "authorization:read,"
-    "user:read"
-)
-
-# Scopes used when authenticating the app itself (client_credentials).
-APP_SCOPES = "user:create,user:read,authorization:grant"
+COUNTRY = "nl"
+USER_LANGUAGE = "NL"
+ACCESS_VALID_DAYS = 90       # PSD2 max
+MAX_HISTORICAL_DAYS = 90     # most NL banks cap at 90
 
 HTTP_TIMEOUT = 20.0
+
+# Module-level access-token cache (app-wide, 24h lifetime).
+_token_cache: Dict[str, Any] = {"access": None, "expires_at": None, "refresh": None, "refresh_expires_at": None}
 
 
 # ─── Auth helper ────────────────────────────────────────────────
@@ -101,367 +95,364 @@ def get_user_id(request: Request) -> str:
 
 
 def _ensure_credentials_configured() -> None:
-    if not settings.tink_client_id or not settings.tink_client_secret:
+    if not settings.gocardless_secret_id or not settings.gocardless_secret_key:
         raise HTTPException(
             status_code=500,
-            detail="Tink credentials missing (TINK_CLIENT_ID / TINK_CLIENT_SECRET).",
+            detail="GoCardless credentials missing (GOCARDLESS_SECRET_ID / GOCARDLESS_SECRET_KEY).",
         )
 
 
-# ─── App-level (client_credentials) authentication ──────────────
-async def _get_app_access_token(scope: str = APP_SCOPES) -> str:
+# ─── Token management ──────────────────────────────────────────
+async def _new_token() -> None:
     _ensure_credentials_configured()
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         r = await client.post(
-            TOKEN_ENDPOINT,
-            data={
-                "client_id": settings.tink_client_id,
-                "client_secret": settings.tink_client_secret,
-                "grant_type": "client_credentials",
-                "scope": scope,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-    if r.status_code >= 400:
-        print(f"[tink] app token error: {r.status_code} {r.text}")
-        raise HTTPException(status_code=502, detail="Tink app authentication failed")
-    return r.json()["access_token"]
-
-
-async def _create_tink_user(bigdogg_user_id: str) -> str:
-    """Create a fresh Tink user, persist its id, return it."""
-    app_token = await _get_app_access_token()
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        r = await client.post(
-            USER_CREATE_ENDPOINT,
+            GC_TOKEN_NEW,
             json={
-                "market": MARKET,
-                "locale": LOCALE,
-                "external_user_id": bigdogg_user_id,
+                "secret_id": settings.gocardless_secret_id,
+                "secret_key": settings.gocardless_secret_key,
             },
-            headers={
-                "Authorization": f"Bearer {app_token}",
-                "Content-Type": "application/json",
-            },
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
         )
     if r.status_code >= 400:
-        print(f"[tink] user create error: {r.status_code} {r.text}")
-        raise HTTPException(status_code=502, detail="Tink user creation failed")
-    tink_user_id = r.json()["user_id"]
-
-    profile_result = supabase.table("user_profiles")\
-        .select("id").eq("id", bigdogg_user_id).execute()
-    if profile_result.data:
-        supabase.table("user_profiles")\
-            .update({"tink_user_id": tink_user_id})\
-            .eq("id", bigdogg_user_id).execute()
-    else:
-        supabase.table("user_profiles")\
-            .insert({"id": bigdogg_user_id, "tink_user_id": tink_user_id})\
-            .execute()
-    return tink_user_id
+        print(f"[gocardless] token/new error: {r.status_code} {r.text}")
+        raise HTTPException(status_code=502, detail="GoCardless authentication failed")
+    payload = r.json()
+    now = datetime.now(timezone.utc)
+    _token_cache["access"] = payload["access"]
+    _token_cache["expires_at"] = now + timedelta(seconds=int(payload.get("access_expires", 86400)) - 30)
+    _token_cache["refresh"] = payload.get("refresh")
+    _token_cache["refresh_expires_at"] = now + timedelta(seconds=int(payload.get("refresh_expires", 2592000)) - 30)
 
 
-async def _get_or_create_tink_user(bigdogg_user_id: str) -> str:
-    """Return the persistent Tink user_id, creating it once if needed."""
-    profile_result = supabase.table("user_profiles")\
-        .select("tink_user_id")\
-        .eq("id", bigdogg_user_id)\
-        .execute()
-    profile = profile_result.data[0] if profile_result.data else None
-    if profile and profile.get("tink_user_id"):
-        return profile["tink_user_id"]
-    return await _create_tink_user(bigdogg_user_id)
-
-
-async def _generate_authorization_code(tink_user_id: str, hint: str) -> Tuple[Optional[str], Optional[dict]]:
-    """Mint a one-time authorization code that Tink Link will consume.
-
-    Returns (code, error_payload). On success, error_payload is None.
-    On failure, returns (None, parsed JSON or {"_status": code, "_text": text}).
-
-    Uses /authorization-grant — the same-app permanent users flow Tink Link's
-    connect-accounts URL expects.
-    """
-    app_token = await _get_app_access_token()
+async def _refresh_token() -> None:
+    refresh = _token_cache.get("refresh")
+    if not refresh:
+        return await _new_token()
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         r = await client.post(
-            AUTHORIZATION_GRANT_ENDPOINT,
-            data={
-                "user_id": tink_user_id,
-                "id_hint": hint,
-                "scope": USER_SCOPES,
-            },
-            headers={
-                "Authorization": f"Bearer {app_token}",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
+            GC_TOKEN_REFRESH,
+            json={"refresh": refresh},
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
         )
     if r.status_code >= 400:
-        print(f"[tink] auth-grant error: {r.status_code} {r.text}")
+        return await _new_token()
+    payload = r.json()
+    now = datetime.now(timezone.utc)
+    _token_cache["access"] = payload["access"]
+    _token_cache["expires_at"] = now + timedelta(seconds=int(payload.get("access_expires", 86400)) - 30)
+
+
+async def _get_access_token() -> str:
+    expires_at = _token_cache.get("expires_at")
+    if not _token_cache.get("access") or not expires_at or datetime.now(timezone.utc) >= expires_at:
+        refresh_exp = _token_cache.get("refresh_expires_at")
+        if _token_cache.get("refresh") and refresh_exp and datetime.now(timezone.utc) < refresh_exp:
+            await _refresh_token()
+        else:
+            await _new_token()
+    return _token_cache["access"]
+
+
+async def _gc_get(path: str, params: Optional[dict] = None) -> Any:
+    token = await _get_access_token()
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        r = await client.get(
+            path,
+            params=params,
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        )
+    if r.status_code == 401:
+        await _new_token()
+        token = _token_cache["access"]
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            r = await client.get(
+                path,
+                params=params,
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            )
+    if r.status_code >= 400:
+        print(f"[gocardless] GET {path} error: {r.status_code} {r.text}")
+        raise HTTPException(status_code=502, detail=f"GoCardless GET failed: {r.status_code}")
+    return r.json()
+
+
+async def _gc_post(path: str, body: dict) -> Any:
+    token = await _get_access_token()
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        r = await client.post(
+            path,
+            json=body,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+    if r.status_code == 401:
+        await _new_token()
+        token = _token_cache["access"]
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            r = await client.post(
+                path,
+                json=body,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+            )
+    if r.status_code >= 400:
+        print(f"[gocardless] POST {path} error: {r.status_code} {r.text}")
         try:
             err = r.json()
+            detail = err.get("detail") or err.get("summary") or str(err)
         except Exception:
-            err = {"_status": r.status_code, "_text": r.text}
-        err.setdefault("_status", r.status_code)
-        return None, err
-    return r.json()["code"], None
+            detail = r.text
+        raise HTTPException(status_code=502, detail=f"GoCardless: {detail}")
+    return r.json()
 
 
-# ─── User access-token management ───────────────────────────────
-async def _get_user_access_token(bigdogg_user_id: str) -> str:
-    """Return a fresh user access_token, refreshing via refresh_token if needed."""
-    profile_result = supabase.table("user_profiles")\
-        .select("tink_access_token, tink_refresh_token, tink_token_expires_at")\
-        .eq("id", bigdogg_user_id)\
-        .execute()
-    if not profile_result.data:
-        raise HTTPException(status_code=404, detail="No bank connection")
-    profile = profile_result.data[0]
-    access_token = profile.get("tink_access_token")
-    refresh_token = profile.get("tink_refresh_token")
-    expires_at_raw = profile.get("tink_token_expires_at")
-    if not access_token or not refresh_token:
-        raise HTTPException(status_code=404, detail="No bank connection")
-
-    needs_refresh = True
-    if expires_at_raw:
-        try:
-            expires_at = datetime.fromisoformat(
-                expires_at_raw.replace("Z", "+00:00")
-            )
-            needs_refresh = datetime.now(timezone.utc) >= expires_at
-        except Exception:
-            needs_refresh = True
-    if not needs_refresh:
-        return access_token
-
+async def _gc_delete(path: str) -> None:
+    token = await _get_access_token()
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        r = await client.post(
-            TOKEN_ENDPOINT,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "client_id": settings.tink_client_id,
-                "client_secret": settings.tink_client_secret,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        r = await client.delete(
+            path,
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
         )
-    if r.status_code >= 400:
-        print(f"[tink] refresh error: {r.status_code} {r.text}")
-        raise HTTPException(status_code=502, detail="Tink refresh failed; reconnect bank")
-
-    payload = r.json()
-    new_access = payload.get("access_token")
-    new_refresh = payload.get("refresh_token") or refresh_token
-    expires_in = int(payload.get("expires_in") or 3600)
-    new_expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in - 30)
-
-    supabase.table("user_profiles")\
-        .update({
-            "tink_access_token": new_access,
-            "tink_refresh_token": new_refresh,
-            "tink_token_expires_at": new_expires_at.isoformat(),
-        })\
-        .eq("id", bigdogg_user_id)\
-        .execute()
-    return new_access
+    if r.status_code >= 400 and r.status_code != 404:
+        print(f"[gocardless] DELETE {path} error: {r.status_code} {r.text}")
 
 
 # ─── Endpoints ─────────────────────────────────────────────────
+@router.get("/institutions")
+async def list_institutions(request: Request, country: str = Query(COUNTRY)):
+    """Returns a sorted list of banks available for the country (default NL)."""
+    get_user_id(request)
+    data = await _gc_get(GC_INSTITUTIONS, params={"country": country})
+    items: List[Dict[str, Any]] = []
+    for inst in data:
+        items.append({
+            "id": inst.get("id"),
+            "name": inst.get("name"),
+            "bic": inst.get("bic"),
+            "logo": inst.get("logo"),
+            "transaction_total_days": inst.get("transaction_total_days"),
+        })
+    items.sort(key=lambda x: (x.get("name") or "").lower())
+    return {"institutions": items}
+
+
 @router.post("/connect")
 async def connect_bank(request: Request):
-    """Returns a Tink Link URL the app should open in a browser/webview.
+    """Create a requisition and return the GoCardless link URL.
 
-    Self-healing: if the cached Tink user_id was deleted on Tink's side
-    (sandbox reset, etc.), we wipe it from user_profiles, mint a fresh
-    Tink user, and retry once. Without this, the row stays poisoned forever
-    and every /connect call 502s with `oauth.user_id_does_not_exist`.
+    Body: { "institution_id": "ING_INGBNL2A" }
     """
     bigdogg_user_id = get_user_id(request)
     _ensure_credentials_configured()
 
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    institution_id = (body or {}).get("institution_id")
+    if not institution_id:
+        raise HTTPException(status_code=400, detail="institution_id required")
+
+    # If the user already has a pending/linked requisition for the same
+    # institution, cancel it before creating a new one — otherwise GC
+    # complains about duplicates and we'd accumulate dead requisitions.
     profile_result = supabase.table("user_profiles")\
-        .select("full_name, business_name")\
-        .eq("id", bigdogg_user_id)\
-        .execute()
-    profile = profile_result.data[0] if profile_result.data else {}
-    hint = (profile.get("business_name") or profile.get("full_name") or "BigDogg user")[:60]
+        .select("gc_requisition_id")\
+        .eq("id", bigdogg_user_id).execute()
+    profile = profile_result.data[0] if profile_result.data else None
+    old_req_id = profile.get("gc_requisition_id") if profile else None
+    if old_req_id:
+        try:
+            await _gc_delete(f"{GC_REQUISITIONS}{old_req_id}/")
+        except Exception as e:
+            print(f"[gocardless] old requisition cleanup skipped: {e}")
 
-    tink_user_id = await _get_or_create_tink_user(bigdogg_user_id)
-    grant_code, err = await _generate_authorization_code(tink_user_id, hint)
+    state = secrets.token_urlsafe(24)
 
-    if err is not None:
-        is_stale_user = (
-            err.get("errorCode") == "oauth.user_id_does_not_exist"
-            or err.get("_status") == 404
-        )
-        if is_stale_user:
-            print(f"[tink] cached tink_user_id {tink_user_id} is stale; recreating")
-            supabase.table("user_profiles")\
-                .update({"tink_user_id": None})\
-                .eq("id", bigdogg_user_id).execute()
-            tink_user_id = await _create_tink_user(bigdogg_user_id)
-            grant_code, err = await _generate_authorization_code(tink_user_id, hint)
-
-    if err is not None:
-        detail = err.get("errorMessage") or err.get("_text") or "Tink authorization grant failed"
-        raise HTTPException(status_code=502, detail=detail)
-
-    state = secrets.token_urlsafe(32)
-    supabase.table("user_profiles")\
-        .update({"tink_link_state": state})\
-        .eq("id", bigdogg_user_id)\
-        .execute()
-
-    qs = urlencode({
-        "client_id": settings.tink_client_id,
-        "redirect_uri": REDIRECT_URI,
-        "market": MARKET,
-        "locale": LOCALE,
-        "authorization_code": grant_code,
-        "state": state,
+    requisition = await _gc_post(GC_REQUISITIONS, {
+        "redirect": REDIRECT_URI,
+        "institution_id": institution_id,
+        "reference": state,
+        "user_language": USER_LANGUAGE,
     })
-    link_url = f"{TINK_LINK_CONNECT_URL}?{qs}"
-    cid = settings.tink_client_id or ""
-    cid_masked = f"{cid[:4]}...{cid[-4:]}" if len(cid) >= 8 else "<missing>"
-    print(
-        f"[tink] connect: client_id={cid_masked} tink_user_id={tink_user_id} "
-        f"redirect_uri={REDIRECT_URI} market={MARKET}"
-    )
-    return {"link_url": link_url}
+
+    requisition_id = requisition.get("id")
+    link = requisition.get("link")
+    if not requisition_id or not link:
+        raise HTTPException(status_code=502, detail="GoCardless returned no link")
+
+    update = {
+        "gc_requisition_id": requisition_id,
+        "gc_institution_id": institution_id,
+        "gc_link_state": state,
+    }
+    if profile:
+        supabase.table("user_profiles").update(update).eq("id", bigdogg_user_id).execute()
+    else:
+        supabase.table("user_profiles").insert({"id": bigdogg_user_id, **update}).execute()
+
+    print(f"[gocardless] connect: user={bigdogg_user_id[:8]}… inst={institution_id} req={requisition_id}")
+    return {"link_url": link}
 
 
 @router.get("/callback")
 async def banking_callback(
-    code: Optional[str] = Query(None),
-    credentials_id: Optional[str] = Query(None),
-    state: Optional[str] = Query(None),
+    ref: Optional[str] = Query(None),
     error: Optional[str] = Query(None),
-    error_message: Optional[str] = Query(None),
+    details: Optional[str] = Query(None),
 ):
-    """Tink redirects here after the user finishes (or cancels) the flow."""
-    if error or not code or not state:
-        msg = error_message or error or "missing_code"
+    """GoCardless redirects here once the user finishes the bank flow.
+
+    `ref` is the `reference` we passed when creating the requisition, so
+    we can look the user up and check the linked accounts.
+    """
+    if error or not ref:
+        msg = details or error or "missing_ref"
         return RedirectResponse(url=f"{APP_RETURN_ERR}{msg}")
 
     state_lookup = supabase.table("user_profiles")\
-        .select("id")\
-        .eq("tink_link_state", state)\
-        .limit(1)\
-        .execute()
+        .select("id, gc_requisition_id")\
+        .eq("gc_link_state", ref)\
+        .limit(1).execute()
     if not state_lookup.data:
         return RedirectResponse(url=f"{APP_RETURN_ERR}invalid_state")
     bigdogg_user_id = state_lookup.data[0]["id"]
+    requisition_id = state_lookup.data[0].get("gc_requisition_id")
+    if not requisition_id:
+        return RedirectResponse(url=f"{APP_RETURN_ERR}missing_requisition")
 
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        r = await client.post(
-            TOKEN_ENDPOINT,
-            data={
-                "code": code,
-                "client_id": settings.tink_client_id,
-                "client_secret": settings.tink_client_secret,
-                "grant_type": "authorization_code",
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-    if r.status_code >= 400:
-        print(f"[tink] code-exchange error: {r.status_code} {r.text}")
-        return RedirectResponse(url=f"{APP_RETURN_ERR}exchange_failed")
+    try:
+        requisition = await _gc_get(f"{GC_REQUISITIONS}{requisition_id}/")
+    except HTTPException:
+        return RedirectResponse(url=f"{APP_RETURN_ERR}requisition_lookup_failed")
 
-    payload = r.json()
-    access_token = payload.get("access_token")
-    refresh_token = payload.get("refresh_token")
-    expires_in = int(payload.get("expires_in") or 3600)
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in - 30)
+    accounts = requisition.get("accounts") or []
+    status_str = requisition.get("status") or ""
 
-    supabase.table("user_profiles")\
-        .update({
-            "tink_access_token": access_token,
-            "tink_refresh_token": refresh_token,
-            "tink_token_expires_at": expires_at.isoformat(),
-            "tink_credentials_id": credentials_id,
-            "tink_connected_at": datetime.now(timezone.utc).isoformat(),
-            "tink_link_state": None,
-        })\
-        .eq("id", bigdogg_user_id)\
-        .execute()
+    if not accounts:
+        # User probably cancelled at the bank. Don't mark as connected.
+        supabase.table("user_profiles").update({
+            "gc_link_state": None,
+        }).eq("id", bigdogg_user_id).execute()
+        return RedirectResponse(url=f"{APP_RETURN_ERR}{status_str.lower() or 'no_accounts'}")
 
+    supabase.table("user_profiles").update({
+        "gc_account_ids": accounts,
+        "gc_connected_at": datetime.now(timezone.utc).isoformat(),
+        "gc_link_state": None,
+    }).eq("id", bigdogg_user_id).execute()
+
+    print(f"[gocardless] callback: user={bigdogg_user_id[:8]}… status={status_str} accounts={len(accounts)}")
     return RedirectResponse(url=APP_RETURN_OK)
-
-
-@router.get("/transactions")
-async def get_transactions(
-    request: Request,
-    page_size: int = Query(100, ge=1, le=500),
-    page_token: Optional[str] = Query(None),
-):
-    bigdogg_user_id = get_user_id(request)
-    access_token = await _get_user_access_token(bigdogg_user_id)
-
-    params: dict = {"pageSize": page_size}
-    if page_token:
-        params["pageToken"] = page_token
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(
-            TRANSACTIONS_ENDPOINT,
-            params=params,
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-    if r.status_code >= 400:
-        print(f"[tink] transactions error: {r.status_code} {r.text}")
-        raise HTTPException(status_code=502, detail="Could not fetch transactions")
-    return r.json()
-
-
-@router.get("/accounts")
-async def get_accounts(request: Request):
-    bigdogg_user_id = get_user_id(request)
-    access_token = await _get_user_access_token(bigdogg_user_id)
-
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        r = await client.get(
-            ACCOUNTS_ENDPOINT,
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-    if r.status_code >= 400:
-        print(f"[tink] accounts error: {r.status_code} {r.text}")
-        raise HTTPException(status_code=502, detail="Could not fetch accounts")
-    return r.json()
 
 
 @router.get("/status")
 async def banking_status(request: Request):
     bigdogg_user_id = get_user_id(request)
     profile_result = supabase.table("user_profiles")\
-        .select("tink_user_id, tink_credentials_id, tink_connected_at, tink_token_expires_at")\
-        .eq("id", bigdogg_user_id)\
-        .execute()
+        .select("gc_requisition_id, gc_institution_id, gc_account_ids, gc_connected_at")\
+        .eq("id", bigdogg_user_id).execute()
     if not profile_result.data:
         return {"connected": False}
     profile = profile_result.data[0]
+    accounts = profile.get("gc_account_ids") or []
     return {
-        "connected": bool(profile.get("tink_credentials_id")),
-        "tink_user_id": profile.get("tink_user_id"),
-        "credentials_id": profile.get("tink_credentials_id"),
-        "connected_at": profile.get("tink_connected_at"),
-        "token_expires_at": profile.get("tink_token_expires_at"),
+        "connected": bool(accounts),
+        "requisition_id": profile.get("gc_requisition_id"),
+        "institution_id": profile.get("gc_institution_id"),
+        "account_count": len(accounts),
+        "connected_at": profile.get("gc_connected_at"),
     }
+
+
+@router.get("/accounts")
+async def get_accounts(request: Request):
+    bigdogg_user_id = get_user_id(request)
+    profile_result = supabase.table("user_profiles")\
+        .select("gc_account_ids")\
+        .eq("id", bigdogg_user_id).execute()
+    if not profile_result.data:
+        raise HTTPException(status_code=404, detail="No bank connection")
+    accounts: List[str] = profile_result.data[0].get("gc_account_ids") or []
+    if not accounts:
+        return {"accounts": []}
+
+    enriched: List[Dict[str, Any]] = []
+    for account_id in accounts:
+        try:
+            details = await _gc_get(f"{GC_API_BASE}/accounts/{account_id}/details/")
+            inner = details.get("account") or {}
+            enriched.append({
+                "id": account_id,
+                "iban": inner.get("iban"),
+                "name": inner.get("name") or inner.get("ownerName"),
+                "currency": inner.get("currency"),
+                "product": inner.get("product"),
+            })
+        except Exception as e:
+            print(f"[gocardless] details failed for {account_id}: {e}")
+            enriched.append({"id": account_id})
+    return {"accounts": enriched}
+
+
+@router.get("/transactions")
+async def get_transactions(request: Request, page_size: int = Query(200, ge=1, le=500)):
+    """Aggregates booked transactions across all of the user's connected accounts."""
+    bigdogg_user_id = get_user_id(request)
+    profile_result = supabase.table("user_profiles")\
+        .select("gc_account_ids")\
+        .eq("id", bigdogg_user_id).execute()
+    if not profile_result.data:
+        raise HTTPException(status_code=404, detail="No bank connection")
+    accounts: List[str] = profile_result.data[0].get("gc_account_ids") or []
+    if not accounts:
+        return {"transactions": []}
+
+    aggregated: List[Dict[str, Any]] = []
+    for account_id in accounts:
+        try:
+            data = await _gc_get(f"{GC_API_BASE}/accounts/{account_id}/transactions/")
+        except Exception as e:
+            print(f"[gocardless] transactions failed for {account_id}: {e}")
+            continue
+        booked = ((data.get("transactions") or {}).get("booked")) or []
+        for tx in booked:
+            tx["account_id"] = account_id
+            aggregated.append(tx)
+
+    aggregated.sort(
+        key=lambda t: t.get("bookingDate") or t.get("valueDate") or "",
+        reverse=True,
+    )
+    return {"transactions": aggregated[:page_size]}
 
 
 @router.delete("/disconnect")
 async def banking_disconnect(request: Request):
     bigdogg_user_id = get_user_id(request)
-    supabase.table("user_profiles")\
-        .update({
-            "tink_access_token": None,
-            "tink_refresh_token": None,
-            "tink_token_expires_at": None,
-            "tink_credentials_id": None,
-            "tink_connected_at": None,
-            "tink_link_state": None,
-        })\
-        .eq("id", bigdogg_user_id)\
-        .execute()
+    profile_result = supabase.table("user_profiles")\
+        .select("gc_requisition_id")\
+        .eq("id", bigdogg_user_id).execute()
+    profile = profile_result.data[0] if profile_result.data else None
+    requisition_id = profile.get("gc_requisition_id") if profile else None
+    if requisition_id:
+        try:
+            await _gc_delete(f"{GC_REQUISITIONS}{requisition_id}/")
+        except Exception as e:
+            print(f"[gocardless] disconnect cleanup failed (non-fatal): {e}")
+
+    supabase.table("user_profiles").update({
+        "gc_requisition_id": None,
+        "gc_account_ids": None,
+        "gc_institution_id": None,
+        "gc_connected_at": None,
+        "gc_link_state": None,
+    }).eq("id", bigdogg_user_id).execute()
     return {"success": True}

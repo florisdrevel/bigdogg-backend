@@ -21,5 +21,7 @@ class Settings:
     cron_secret: str = os.getenv("CRON_SECRET", "bigdogg-cron-2026")
     tink_client_id: str = os.getenv("TINK_CLIENT_ID", "")
     tink_client_secret: str = os.getenv("TINK_CLIENT_SECRET", "")
+    gocardless_secret_id: str = os.getenv("GOCARDLESS_SECRET_ID", "")
+    gocardless_secret_key: str = os.getenv("GOCARDLESS_SECRET_KEY", "")
 
 settings = Settings()
