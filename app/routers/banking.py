@@ -688,6 +688,12 @@ async def get_transactions(
             params=params,
             headers={"Authorization": f"Bearer {access_token}"},
         )
+    if r.status_code == 401:
+        # Token died on Tink's side — most common in sandbox after the
+        # ~1h one-time-flow lifetime. Surface a structured error so the
+        # frontend can show a "reconnect" CTA instead of a generic 502.
+        print(f"[tink] transactions 401 (session expired): {r.text}")
+        raise HTTPException(status_code=401, detail="bank_session_expired")
     if r.status_code >= 400:
         print(f"[tink] transactions error: {r.status_code} {r.text}")
         raise HTTPException(status_code=502, detail="Could not fetch transactions")
@@ -847,18 +853,36 @@ async def get_accounts(request: Request):
 async def banking_status(request: Request):
     bigdogg_user_id = get_user_id(request)
     profile_result = supabase.table("user_profiles")\
-        .select("tink_user_id, tink_credentials_id, tink_connected_at, tink_token_expires_at")\
+        .select("tink_user_id, tink_credentials_id, tink_connected_at, "
+                "tink_token_expires_at, tink_refresh_token, tink_access_token")\
         .eq("id", bigdogg_user_id)\
         .execute()
     if not profile_result.data:
         return {"connected": False}
     profile = profile_result.data[0]
+
+    has_credentials = bool(profile.get("tink_credentials_id"))
+    has_access_token = bool(profile.get("tink_access_token"))
+    has_refresh_token = bool(profile.get("tink_refresh_token"))
+    expires_at_raw = profile.get("tink_token_expires_at")
+    expired = False
+    if has_access_token and not has_refresh_token and expires_at_raw:
+        try:
+            exp = datetime.fromisoformat(expires_at_raw.replace("Z", "+00:00"))
+            expired = datetime.now(timezone.utc) >= exp
+        except Exception:
+            expired = False
+
     return {
-        "connected": bool(profile.get("tink_credentials_id")),
+        # Only treat as "connected" if we still have a usable token. A
+        # one-time-flow token that has aged past its expires_at can no
+        # longer fetch transactions, so the UI should prompt to reconnect.
+        "connected": has_credentials and not expired,
+        "expired": expired,
         "tink_user_id": profile.get("tink_user_id"),
         "credentials_id": profile.get("tink_credentials_id"),
         "connected_at": profile.get("tink_connected_at"),
-        "token_expires_at": profile.get("tink_token_expires_at"),
+        "token_expires_at": expires_at_raw,
     }
 
 
