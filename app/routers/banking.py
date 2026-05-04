@@ -273,49 +273,24 @@ async def _get_user_access_token(bigdogg_user_id: str) -> str:
 async def connect_bank(request: Request):
     """Returns a Tink Link URL the app should open in a browser/webview.
 
-    Self-healing: if the cached Tink user_id was deleted on Tink's side
-    (sandbox reset, etc.), we wipe it from user_profiles, mint a fresh
-    Tink user, and retry once. Without this, the row stays poisoned forever
-    and every /connect call 502s with `oauth.user_id_does_not_exist`.
+    Uses Tink's one-time-user flow (no client-side user/create or
+    authorization-grant). This is the same shape Tink Console's
+    "Create a URL" feature generates, and avoids the Tink Link UI
+    error REQUEST_FAILED_FETCH_EXISTING_USER which fires when the
+    permanent-user flow points at a freshly-minted user with no
+    attached credentials yet.
+
+    Tink Link will spin up a temporary user on its side, run the
+    bank-picker → bank-login → consent flow, then redirect back to
+    /banking/callback with `code` + `credentials` + our `state`. The
+    callback exchanges `code` for a long-lived access/refresh token
+    pair, so subsequent transaction fetches still work without
+    re-auth — the only thing we lose vs. the permanent-user flow is
+    the ability to read other previously-created credentials in one
+    Link UI session, which we never used anyway.
     """
     bigdogg_user_id = get_user_id(request)
     _ensure_credentials_configured()
-
-    profile_result = supabase.table("user_profiles")\
-        .select("full_name, business_name")\
-        .eq("id", bigdogg_user_id)\
-        .execute()
-    profile = profile_result.data[0] if profile_result.data else {}
-    hint = (profile.get("business_name") or profile.get("full_name") or "BigDogg user")[:60]
-
-    tink_user_id = await _get_or_create_tink_user(bigdogg_user_id)
-    grant_code, err = await _generate_authorization_code(tink_user_id, hint)
-
-    if err is not None:
-        # The cached tink_user_id is stale or belongs to a different
-        # Tink app: drop it, mint a fresh user under the current
-        # client_id, retry once.
-        is_stale_user = (
-            err.get("errorCode") in (
-                "oauth.user_id_does_not_exist",
-                "oauth.client_id_does_not_match_user",
-            )
-            or err.get("_status") in (401, 404)
-        )
-        if is_stale_user:
-            print(
-                f"[tink] cached tink_user_id {tink_user_id} unusable "
-                f"(code={err.get('errorCode')}); recreating"
-            )
-            supabase.table("user_profiles")\
-                .update({"tink_user_id": None})\
-                .eq("id", bigdogg_user_id).execute()
-            tink_user_id = await _create_tink_user(bigdogg_user_id)
-            grant_code, err = await _generate_authorization_code(tink_user_id, hint)
-
-    if err is not None:
-        detail = err.get("errorMessage") or err.get("_text") or "Tink authorization grant failed"
-        raise HTTPException(status_code=502, detail=detail)
 
     state = secrets.token_urlsafe(32)
     supabase.table("user_profiles")\
@@ -328,14 +303,13 @@ async def connect_bank(request: Request):
         "redirect_uri": REDIRECT_URI,
         "market": MARKET,
         "locale": LOCALE,
-        "authorization_code": grant_code,
         "state": state,
     })
-    link_url = f"{TINK_LINK_CONNECT_URL}?{qs}"
+    link_url = f"{TINK_LINK_CONNECT_URL}/?{qs}"
     cid = settings.tink_client_id or ""
     cid_masked = f"{cid[:4]}...{cid[-4:]}" if len(cid) >= 8 else "<missing>"
     print(
-        f"[tink] connect: client_id={cid_masked} tink_user_id={tink_user_id} "
+        f"[tink] connect (one-time flow): client_id={cid_masked} "
         f"redirect_uri={REDIRECT_URI} market={MARKET}"
     )
     return {"link_url": link_url}
