@@ -210,7 +210,15 @@ async def _generate_authorization_code(tink_user_id: str, hint: str) -> Tuple[Op
 
 # ─── User access-token management ───────────────────────────────
 async def _get_user_access_token(bigdogg_user_id: str) -> str:
-    """Return a fresh user access_token, refreshing via refresh_token if needed."""
+    """Return a fresh user access_token.
+
+    The one-time-user flow returns an access_token but NO refresh_token
+    (there is no persistent user to refresh against). The permanent-user
+    flow returns both. We support both: if a refresh_token is present
+    and the access_token has expired we refresh; otherwise we use the
+    stored access_token directly. If no access_token at all, the user
+    has not connected a bank yet (or needs to reconnect).
+    """
     profile_result = supabase.table("user_profiles")\
         .select("tink_access_token, tink_refresh_token, tink_token_expires_at")\
         .eq("id", bigdogg_user_id)\
@@ -221,21 +229,26 @@ async def _get_user_access_token(bigdogg_user_id: str) -> str:
     access_token = profile.get("tink_access_token")
     refresh_token = profile.get("tink_refresh_token")
     expires_at_raw = profile.get("tink_token_expires_at")
-    if not access_token or not refresh_token:
+    if not access_token:
         raise HTTPException(status_code=404, detail="No bank connection")
 
-    needs_refresh = True
+    expired = False
     if expires_at_raw:
         try:
             expires_at = datetime.fromisoformat(
                 expires_at_raw.replace("Z", "+00:00")
             )
-            needs_refresh = datetime.now(timezone.utc) >= expires_at
+            expired = datetime.now(timezone.utc) >= expires_at
         except Exception:
-            needs_refresh = True
-    if not needs_refresh:
+            expired = False  # if we can't parse, trust the token until Tink rejects it
+
+    if not expired or not refresh_token:
+        # Either still valid, OR no refresh_token to swap (one-time flow):
+        # return whatever we have and let the upstream call surface a 401
+        # if Tink has actually expired the token server-side.
         return access_token
 
+    # Have a refresh_token AND token is expired: refresh.
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         r = await client.post(
             TOKEN_ENDPOINT,
@@ -249,10 +262,13 @@ async def _get_user_access_token(bigdogg_user_id: str) -> str:
         )
     if r.status_code >= 400:
         print(f"[tink] refresh error: {r.status_code} {r.text}")
-        raise HTTPException(status_code=502, detail="Tink refresh failed; reconnect bank")
+        # Refresh failed: fall back to the stored access_token. Tink may
+        # have rotated it on their side; the next API call will surface
+        # the actual error to the user.
+        return access_token
 
     payload = r.json()
-    new_access = payload.get("access_token")
+    new_access = payload.get("access_token") or access_token
     new_refresh = payload.get("refresh_token") or refresh_token
     expires_in = int(payload.get("expires_in") or 3600)
     new_expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in - 30)
