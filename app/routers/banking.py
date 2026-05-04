@@ -425,6 +425,22 @@ async def get_transactions(
     page_token: Optional[str] = Query(None),
 ):
     bigdogg_user_id = get_user_id(request)
+    # Diagnostic: surface what is actually stored, so a 404 on the
+    # _get_user_access_token call points at the missing field instead
+    # of looking like a routing bug.
+    diag = supabase.table("user_profiles")\
+        .select("tink_access_token, tink_refresh_token, tink_token_expires_at, tink_credentials_id")\
+        .eq("id", bigdogg_user_id).execute()
+    if diag.data:
+        d = diag.data[0]
+        has_at = "yes" if d.get("tink_access_token") else "NO"
+        has_rt = "yes" if d.get("tink_refresh_token") else "NO"
+        has_cid = "yes" if d.get("tink_credentials_id") else "NO"
+        exp = d.get("tink_token_expires_at") or "—"
+        print(f"[tink] /transactions diag user={bigdogg_user_id[:8]}… "
+              f"access_token={has_at} refresh_token={has_rt} credentials_id={has_cid} expires_at={exp}")
+    else:
+        print(f"[tink] /transactions diag user={bigdogg_user_id[:8]}… NO PROFILE ROW")
     access_token = await _get_user_access_token(bigdogg_user_id)
 
     params: dict = {"pageSize": page_size}
