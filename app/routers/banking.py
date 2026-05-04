@@ -389,6 +389,238 @@ async def banking_callback(
     return RedirectResponse(url=APP_RETURN_OK)
 
 
+# ─── Auto-matching: tx → invoice / expense ─────────────────────
+# Confidence thresholds. Above AUTO we mark the link without asking;
+# between SUGGEST and AUTO we attach the match as a hint the user can
+# confirm in one tap. Below SUGGEST we show nothing.
+MATCH_AUTO_SCORE = 80
+MATCH_SUGGEST_SCORE = 50
+
+
+def _amount_close(a: float, b: float, tol: float = 0.01) -> bool:
+    return abs(a - b) <= tol
+
+
+def _score_invoice_match(tx: dict, invoice: dict) -> int:
+    """Returns a confidence score 0-100 for tx → invoice (income only)."""
+    if (tx.get("amount") or 0) <= 0:
+        return 0
+    if (invoice.get("status") or "").lower() == "paid":
+        return 0  # ignore already-paid invoices
+
+    score = 0
+    desc = (tx.get("description") or "").lower()
+    merchant = (tx.get("merchant") or "").lower()
+    haystack = f"{desc} {merchant}".strip()
+
+    inv_num = (invoice.get("invoice_number") or "").lower()
+    if inv_num and inv_num in haystack:
+        score += 90  # near-certain match
+
+    inv_total = float(invoice.get("total_incl_btw") or 0)
+    tx_amount = float(tx.get("amount") or 0)
+    if inv_total > 0:
+        if _amount_close(tx_amount, inv_total, 0.01):
+            score += 60
+        elif inv_total > 0 and abs(tx_amount - inv_total) / inv_total <= 0.01:
+            score += 30  # within 1%
+
+    for key in ("client_name", "client_company"):
+        cand = (invoice.get(key) or "").strip().lower()
+        if cand and len(cand) >= 3 and cand in haystack:
+            score += 25
+            break
+
+    inv_date = invoice.get("invoice_date") or ""
+    tx_date = tx.get("date") or ""
+    if inv_date and tx_date:
+        try:
+            id_d = datetime.strptime(inv_date, "%Y-%m-%d").date()
+            tx_d = datetime.strptime(tx_date, "%Y-%m-%d").date()
+            if abs((tx_d - id_d).days) <= 60:
+                score += 5
+        except Exception:
+            pass
+
+    return min(score, 100)
+
+
+def _score_expense_match(tx: dict, expense: dict) -> int:
+    """Returns a confidence score 0-100 for tx → expense (outgoing only)."""
+    if (tx.get("amount") or 0) >= 0:
+        return 0
+
+    score = 0
+    tx_amount = abs(float(tx.get("amount") or 0))
+    ex_total = float(expense.get("amount_ex_btw") or 0) + float(expense.get("btw_amount") or 0)
+    ex_ex = float(expense.get("amount_ex_btw") or 0)
+
+    if ex_total > 0 and _amount_close(tx_amount, ex_total, 0.01):
+        score += 60
+    elif ex_ex > 0 and _amount_close(tx_amount, ex_ex, 0.01):
+        score += 50
+
+    desc_tx = (tx.get("description") or "").lower()
+    merchant = (tx.get("merchant") or "").lower()
+    desc_ex = (expense.get("description") or "").lower()
+    if desc_ex and len(desc_ex) >= 3:
+        if desc_ex in desc_tx or desc_ex in merchant:
+            score += 30
+        elif merchant and merchant in desc_ex:
+            score += 20
+
+    ex_date = expense.get("expense_date") or ""
+    tx_date = tx.get("date") or ""
+    if ex_date and tx_date:
+        try:
+            ed = datetime.strptime(ex_date, "%Y-%m-%d").date()
+            td = datetime.strptime(tx_date, "%Y-%m-%d").date()
+            days = abs((td - ed).days)
+            if days <= 1:
+                score += 10
+            elif days <= 7:
+                score += 5
+            else:
+                # Outside the typical bank-settlement window: probably
+                # a different transaction altogether.
+                score -= 15
+        except Exception:
+            pass
+
+    return max(0, min(score, 100))
+
+
+def _enrich_transaction_with_link(
+    tx: dict,
+    existing_links: dict,
+    invoices: list,
+    expenses: list,
+    user_id: str,
+) -> dict:
+    """Attach a `link` field to `tx`. If a manual link exists, use it as-is.
+    Otherwise compute the best automatic match and persist firm/suggested
+    links to the bank_transaction_links table.
+    """
+    tx_id = tx.get("id")
+    if not tx_id:
+        tx["link"] = None
+        return tx
+
+    existing = existing_links.get(tx_id)
+    if existing:
+        tx["link"] = _hydrate_link(existing, invoices, expenses)
+        return tx
+
+    # No prior link — run the matcher.
+    if (tx.get("amount") or 0) > 0:
+        # Income → match against unpaid invoices.
+        best = (0, None)
+        for inv in invoices:
+            s = _score_invoice_match(tx, inv)
+            if s > best[0]:
+                best = (s, inv)
+        score, inv = best
+        if inv and score >= MATCH_AUTO_SCORE:
+            _persist_link(user_id, tx_id, "invoice", inv["id"], auto=True)
+            _mark_invoice_paid(inv["id"])
+            tx["link"] = {
+                "type": "invoice",
+                "linked_id": inv["id"],
+                "linked_label": inv.get("invoice_number") or "Factuur",
+                "auto": True,
+                "confidence": score,
+            }
+            return tx
+        if inv and score >= MATCH_SUGGEST_SCORE:
+            _persist_link(user_id, tx_id, "suggested_invoice", inv["id"], auto=True)
+            tx["link"] = {
+                "type": "suggested_invoice",
+                "linked_id": inv["id"],
+                "linked_label": inv.get("invoice_number") or "Factuur",
+                "auto": True,
+                "confidence": score,
+            }
+            return tx
+    elif (tx.get("amount") or 0) < 0:
+        # Outgoing → match against existing expenses.
+        best = (0, None)
+        for ex in expenses:
+            s = _score_expense_match(tx, ex)
+            if s > best[0]:
+                best = (s, ex)
+        score, ex = best
+        if ex and score >= MATCH_AUTO_SCORE:
+            _persist_link(user_id, tx_id, "expense", ex["id"], auto=True)
+            tx["link"] = {
+                "type": "expense",
+                "linked_id": ex["id"],
+                "linked_label": (ex.get("description") or "Kosten")[:40],
+                "auto": True,
+                "confidence": score,
+            }
+            return tx
+        if ex and score >= MATCH_SUGGEST_SCORE:
+            _persist_link(user_id, tx_id, "suggested_expense", ex["id"], auto=True)
+            tx["link"] = {
+                "type": "suggested_expense",
+                "linked_id": ex["id"],
+                "linked_label": (ex.get("description") or "Kosten")[:40],
+                "auto": True,
+                "confidence": score,
+            }
+            return tx
+
+    tx["link"] = None
+    return tx
+
+
+def _hydrate_link(link_row: dict, invoices: list, expenses: list) -> dict:
+    """Convert a bank_transaction_links row into the shape the frontend
+    wants, looking up the linked record's display label."""
+    link_type = link_row.get("link_type")
+    linked_id = link_row.get("linked_id")
+    label = ""
+    if link_type in ("invoice", "suggested_invoice") and linked_id:
+        match = next((i for i in invoices if i.get("id") == linked_id), None)
+        if match:
+            label = match.get("invoice_number") or "Factuur"
+    elif link_type in ("expense", "suggested_expense") and linked_id:
+        match = next((e for e in expenses if e.get("id") == linked_id), None)
+        if match:
+            label = (match.get("description") or "Kosten")[:40]
+    elif link_type == "private":
+        label = "Privé"
+    return {
+        "type": link_type,
+        "linked_id": linked_id,
+        "linked_label": label,
+        "auto": bool(link_row.get("auto")),
+    }
+
+
+def _persist_link(user_id: str, tx_id: str, link_type: str, linked_id: Optional[str], auto: bool) -> None:
+    try:
+        supabase.table("bank_transaction_links").upsert({
+            "user_id": user_id,
+            "tx_id": tx_id,
+            "link_type": link_type,
+            "linked_id": linked_id,
+            "auto": auto,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }, on_conflict="user_id,tx_id").execute()
+    except Exception as e:
+        print(f"[banking] link upsert failed (non-fatal): {e}")
+
+
+def _mark_invoice_paid(invoice_id: str) -> None:
+    try:
+        supabase.table("invoices").update({
+            "status": "paid",
+        }).eq("id", invoice_id).execute()
+    except Exception as e:
+        print(f"[banking] invoice paid-mark failed (non-fatal): {e}")
+
+
 def _normalize_tink_transaction(tx: dict) -> dict:
     """Flatten Tink's verbose transaction shape into the fields BigDogg
     cares about. Returns positive amounts for incoming and negative for
@@ -464,9 +696,134 @@ async def get_transactions(
     items = raw.get("transactions") or []
     normalized = [_normalize_tink_transaction(t) for t in items]
     normalized.sort(key=lambda t: t.get("date") or "", reverse=True)
+
+    # Auto-match each transaction against existing invoices/expenses.
+    invoices_result = supabase.table("invoices")\
+        .select("id, invoice_number, total_incl_btw, status, client_name, client_company, invoice_date")\
+        .eq("user_id", bigdogg_user_id).execute()
+    invoices = invoices_result.data or []
+
+    expenses_result = supabase.table("expenses")\
+        .select("id, description, amount_ex_btw, btw_amount, expense_date")\
+        .eq("user_id", bigdogg_user_id).execute()
+    expenses = expenses_result.data or []
+
+    tx_ids = [t.get("id") for t in normalized if t.get("id")]
+    existing_links: dict = {}
+    if tx_ids:
+        try:
+            links_result = supabase.table("bank_transaction_links")\
+                .select("tx_id, link_type, linked_id, auto")\
+                .eq("user_id", bigdogg_user_id)\
+                .in_("tx_id", tx_ids).execute()
+            for row in (links_result.data or []):
+                existing_links[row["tx_id"]] = row
+        except Exception as e:
+            # Migration not run yet — degrade gracefully to no-link mode.
+            print(f"[banking] link lookup failed (likely missing table): {e}")
+
+    enriched = [
+        _enrich_transaction_with_link(t, existing_links, invoices, expenses, bigdogg_user_id)
+        for t in normalized
+    ]
     return {
-        "transactions": normalized,
+        "transactions": enriched,
         "next_page_token": raw.get("nextPageToken"),
+    }
+
+
+@router.post("/transactions/{tx_id}/link")
+async def set_transaction_link(tx_id: str, request: Request):
+    """Confirm or change a transaction link.
+
+    Body:
+      { "link_type": "invoice" | "expense" | "private" | null, "linked_id": "<uuid|null>" }
+
+    - "invoice"  : also marks the invoice as paid.
+    - "expense"  : just records the link.
+    - "private"  : ignores the transaction (no linked record).
+    - null       : removes any existing link. If we previously auto-marked
+                   an invoice as paid because of this link, revert it.
+    """
+    user_id = get_user_id(request)
+    body = await request.json()
+    link_type = (body or {}).get("link_type")
+    linked_id = (body or {}).get("linked_id")
+
+    # Look up the existing link first so we can revert side-effects.
+    prev_result = supabase.table("bank_transaction_links")\
+        .select("link_type, linked_id, auto")\
+        .eq("user_id", user_id).eq("tx_id", tx_id).execute()
+    prev = prev_result.data[0] if prev_result.data else None
+
+    if link_type is None:
+        # Unlink. If the previous link was an auto-marked invoice, flip it back to 'sent'.
+        if prev and prev.get("link_type") == "invoice" and prev.get("auto") and prev.get("linked_id"):
+            try:
+                supabase.table("invoices").update({
+                    "status": "sent",
+                }).eq("id", prev["linked_id"]).execute()
+            except Exception as e:
+                print(f"[banking] invoice paid-revert failed (non-fatal): {e}")
+        try:
+            supabase.table("bank_transaction_links")\
+                .delete().eq("user_id", user_id).eq("tx_id", tx_id).execute()
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"success": True, "link": None}
+
+    if link_type not in ("invoice", "expense", "private"):
+        raise HTTPException(status_code=400, detail="link_type must be invoice|expense|private|null")
+    if link_type in ("invoice", "expense") and not linked_id:
+        raise HTTPException(status_code=400, detail="linked_id required for invoice/expense links")
+
+    _persist_link(user_id, tx_id, link_type, linked_id, auto=False)
+    if link_type == "invoice":
+        _mark_invoice_paid(linked_id)
+
+    return {"success": True, "link": {"type": link_type, "linked_id": linked_id, "auto": False}}
+
+
+class _CreateExpenseFromTx(dict):
+    pass
+
+
+@router.post("/transactions/{tx_id}/create-expense")
+async def create_expense_from_transaction(tx_id: str, request: Request):
+    """Create an expense from a transaction and link it.
+
+    Body:
+      { "description": "...", "amount_ex_btw": 12.34, "btw_rate": 21,
+        "expense_date": "YYYY-MM-DD", "category": "general" }
+    """
+    user_id = get_user_id(request)
+    body = await request.json()
+    description = (body or {}).get("description") or "Bank transactie"
+    amount_ex_btw = float((body or {}).get("amount_ex_btw") or 0)
+    btw_rate = float((body or {}).get("btw_rate") or 21)
+    expense_date = (body or {}).get("expense_date") or datetime.now(timezone.utc).date().isoformat()
+    category = (body or {}).get("category") or "general"
+    btw_amount = round(amount_ex_btw * btw_rate / 100, 2)
+
+    insert = supabase.table("expenses").insert({
+        "user_id": user_id,
+        "description": description,
+        "amount_ex_btw": amount_ex_btw,
+        "btw_amount": btw_amount,
+        "btw_rate": btw_rate,
+        "expense_date": expense_date,
+        "category": category,
+    }).execute()
+    if not insert.data:
+        raise HTTPException(status_code=400, detail="Could not create expense")
+    expense_id = insert.data[0]["id"]
+
+    _persist_link(user_id, tx_id, "expense", expense_id, auto=False)
+
+    return {
+        "success": True,
+        "expense": insert.data[0],
+        "link": {"type": "expense", "linked_id": expense_id, "auto": False},
     }
 
 
