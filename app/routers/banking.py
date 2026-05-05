@@ -43,6 +43,7 @@ import httpx
 
 from app.database import supabase
 from app.config import settings
+from app.routers.notifications import create_notification
 
 
 router = APIRouter()
@@ -524,6 +525,53 @@ def _score_invoice_match(tx: dict, invoice: dict) -> int:
     return min(score, 100)
 
 
+def _score_investment_match(tx: dict, investment: dict) -> int:
+    """Returns a confidence score 0-100 for tx → investment (outgoing only).
+
+    Investments are large purchases that get depreciated over multiple
+    years. Matching is amount-driven — a single fixed total stored on the
+    investment row — with description and date as secondary signals.
+    """
+    if (tx.get("amount") or 0) >= 0:
+        return 0
+
+    score = 0
+    tx_amount = abs(float(tx.get("amount") or 0))
+    inv_amount = float(investment.get("amount") or 0)
+
+    if inv_amount > 0 and abs(tx_amount - inv_amount) <= 0.01:
+        score += 60
+    elif inv_amount > 0 and abs(tx_amount - inv_amount) / inv_amount <= 0.005:
+        score += 50
+
+    desc_tx = (tx.get("description") or "").lower()
+    merchant = (tx.get("merchant") or "").lower()
+    desc_inv = (investment.get("description") or "").lower()
+    if desc_inv and len(desc_inv) >= 3:
+        if desc_inv in desc_tx or desc_inv in merchant:
+            score += 30
+        elif merchant and merchant in desc_inv:
+            score += 20
+
+    inv_date = investment.get("purchase_date") or ""
+    tx_date = tx.get("date") or ""
+    if inv_date and tx_date:
+        try:
+            id_d = datetime.strptime(inv_date, "%Y-%m-%d").date()
+            tx_d = datetime.strptime(tx_date, "%Y-%m-%d").date()
+            days = abs((tx_d - id_d).days)
+            if days <= 1:
+                score += 10
+            elif days <= 7:
+                score += 5
+            else:
+                score -= 15
+        except Exception:
+            pass
+
+    return max(0, min(score, 100))
+
+
 def _score_expense_match(tx: dict, expense: dict) -> int:
     """Returns a confidence score 0-100 for tx → expense (outgoing only)."""
     if (tx.get("amount") or 0) >= 0:
@@ -569,16 +617,26 @@ def _score_expense_match(tx: dict, expense: dict) -> int:
     return max(0, min(score, 100))
 
 
+def _format_amount_eur(amount: float) -> str:
+    return f"€ {abs(amount):.2f}".replace(".", ",")
+
+
 def _enrich_transaction_with_link(
     tx: dict,
     existing_links: dict,
     invoices: list,
     expenses: list,
+    investments: list,
     user_id: str,
 ) -> dict:
     """Attach a `link` field to `tx`. If a manual link exists, use it as-is.
     Otherwise compute the best automatic match and persist firm/suggested
     links to the bank_transaction_links table.
+
+    Outgoing tx are matched against BOTH expenses and investments; we
+    pick whichever scores highest. Auto-links also fire an in-app
+    notification so the user can see what happened (and revert if
+    wrong) without having to open the Transactions screen.
     """
     tx_id = tx.get("id")
     if not tx_id:
@@ -587,65 +645,91 @@ def _enrich_transaction_with_link(
 
     existing = existing_links.get(tx_id)
     if existing:
-        tx["link"] = _hydrate_link(existing, invoices, expenses)
+        tx["link"] = _hydrate_link(existing, invoices, expenses, investments)
         return tx
 
-    # No prior link — run the matcher.
-    if (tx.get("amount") or 0) > 0:
-        # Income → match against unpaid invoices.
-        best = (0, None)
+    amount = float(tx.get("amount") or 0)
+
+    # ── Income → invoices ──
+    if amount > 0:
+        best_inv = (0, None)
         for inv in invoices:
             s = _score_invoice_match(tx, inv)
-            if s > best[0]:
-                best = (s, inv)
-        score, inv = best
+            if s > best_inv[0]:
+                best_inv = (s, inv)
+        score, inv = best_inv
         if inv and score >= MATCH_AUTO_SCORE:
             _persist_link(user_id, tx_id, "invoice", inv["id"], auto=True)
             _mark_invoice_paid(inv["id"])
+            inv_label = inv.get("invoice_number") or "Factuur"
+            _notify_auto_link(
+                user_id,
+                title=f"Betaling automatisch gekoppeld aan {inv_label}",
+                body=f"{_format_amount_eur(amount)} herkend als betaling van factuur {inv_label}. Klopt het niet? Open de transactie om te ontkoppelen.",
+                link_type="invoice",
+                linked_id=inv["id"],
+                tx_id=tx_id,
+            )
             tx["link"] = {
-                "type": "invoice",
-                "linked_id": inv["id"],
-                "linked_label": inv.get("invoice_number") or "Factuur",
-                "auto": True,
-                "confidence": score,
+                "type": "invoice", "linked_id": inv["id"],
+                "linked_label": inv_label, "auto": True, "confidence": score,
             }
             return tx
         if inv and score >= MATCH_SUGGEST_SCORE:
             _persist_link(user_id, tx_id, "suggested_invoice", inv["id"], auto=True)
             tx["link"] = {
-                "type": "suggested_invoice",
-                "linked_id": inv["id"],
+                "type": "suggested_invoice", "linked_id": inv["id"],
                 "linked_label": inv.get("invoice_number") or "Factuur",
-                "auto": True,
-                "confidence": score,
+                "auto": True, "confidence": score,
             }
             return tx
-    elif (tx.get("amount") or 0) < 0:
-        # Outgoing → match against existing expenses.
-        best = (0, None)
+
+    # ── Outgoing → expenses + investments (best wins) ──
+    elif amount < 0:
+        best_ex = (0, None)
         for ex in expenses:
             s = _score_expense_match(tx, ex)
-            if s > best[0]:
-                best = (s, ex)
-        score, ex = best
-        if ex and score >= MATCH_AUTO_SCORE:
-            _persist_link(user_id, tx_id, "expense", ex["id"], auto=True)
+            if s > best_ex[0]:
+                best_ex = (s, ex)
+
+        best_iv = (0, None)
+        for iv in investments:
+            s = _score_investment_match(tx, iv)
+            if s > best_iv[0]:
+                best_iv = (s, iv)
+
+        # Pick whichever target type scored highest.
+        if best_iv[0] > best_ex[0]:
+            score, target, link_kind = best_iv[0], best_iv[1], "investment"
+        else:
+            score, target, link_kind = best_ex[0], best_ex[1], "expense"
+
+        if target and score >= MATCH_AUTO_SCORE:
+            label = (target.get("description") or
+                     ("Investering" if link_kind == "investment" else "Kosten"))[:40]
+            _persist_link(user_id, tx_id, link_kind, target["id"], auto=True)
+            kind_nl = "investering" if link_kind == "investment" else "kosten"
+            _notify_auto_link(
+                user_id,
+                title=f"Uitgave gekoppeld aan {kind_nl}",
+                body=f"{_format_amount_eur(amount)} herkend als {kind_nl} · {label}. Klopt het niet? Open de transactie om te ontkoppelen.",
+                link_type=link_kind,
+                linked_id=target["id"],
+                tx_id=tx_id,
+            )
             tx["link"] = {
-                "type": "expense",
-                "linked_id": ex["id"],
-                "linked_label": (ex.get("description") or "Kosten")[:40],
-                "auto": True,
-                "confidence": score,
+                "type": link_kind, "linked_id": target["id"],
+                "linked_label": label, "auto": True, "confidence": score,
             }
             return tx
-        if ex and score >= MATCH_SUGGEST_SCORE:
-            _persist_link(user_id, tx_id, "suggested_expense", ex["id"], auto=True)
+        if target and score >= MATCH_SUGGEST_SCORE:
+            suggested_kind = f"suggested_{link_kind}"
+            label = (target.get("description") or
+                     ("Investering" if link_kind == "investment" else "Kosten"))[:40]
+            _persist_link(user_id, tx_id, suggested_kind, target["id"], auto=True)
             tx["link"] = {
-                "type": "suggested_expense",
-                "linked_id": ex["id"],
-                "linked_label": (ex.get("description") or "Kosten")[:40],
-                "auto": True,
-                "confidence": score,
+                "type": suggested_kind, "linked_id": target["id"],
+                "linked_label": label, "auto": True, "confidence": score,
             }
             return tx
 
@@ -653,7 +737,31 @@ def _enrich_transaction_with_link(
     return tx
 
 
-def _hydrate_link(link_row: dict, invoices: list, expenses: list) -> dict:
+def _notify_auto_link(
+    user_id: str,
+    *,
+    title: str,
+    body: str,
+    link_type: str,
+    linked_id: str,
+    tx_id: str,
+) -> None:
+    """In-app notification surfaced via the existing bell icon. Stays
+    silent on failure (notifications must never break a /transactions
+    fetch)."""
+    try:
+        create_notification(
+            user_id=user_id,
+            notification_type="bank_auto_link",
+            title=title,
+            body=body,
+            data={"link_type": link_type, "linked_id": linked_id, "tx_id": tx_id},
+        )
+    except Exception as e:
+        print(f"[banking] auto-link notification skipped: {e}")
+
+
+def _hydrate_link(link_row: dict, invoices: list, expenses: list, investments: list) -> dict:
     """Convert a bank_transaction_links row into the shape the frontend
     wants, looking up the linked record's display label."""
     link_type = link_row.get("link_type")
@@ -667,6 +775,10 @@ def _hydrate_link(link_row: dict, invoices: list, expenses: list) -> dict:
         match = next((e for e in expenses if e.get("id") == linked_id), None)
         if match:
             label = (match.get("description") or "Kosten")[:40]
+    elif link_type in ("investment", "suggested_investment") and linked_id:
+        match = next((i for i in investments if i.get("id") == linked_id), None)
+        if match:
+            label = (match.get("description") or "Investering")[:40]
     elif link_type == "private":
         label = "Privé"
     return {
@@ -793,6 +905,11 @@ async def get_transactions(
         .eq("user_id", bigdogg_user_id).execute()
     expenses = expenses_result.data or []
 
+    investments_result = supabase.table("investments")\
+        .select("id, description, amount, purchase_date, category")\
+        .eq("user_id", bigdogg_user_id).execute()
+    investments = investments_result.data or []
+
     tx_ids = [t.get("id") for t in normalized if t.get("id")]
     existing_links: dict = {}
     if tx_ids:
@@ -808,7 +925,7 @@ async def get_transactions(
             print(f"[banking] link lookup failed (likely missing table): {e}")
 
     enriched = [
-        _enrich_transaction_with_link(t, existing_links, invoices, expenses, bigdogg_user_id)
+        _enrich_transaction_with_link(t, existing_links, invoices, expenses, investments, bigdogg_user_id)
         for t in normalized
     ]
     return {
@@ -857,10 +974,10 @@ async def set_transaction_link(tx_id: str, request: Request):
             raise HTTPException(status_code=400, detail=str(e))
         return {"success": True, "link": None}
 
-    if link_type not in ("invoice", "expense", "private"):
-        raise HTTPException(status_code=400, detail="link_type must be invoice|expense|private|null")
-    if link_type in ("invoice", "expense") and not linked_id:
-        raise HTTPException(status_code=400, detail="linked_id required for invoice/expense links")
+    if link_type not in ("invoice", "expense", "investment", "private"):
+        raise HTTPException(status_code=400, detail="link_type must be invoice|expense|investment|private|null")
+    if link_type in ("invoice", "expense", "investment") and not linked_id:
+        raise HTTPException(status_code=400, detail="linked_id required for invoice/expense/investment links")
 
     _persist_link(user_id, tx_id, link_type, linked_id, auto=False)
     if link_type == "invoice":
@@ -909,6 +1026,47 @@ async def create_expense_from_transaction(tx_id: str, request: Request):
         "success": True,
         "expense": insert.data[0],
         "link": {"type": "expense", "linked_id": expense_id, "auto": False},
+    }
+
+
+@router.post("/transactions/{tx_id}/create-investment")
+async def create_investment_from_transaction(tx_id: str, request: Request):
+    """Create an investment from a transaction and link it.
+
+    Body:
+      { "description": "...", "amount": 2499.00,
+        "purchase_date": "YYYY-MM-DD", "depreciation_years": 5,
+        "category": "general" }
+    """
+    user_id = get_user_id(request)
+    body = await request.json()
+    description = (body or {}).get("description") or "Bank transactie"
+    amount = float((body or {}).get("amount") or 0)
+    purchase_date = (body or {}).get("purchase_date") or datetime.now(timezone.utc).date().isoformat()
+    depreciation_years = int((body or {}).get("depreciation_years") or 5)
+    category = (body or {}).get("category") or "general"
+
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="amount must be > 0")
+
+    insert = supabase.table("investments").insert({
+        "user_id": user_id,
+        "description": description,
+        "amount": amount,
+        "purchase_date": purchase_date,
+        "depreciation_years": depreciation_years,
+        "category": category,
+    }).execute()
+    if not insert.data:
+        raise HTTPException(status_code=400, detail="Could not create investment")
+    inv_id = insert.data[0]["id"]
+
+    _persist_link(user_id, tx_id, "investment", inv_id, auto=False)
+
+    return {
+        "success": True,
+        "investment": insert.data[0],
+        "link": {"type": "investment", "linked_id": inv_id, "auto": False},
     }
 
 

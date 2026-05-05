@@ -19,6 +19,7 @@ from app.routers.banking import (
     _looks_like_stripe_payout,
     _score_expense_match,
     _score_invoice_match,
+    _score_investment_match,
     _stripe_fee_match,
     MATCH_AUTO_SCORE,
     MATCH_SUGGEST_SCORE,
@@ -72,6 +73,20 @@ def expense(
         "amount_ex_btw": amount_ex_btw,
         "btw_amount": btw_amount,
         "expense_date": (TODAY - timedelta(days=days_ago)).isoformat(),
+    }
+
+
+def investment(
+    *,
+    description: str = "",
+    amount: float = 0,
+    days_ago: int = 0,
+):
+    return {
+        "id": "inv_test",
+        "description": description,
+        "amount": amount,
+        "purchase_date": (TODAY - timedelta(days=days_ago)).isoformat(),
     }
 
 
@@ -292,5 +307,46 @@ def test_income_against_expense_scores_zero():
     score = _score_expense_match(
         tx(50.00, description="refund"),
         expense(description="refund", amount_ex_btw=41.32, btw_amount=8.68),
+    )
+    assert score == 0
+
+
+# ═══════════════════════════════════════════════════════════════
+# _score_investment_match — outgoing tx → investment row
+# ═══════════════════════════════════════════════════════════════
+def test_investment_exact_amount_with_description_auto_links():
+    """Bought a MacBook for €2499 yesterday, recorded as an
+    investment; today the bank shows the same outgoing tx."""
+    score = _score_investment_match(
+        tx(-2499.00, description="apple store amsterdam macbook",
+           merchant="Apple Store", days_ago=0),
+        investment(description="MacBook", amount=2499.00, days_ago=1),
+    )
+    assert score >= MATCH_AUTO_SCORE
+
+
+def test_investment_amount_only_only_suggests():
+    """Exact amount, no description match, ±1 day window."""
+    score = _score_investment_match(
+        tx(-1899.00, description="random outgoing", days_ago=0),
+        investment(description="Bureaustoel", amount=1899.00, days_ago=1),
+    )
+    assert MATCH_SUGGEST_SCORE <= score < MATCH_AUTO_SCORE
+
+
+def test_investment_old_purchase_date_rejects():
+    """Investment booked 30 days ago: a same-amount tx today is more
+    likely a coincidence than the actual purchase settling."""
+    score = _score_investment_match(
+        tx(-2499.00, description="random outgoing", days_ago=0),
+        investment(description="Something else", amount=2499.00, days_ago=30),
+    )
+    assert score < MATCH_SUGGEST_SCORE
+
+
+def test_income_against_investment_scores_zero():
+    score = _score_investment_match(
+        tx(2499.00, description="refund"),
+        investment(description="MacBook", amount=2499.00),
     )
     assert score == 0
