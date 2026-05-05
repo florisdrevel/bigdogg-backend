@@ -745,6 +745,21 @@ def _enrich_transaction_with_link(
     return tx
 
 
+def schedule_reconcile(user_id: str) -> None:
+    """Fire-and-forget kickoff for the matcher. Safe to call from any
+    request handler — never raises, never blocks."""
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(reconcile_user_transactions(user_id))
+    except RuntimeError:
+        # No running loop (e.g. sync context) — drop the request.
+        # Reconcile will run next time /banking/transactions is called.
+        pass
+    except Exception as e:
+        print(f"[banking] reconcile schedule failed (non-fatal): {e}")
+
+
 async def reconcile_user_transactions(user_id: str) -> None:
     """Re-run the matcher across the user's recent bank transactions.
 

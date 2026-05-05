@@ -1,6 +1,6 @@
-﻿from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+﻿from fastapi import APIRouter, HTTPException, Request
 from app.database import supabase
-from app.routers.banking import reconcile_user_transactions
+from app.routers.banking import schedule_reconcile
 from datetime import date
 
 router = APIRouter()
@@ -54,7 +54,7 @@ async def get_annual_depreciation(year: int, request: Request):
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/")
-async def add_investment(request: Request, background_tasks: BackgroundTasks):
+async def add_investment(request: Request):
     user_id = get_user_id(request)
     try:
         body = await request.json()
@@ -74,9 +74,8 @@ async def add_investment(request: Request, background_tasks: BackgroundTasks):
         if inv:
             inv["depreciation_schedule"] = calculate_depreciation(amount, purchase_date, depreciation_years)
             inv["suggest_depreciation"] = amount > DEPRECIATION_THRESHOLD
-        # Reconcile: a recent outgoing bank tx may match this purchase
-        # — auto-link it now and notify the user.
-        background_tasks.add_task(reconcile_user_transactions, user_id)
+        # Fire-and-forget reconcile.
+        schedule_reconcile(user_id)
         return {"success": True, "investment": inv}
     except HTTPException:
         raise

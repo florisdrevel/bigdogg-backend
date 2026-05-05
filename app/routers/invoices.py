@@ -1,9 +1,9 @@
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, List
 from app.database import supabase
 from app.config import settings
-from app.routers.banking import reconcile_user_transactions
+from app.routers.banking import schedule_reconcile
 from datetime import date, timedelta
 import resend
 
@@ -89,7 +89,7 @@ async def get_invoice(invoice_id: str, request: Request):
 
 
 @router.post("/")
-async def create_invoice(invoice: InvoiceCreate, request: Request, background_tasks: BackgroundTasks):
+async def create_invoice(invoice: InvoiceCreate, request: Request):
     user_id = get_user_id(request)
     try:
         invoice_number = generate_invoice_number(user_id)
@@ -194,11 +194,9 @@ async def create_invoice(invoice: InvoiceCreate, request: Request, background_ta
         except Exception as e:
             print(f"Auto payment link failed (non-fatal): {e}")
 
-        # Background reconcile: a payment from this client may already
-        # be sitting in the user's bank feed. Run the matcher so the
-        # newly-created invoice can be auto-linked + flagged-paid +
-        # notified about right away.
-        background_tasks.add_task(reconcile_user_transactions, user_id)
+        # Fire-and-forget reconcile: a payment from this client may
+        # already be sitting in the user's bank feed.
+        schedule_reconcile(user_id)
 
         return {
             "invoice": invoice_response.data[0],

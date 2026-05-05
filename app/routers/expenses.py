@@ -1,10 +1,10 @@
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, UploadFile, File
+from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel
 from typing import Optional
 from datetime import date
 from app.database import supabase
 from app.config import settings
-from app.routers.banking import reconcile_user_transactions
+from app.routers.banking import schedule_reconcile
 import anthropic
 import base64
 import json
@@ -49,7 +49,7 @@ async def get_expenses(request: Request):
 
 
 @router.post("/")
-async def create_expense(expense: ExpenseCreate, request: Request, background_tasks: BackgroundTasks):
+async def create_expense(expense: ExpenseCreate, request: Request):
     user_id = get_user_id(request)
     try:
         btw_amount = round(expense.amount_ex_btw * expense.btw_rate / 100, 2)
@@ -64,12 +64,10 @@ async def create_expense(expense: ExpenseCreate, request: Request, background_ta
             "category": expense.category,
             **({"project_id": expense.project_id} if expense.project_id else {}),
         }).execute()
-        # After the response is sent, re-run the bank-tx matcher: a
-        # newly-added expense might correspond to a transaction we have
-        # already pulled from Tink, in which case the user gets an
-        # instant notification + auto-link without having to open the
-        # Transactions screen.
-        background_tasks.add_task(reconcile_user_transactions, user_id)
+        # Fire-and-forget: re-run the bank-tx matcher. If a recently-
+        # imported tx corresponds to this fresh expense, the user gets
+        # an instant notification + auto-link.
+        schedule_reconcile(user_id)
         return {"expense": response.data[0]}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
