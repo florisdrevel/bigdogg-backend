@@ -398,6 +398,12 @@ async def banking_callback(
 MATCH_AUTO_SCORE = 80
 MATCH_SUGGEST_SCORE = 55
 
+# Days after which a yellow "suggestion" badge auto-decays. The match
+# row is deleted on the next /transactions read so the matcher gets a
+# fresh shot at it (which may simply not surface anything if the
+# original signals are gone).
+SUGGESTION_TTL_DAYS = 7
+
 # Stripe fee model used to predict the amount that arrives in the
 # freelancer's bank account when a customer pays a BigDogg invoice via
 # Stripe. Using their published European-card schedule:
@@ -1107,16 +1113,45 @@ async def get_transactions(
 
     tx_ids = [t.get("id") for t in combined if t.get("id")]
     existing_links: dict = {}
+    stale_suggestion_ids: list = []
     if tx_ids:
         try:
             links_result = supabase.table("bank_transaction_links")\
-                .select("tx_id, link_type, linked_id, auto")\
+                .select("tx_id, link_type, linked_id, auto, created_at")\
                 .eq("user_id", bigdogg_user_id)\
                 .in_("tx_id", tx_ids).execute()
+            cutoff = datetime.now(timezone.utc) - timedelta(days=SUGGESTION_TTL_DAYS)
             for row in (links_result.data or []):
+                lt = row.get("link_type") or ""
+                # Auto-decay stale suggestions: a yellow "Match?" badge
+                # the user ignored for SUGGESTION_TTL_DAYS days probably
+                # is not the right match (or they would have confirmed).
+                # Drop it from the in-memory map so the matcher gets a
+                # second chance with whatever the data looks like NOW.
+                if lt.startswith("suggested_"):
+                    created_raw = row.get("created_at")
+                    if created_raw:
+                        try:
+                            created = datetime.fromisoformat(
+                                created_raw.replace("Z", "+00:00"))
+                            if created < cutoff:
+                                stale_suggestion_ids.append(row["tx_id"])
+                                continue
+                        except Exception:
+                            pass
                 existing_links[row["tx_id"]] = row
         except Exception as e:
             print(f"[banking] link lookup failed: {e}")
+
+    # Best-effort cleanup of stale suggestions.
+    if stale_suggestion_ids:
+        try:
+            supabase.table("bank_transaction_links").delete()\
+                .eq("user_id", bigdogg_user_id)\
+                .in_("tx_id", stale_suggestion_ids).execute()
+            print(f"[banking] expired {len(stale_suggestion_ids)} stale suggestions")
+        except Exception as e:
+            print(f"[banking] suggestion cleanup failed (non-fatal): {e}")
 
     enriched = [
         _enrich_transaction_with_link(t, existing_links, invoices, expenses, investments, bigdogg_user_id)
