@@ -172,6 +172,7 @@ def send_push_to_user(
     cycle when this module is loaded by the app.
     """
     if not is_configured():
+        print(f"[push] skip user={user_id[:8]}… (FCM_SERVICE_ACCOUNT_JSON not set)")
         return 0
     try:
         from app.database import supabase
@@ -188,6 +189,10 @@ def send_push_to_user(
         print(f"[push] token lookup failed: {e}")
         return 0
 
+    if not rows:
+        print(f"[push] user={user_id[:8]}… has no registered tokens")
+        return 0
+
     sent = 0
     dead_ids: list = []
     for row in rows:
@@ -199,6 +204,8 @@ def send_push_to_user(
             sent += 1
         else:
             dead_ids.append(row.get("id"))
+
+    print(f"[push] user={user_id[:8]}… tokens={len(rows)} sent={sent} dead={len(dead_ids)}")
 
     # Clean up tokens that failed — Firebase will keep returning 404 on
     # uninstalled apps, no point keeping them.
