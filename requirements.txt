@@ -16,3 +16,4 @@ resend
 Pillow
 fpdf2
 mt-940
+google-auth==2.43.0

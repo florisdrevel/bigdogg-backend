@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from datetime import datetime, timezone
 from typing import Optional, Any
 from app.database import supabase
+from app.services.push import send_push_to_user
 
 router = APIRouter()
 
@@ -54,6 +55,16 @@ def create_notification(
             "data":    data,
         }).execute()
         print(f"[notifications] inserted type={notification_type} for user={user_id[:8]}…")
+        # Mirror to OS-level push if FCM is configured. Best-effort —
+        # failure to send a push must never break the in-app insert.
+        try:
+            push_data = {"type": notification_type}
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    push_data[k] = v
+            send_push_to_user(user_id, title=title, body=(body or ""), data=push_data)
+        except Exception as e:
+            print(f"[notifications] push fan-out skipped: {e}")
     except Exception as e:
         msg = str(e).lower()
         if "row-level security" in msg or "42501" in msg:
