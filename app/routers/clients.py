@@ -224,8 +224,11 @@ async def create_invite(request: Request):
             "user_id": user_id,
         }).execute()
         token = response.data[0]['token']
+        # Use the share-link short URL so WhatsApp/Slack/Facebook show
+        # a personalized "Floris nodigt je uit" preview instead of the
+        # generic landing-page meta tags.
         return {
-            "invite_url": f"https://bigdogg.nl/#/onboard/{token}",
+            "invite_url": f"https://bigdogg-production.up.railway.app/o/{token}",
             "token": token
         }
     except Exception as e:

@@ -208,7 +208,10 @@ async def send_quote_email(quote_id: str, request: Request):
                 .update({"share_token": share_token})\
                 .eq("id", quote_id)\
                 .execute()
-        share_url = f"https://bigdogg.nl/#/q/{share_token}"
+        # Backend share-link domain so WhatsApp / email clients show a
+        # personalized preview ("Offerte X van Y") instead of the
+        # generic bigdogg.nl landing page.
+        share_url = f"https://bigdogg-production.up.railway.app/q/{share_token}"
 
         subject = f"Offerte {quote_number} — {sender_name}"
 
