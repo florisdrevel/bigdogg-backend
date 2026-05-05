@@ -662,13 +662,11 @@ def _enrich_transaction_with_link(
             _persist_link(user_id, tx_id, "invoice", inv["id"], auto=True)
             _mark_invoice_paid(inv["id"])
             inv_label = inv.get("invoice_number") or "Factuur"
-            _notify_auto_link(
-                user_id,
-                title=f"Betaling automatisch gekoppeld aan {inv_label}",
-                body=f"{_format_amount_eur(amount)} herkend als betaling van factuur {inv_label}. Klopt het niet? Open de transactie om te ontkoppelen.",
-                link_type="invoice",
-                linked_id=inv["id"],
-                tx_id=tx_id,
+            _notify_match(
+                user_id, kind="auto",
+                title=f"Betaling gekoppeld aan {inv_label}",
+                body=f"{_format_amount_eur(amount)} ontvangen en automatisch gekoppeld aan factuur {inv_label}. Klopt het niet? Open de transactie om te ontkoppelen.",
+                link_type="invoice", linked_id=inv["id"], tx_id=tx_id,
             )
             tx["link"] = {
                 "type": "invoice", "linked_id": inv["id"],
@@ -677,10 +675,16 @@ def _enrich_transaction_with_link(
             return tx
         if inv and score >= MATCH_SUGGEST_SCORE:
             _persist_link(user_id, tx_id, "suggested_invoice", inv["id"], auto=True)
+            inv_label = inv.get("invoice_number") or "Factuur"
+            _notify_match(
+                user_id, kind="suggest",
+                title=f"Betaling ontvangen — is dit factuur {inv_label}?",
+                body=f"{_format_amount_eur(amount)} binnen. Wij denken dat dit factuur {inv_label} betreft. Tik om te bevestigen of een andere factuur te kiezen.",
+                link_type="invoice", linked_id=inv["id"], tx_id=tx_id,
+            )
             tx["link"] = {
                 "type": "suggested_invoice", "linked_id": inv["id"],
-                "linked_label": inv.get("invoice_number") or "Factuur",
-                "auto": True, "confidence": score,
+                "linked_label": inv_label, "auto": True, "confidence": score,
             }
             return tx
 
@@ -698,7 +702,6 @@ def _enrich_transaction_with_link(
             if s > best_iv[0]:
                 best_iv = (s, iv)
 
-        # Pick whichever target type scored highest.
         if best_iv[0] > best_ex[0]:
             score, target, link_kind = best_iv[0], best_iv[1], "investment"
         else:
@@ -709,13 +712,11 @@ def _enrich_transaction_with_link(
                      ("Investering" if link_kind == "investment" else "Kosten"))[:40]
             _persist_link(user_id, tx_id, link_kind, target["id"], auto=True)
             kind_nl = "investering" if link_kind == "investment" else "kosten"
-            _notify_auto_link(
-                user_id,
-                title=f"Uitgave gekoppeld aan {kind_nl}",
-                body=f"{_format_amount_eur(amount)} herkend als {kind_nl} · {label}. Klopt het niet? Open de transactie om te ontkoppelen.",
-                link_type=link_kind,
-                linked_id=target["id"],
-                tx_id=tx_id,
+            _notify_match(
+                user_id, kind="auto",
+                title=f"Uitgave gekoppeld aan {kind_nl} · {label}",
+                body=f"{_format_amount_eur(amount)} automatisch gekoppeld aan {kind_nl} · {label}. Klopt het niet? Open de transactie om te ontkoppelen.",
+                link_type=link_kind, linked_id=target["id"], tx_id=tx_id,
             )
             tx["link"] = {
                 "type": link_kind, "linked_id": target["id"],
@@ -726,7 +727,14 @@ def _enrich_transaction_with_link(
             suggested_kind = f"suggested_{link_kind}"
             label = (target.get("description") or
                      ("Investering" if link_kind == "investment" else "Kosten"))[:40]
+            kind_nl = "investering" if link_kind == "investment" else "kosten"
             _persist_link(user_id, tx_id, suggested_kind, target["id"], auto=True)
+            _notify_match(
+                user_id, kind="suggest",
+                title=f"Uitgave gezien — is dit {kind_nl} · {label}?",
+                body=f"{_format_amount_eur(amount)} afgeschreven. Wij denken dat dit {kind_nl} · {label} betreft. Tik om te bevestigen of een andere optie te kiezen.",
+                link_type=link_kind, linked_id=target["id"], tx_id=tx_id,
+            )
             tx["link"] = {
                 "type": suggested_kind, "linked_id": target["id"],
                 "linked_label": label, "auto": True, "confidence": score,
@@ -737,28 +745,46 @@ def _enrich_transaction_with_link(
     return tx
 
 
-def _notify_auto_link(
+def _notify_match(
     user_id: str,
     *,
+    kind: str,                 # "auto" or "suggest"
     title: str,
     body: str,
-    link_type: str,
+    link_type: str,            # "invoice" | "expense" | "investment"
     linked_id: str,
     tx_id: str,
 ) -> None:
-    """In-app notification surfaced via the existing bell icon. Stays
-    silent on failure (notifications must never break a /transactions
-    fetch)."""
+    """In-app notification surfaced via the existing bell icon.
+
+    Two flavours, sharing the same plumbing so the frontend can route on
+    `notification_type`:
+
+      bank_auto_link  — high-confidence link already applied; user can
+                        revert by tapping into the transaction.
+      bank_suggest    — medium-confidence guess waiting for confirmation;
+                        tapping the notification opens the transaction
+                        with the yellow "Klopt? / Anders" sheet ready.
+
+    Stays silent on failure — a notification must never break a
+    /transactions fetch.
+    """
+    notification_type = "bank_auto_link" if kind == "auto" else "bank_suggest"
     try:
         create_notification(
             user_id=user_id,
-            notification_type="bank_auto_link",
+            notification_type=notification_type,
             title=title,
             body=body,
-            data={"link_type": link_type, "linked_id": linked_id, "tx_id": tx_id},
+            data={
+                "link_type": link_type,
+                "linked_id": linked_id,
+                "tx_id": tx_id,
+                "kind": kind,
+            },
         )
     except Exception as e:
-        print(f"[banking] auto-link notification skipped: {e}")
+        print(f"[banking] notification skipped: {e}")
 
 
 def _hydrate_link(link_row: dict, invoices: list, expenses: list, investments: list) -> dict:
