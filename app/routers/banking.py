@@ -419,8 +419,9 @@ def _looks_like_stripe_payout(haystack: str) -> bool:
     catch the common variants seen on Dutch ZZP accounts."""
     if not haystack:
         return False
-    needles = ("stripe", "stripe payments", "str.pe", "stripe.com")
-    return any(n in haystack for n in needles)
+    lower = haystack.lower()
+    needles = ("stripe", "str.pe", "stripe.com")
+    return any(n in lower for n in needles)
 
 
 def _stripe_fee_match(tx_amount: float, invoice_total: float) -> Optional[float]:
