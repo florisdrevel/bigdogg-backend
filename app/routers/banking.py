@@ -33,10 +33,10 @@ The redirect URI registered in the Tink console must be exactly:
   https://bigdogg-production.up.railway.app/api/v1/banking/callback
 """
 
-from fastapi import APIRouter, HTTPException, Request, Query
+from fastapi import APIRouter, HTTPException, Request, Query, UploadFile, File
 from fastapi.responses import RedirectResponse
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 from urllib.parse import urlencode
 import secrets
 import httpx
@@ -44,6 +44,7 @@ import httpx
 from app.database import supabase
 from app.config import settings
 from app.routers.notifications import create_notification
+from app.services.bank_statement_parser import parse_statement
 
 
 router = APIRouter()
@@ -977,70 +978,134 @@ async def get_transactions(
     page_size: int = Query(100, ge=1, le=500),
     page_token: Optional[str] = Query(None),
 ):
+    """Combined transactions feed.
+
+    Sources, in priority order:
+      1. Live Tink fetch (PSD2 connection) — fresh data.
+      2. Cached `bank_transactions` rows — populated by file imports
+         (MT940 / CAMT.053) AND by previous Tink fetches we cached for
+         offline / token-expired use.
+
+    Either source can be empty; if both are, we return an empty list
+    rather than a 404. The 401 "bank_session_expired" surfaces only
+    when the user has a Tink connection that has aged out — the
+    frontend uses this to nudge a reconnect, but ONLY if no cached
+    rows exist either.
+    """
     bigdogg_user_id = get_user_id(request)
-    # Diagnostic: surface what is actually stored, so a 404 on the
-    # _get_user_access_token call points at the missing field instead
-    # of looking like a routing bug.
-    diag = supabase.table("user_profiles")\
+
+    # ── 1. Try Tink ──
+    tink_txs: List[dict] = []
+    next_page_token: Optional[str] = None
+    tink_session_expired = False
+    profile_result = supabase.table("user_profiles")\
         .select("tink_access_token, tink_refresh_token, tink_token_expires_at, tink_credentials_id")\
         .eq("id", bigdogg_user_id).execute()
-    if diag.data:
-        d = diag.data[0]
-        has_at = "yes" if d.get("tink_access_token") else "NO"
-        has_rt = "yes" if d.get("tink_refresh_token") else "NO"
-        has_cid = "yes" if d.get("tink_credentials_id") else "NO"
-        exp = d.get("tink_token_expires_at") or "—"
-        print(f"[tink] /transactions diag user={bigdogg_user_id[:8]}… "
-              f"access_token={has_at} refresh_token={has_rt} credentials_id={has_cid} expires_at={exp}")
-    else:
-        print(f"[tink] /transactions diag user={bigdogg_user_id[:8]}… NO PROFILE ROW")
-    access_token = await _get_user_access_token(bigdogg_user_id)
+    has_tink_token = bool(profile_result.data and profile_result.data[0].get("tink_access_token"))
 
-    # Tink data/v2/transactions caps pageSize at 100. Clamp so callers
-    # asking for more do not 400 — we still return the (smaller) page
-    # rather than failing the whole request.
-    params: dict = {"pageSize": min(page_size, 100)}
-    if page_token:
-        params["pageToken"] = page_token
+    if has_tink_token:
+        try:
+            access_token = await _get_user_access_token(bigdogg_user_id)
+            params: dict = {"pageSize": min(page_size, 100)}
+            if page_token:
+                params["pageToken"] = page_token
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(
+                    TRANSACTIONS_ENDPOINT, params=params,
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+            if r.status_code == 401:
+                tink_session_expired = True
+                print(f"[tink] transactions 401 (session expired)")
+            elif r.status_code >= 400:
+                print(f"[tink] transactions error: {r.status_code} {r.text}")
+            else:
+                raw = r.json()
+                items = raw.get("transactions") or []
+                tink_txs = [_normalize_tink_transaction(t) for t in items]
+                next_page_token = raw.get("nextPageToken")
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(
-            TRANSACTIONS_ENDPOINT,
-            params=params,
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-    if r.status_code == 401:
-        # Token died on Tink's side — most common in sandbox after the
-        # ~1h one-time-flow lifetime. Surface a structured error so the
-        # frontend can show a "reconnect" CTA instead of a generic 502.
-        print(f"[tink] transactions 401 (session expired): {r.text}")
-        raise HTTPException(status_code=401, detail="bank_session_expired")
-    if r.status_code >= 400:
-        print(f"[tink] transactions error: {r.status_code} {r.text}")
-        raise HTTPException(status_code=502, detail="Could not fetch transactions")
+                # Persist to bank_transactions cache so this data is
+                # available even after the Tink token expires.
+                try:
+                    cache_rows = [{
+                        "user_id": bigdogg_user_id,
+                        "external_id": t["id"],
+                        "source": "tink",
+                        "date": t.get("date"),
+                        "amount": t.get("amount"),
+                        "currency": t.get("currency") or "EUR",
+                        "description": t.get("description") or "",
+                        "merchant": t.get("merchant") or "",
+                        "raw": {"type": t.get("type"), "status": t.get("status")},
+                    } for t in tink_txs if t.get("id")]
+                    if cache_rows:
+                        supabase.table("bank_transactions").upsert(
+                            cache_rows, on_conflict="user_id,external_id"
+                        ).execute()
+                except Exception as e:
+                    print(f"[banking] tink cache upsert failed (non-fatal): {e}")
+        except HTTPException as e:
+            # _get_user_access_token throws 404 when no/expired token.
+            # Treat as "no live data this round".
+            if e.status_code == 401:
+                tink_session_expired = True
+            else:
+                print(f"[tink] live fetch skipped: {e.detail}")
+        except Exception as e:
+            print(f"[tink] live fetch errored (non-fatal): {e}")
 
-    raw = r.json()
-    items = raw.get("transactions") or []
-    normalized = [_normalize_tink_transaction(t) for t in items]
-    normalized.sort(key=lambda t: t.get("date") or "", reverse=True)
+    # ── 2. Read cached rows (file imports + previous Tink hits) ──
+    cached_rows: List[dict] = []
+    try:
+        cached_result = supabase.table("bank_transactions")\
+            .select("external_id, date, amount, currency, description, merchant, source")\
+            .eq("user_id", bigdogg_user_id)\
+            .order("date", desc=True)\
+            .limit(500).execute()
+        for row in (cached_result.data or []):
+            cached_rows.append({
+                "id": row.get("external_id"),
+                "date": str(row["date"]) if row.get("date") else None,
+                "amount": float(row.get("amount") or 0),
+                "currency": row.get("currency") or "EUR",
+                "description": row.get("description") or "",
+                "merchant": row.get("merchant") or "",
+                "type": "BOOKING",
+                "status": "BOOKED",
+                "source": row.get("source") or "tink",
+            })
+    except Exception as e:
+        print(f"[banking] cached read failed: {e}")
 
-    # Auto-match each transaction against existing invoices/expenses.
-    invoices_result = supabase.table("invoices")\
-        .select("id, invoice_number, total_incl_btw, status, client_name, client_company, invoice_date")\
-        .eq("user_id", bigdogg_user_id).execute()
-    invoices = invoices_result.data or []
+    # ── 3. Merge by external_id; live Tink data wins on collision ──
+    by_id: dict = {tx["id"]: tx for tx in cached_rows if tx.get("id")}
+    for tx in tink_txs:
+        if tx.get("id"):
+            by_id[tx["id"]] = tx
+    combined = list(by_id.values())
+    combined.sort(key=lambda t: t.get("date") or "", reverse=True)
 
-    expenses_result = supabase.table("expenses")\
-        .select("id, description, amount_ex_btw, btw_amount, expense_date")\
-        .eq("user_id", bigdogg_user_id).execute()
-    expenses = expenses_result.data or []
+    # ── 4. If nothing in either source, surface the right error ──
+    if not combined:
+        if tink_session_expired:
+            raise HTTPException(status_code=401, detail="bank_session_expired")
+        # No data, no expired session: just return empty (e.g. user
+        # never connected Tink and never imported a file).
+        return {"transactions": [], "next_page_token": None}
 
-    investments_result = supabase.table("investments")\
-        .select("id, description, amount, purchase_date, category")\
-        .eq("user_id", bigdogg_user_id).execute()
-    investments = investments_result.data or []
+    # ── 5. Run the matcher / link hydration ──
+    invoices = (supabase.table("invoices").select(
+        "id, invoice_number, total_incl_btw, status, client_name, client_company, invoice_date"
+    ).eq("user_id", bigdogg_user_id).execute().data) or []
+    expenses = (supabase.table("expenses").select(
+        "id, description, amount_ex_btw, btw_amount, expense_date"
+    ).eq("user_id", bigdogg_user_id).execute().data) or []
+    investments = (supabase.table("investments").select(
+        "id, description, amount, purchase_date, category"
+    ).eq("user_id", bigdogg_user_id).execute().data) or []
 
-    tx_ids = [t.get("id") for t in normalized if t.get("id")]
+    tx_ids = [t.get("id") for t in combined if t.get("id")]
     existing_links: dict = {}
     if tx_ids:
         try:
@@ -1051,17 +1116,13 @@ async def get_transactions(
             for row in (links_result.data or []):
                 existing_links[row["tx_id"]] = row
         except Exception as e:
-            # Migration not run yet — degrade gracefully to no-link mode.
-            print(f"[banking] link lookup failed (likely missing table): {e}")
+            print(f"[banking] link lookup failed: {e}")
 
     enriched = [
         _enrich_transaction_with_link(t, existing_links, invoices, expenses, investments, bigdogg_user_id)
-        for t in normalized
+        for t in combined
     ]
-    return {
-        "transactions": enriched,
-        "next_page_token": raw.get("nextPageToken"),
-    }
+    return {"transactions": enriched, "next_page_token": next_page_token}
 
 
 @router.post("/transactions/{tx_id}/link")
@@ -1197,6 +1258,109 @@ async def create_investment_from_transaction(tx_id: str, request: Request):
         "success": True,
         "investment": insert.data[0],
         "link": {"type": "investment", "linked_id": inv_id, "auto": False},
+    }
+
+
+@router.post("/import")
+async def import_bank_statement(request: Request, file: UploadFile = File(...)):
+    """Parse an uploaded MT940 or CAMT.053 statement, persist its
+    entries into the `bank_transactions` cache, and run the matcher
+    against the user's invoices/expenses/investments. Returns a
+    summary the frontend can show in a snackbar.
+
+    No PSD2 connection needed — this is the file-import alternative to
+    the live Tink flow, and the format every NL bank's online-banking
+    portal can export.
+    """
+    user_id = get_user_id(request)
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="empty_file")
+
+    fmt, parsed = parse_statement(raw)
+    if fmt == "unknown":
+        raise HTTPException(status_code=400, detail="unrecognised_format")
+    if not parsed:
+        return {
+            "format": fmt,
+            "imported": 0,
+            "auto_linked": 0,
+            "suggested": 0,
+            "message": "Geen transacties gevonden in dit bestand.",
+        }
+
+    # Upsert every parsed transaction into bank_transactions. Repeated
+    # imports of the same file are a no-op thanks to the unique index
+    # on (user_id, external_id).
+    rows = []
+    for tx in parsed:
+        rows.append({
+            "user_id": user_id,
+            "external_id": tx["id"],
+            "source": fmt,
+            "date": tx.get("date"),
+            "amount": tx.get("amount"),
+            "currency": tx.get("currency") or "EUR",
+            "description": tx.get("description") or "",
+            "merchant": tx.get("merchant") or "",
+            "raw": {"description": tx.get("description"), "type": tx.get("type")},
+        })
+    imported = 0
+    try:
+        supabase.table("bank_transactions").upsert(
+            rows, on_conflict="user_id,external_id"
+        ).execute()
+        imported = len(rows)
+    except Exception as e:
+        print(f"[banking] import upsert failed: {e}")
+        raise HTTPException(status_code=500, detail=f"import_failed: {e}")
+
+    # Run the matcher. We use the same _enrich_transaction_with_link
+    # that the live Tink path uses; auto-matches fire notifications via
+    # the existing bell-icon flow.
+    invoices = (supabase.table("invoices").select(
+        "id, invoice_number, total_incl_btw, status, client_name, client_company, invoice_date"
+    ).eq("user_id", user_id).execute().data) or []
+    expenses = (supabase.table("expenses").select(
+        "id, description, amount_ex_btw, btw_amount, expense_date"
+    ).eq("user_id", user_id).execute().data) or []
+    investments = (supabase.table("investments").select(
+        "id, description, amount, purchase_date, category"
+    ).eq("user_id", user_id).execute().data) or []
+
+    tx_ids = [t.get("id") for t in parsed if t.get("id")]
+    existing_links: dict = {}
+    if tx_ids:
+        try:
+            links_result = supabase.table("bank_transaction_links")\
+                .select("tx_id, link_type, linked_id, auto")\
+                .eq("user_id", user_id)\
+                .in_("tx_id", tx_ids).execute()
+            for row in (links_result.data or []):
+                existing_links[row["tx_id"]] = row
+        except Exception as e:
+            print(f"[banking] import link lookup failed: {e}")
+
+    auto_linked = 0
+    suggested = 0
+    for tx in parsed:
+        if existing_links.get(tx.get("id")):
+            continue
+        _enrich_transaction_with_link(
+            tx, existing_links, invoices, expenses, investments, user_id,
+        )
+        link = tx.get("link") or {}
+        link_type = link.get("type") or ""
+        if link_type in ("invoice", "expense", "investment"):
+            auto_linked += 1
+        elif link_type.startswith("suggested_"):
+            suggested += 1
+
+    return {
+        "format": fmt,
+        "imported": imported,
+        "auto_linked": auto_linked,
+        "suggested": suggested,
     }
 
 
