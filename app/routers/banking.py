@@ -745,6 +745,95 @@ def _enrich_transaction_with_link(
     return tx
 
 
+async def reconcile_user_transactions(user_id: str) -> None:
+    """Re-run the matcher across the user's recent bank transactions.
+
+    Called as a FastAPI background task whenever the user creates an
+    invoice, expense, or investment — so a freshly-added entry that
+    happens to correspond to an existing bank transaction gets linked
+    immediately (and the user gets a notification) instead of waiting
+    until they next open the Transactions screen.
+
+    Silent on every kind of failure. Reconciliation must never break
+    the upstream POST that triggered it.
+    """
+    try:
+        # Skip silently if no bank connection / token died (sandbox).
+        profile_result = supabase.table("user_profiles")\
+            .select("tink_access_token, tink_token_expires_at, tink_refresh_token")\
+            .eq("id", user_id).execute()
+        if not profile_result.data:
+            return
+        profile = profile_result.data[0]
+        if not profile.get("tink_access_token"):
+            return
+        # Sanity-check expiry for one-time-flow tokens.
+        expires_at_raw = profile.get("tink_token_expires_at")
+        if expires_at_raw and not profile.get("tink_refresh_token"):
+            try:
+                exp = datetime.fromisoformat(expires_at_raw.replace("Z", "+00:00"))
+                if datetime.now(timezone.utc) >= exp:
+                    return
+            except Exception:
+                pass
+
+        access_token = await _get_user_access_token(user_id)
+
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(
+                TRANSACTIONS_ENDPOINT,
+                params={"pageSize": 100},
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+        if r.status_code >= 400:
+            print(f"[banking] reconcile fetch failed: {r.status_code}")
+            return
+
+        items = (r.json().get("transactions")) or []
+        normalized = [_normalize_tink_transaction(t) for t in items]
+
+        invoices = (supabase.table("invoices").select(
+            "id, invoice_number, total_incl_btw, status, client_name, "
+            "client_company, invoice_date").eq("user_id", user_id).execute().data) or []
+        expenses = (supabase.table("expenses").select(
+            "id, description, amount_ex_btw, btw_amount, expense_date"
+        ).eq("user_id", user_id).execute().data) or []
+        investments = (supabase.table("investments").select(
+            "id, description, amount, purchase_date, category"
+        ).eq("user_id", user_id).execute().data) or []
+
+        tx_ids = [t.get("id") for t in normalized if t.get("id")]
+        existing_links: dict = {}
+        if tx_ids:
+            try:
+                links_result = supabase.table("bank_transaction_links")\
+                    .select("tx_id, link_type, linked_id, auto")\
+                    .eq("user_id", user_id)\
+                    .in_("tx_id", tx_ids).execute()
+                for row in (links_result.data or []):
+                    existing_links[row["tx_id"]] = row
+            except Exception as e:
+                print(f"[banking] reconcile link lookup failed: {e}")
+
+        # Only run the matcher on transactions that aren't already
+        # linked. Auto-linking + notifications happen inside
+        # _enrich_transaction_with_link as a side effect.
+        new_matches = 0
+        for tx in normalized:
+            if existing_links.get(tx.get("id")):
+                continue
+            before = tx.get("link")
+            _enrich_transaction_with_link(
+                tx, existing_links, invoices, expenses, investments, user_id,
+            )
+            if tx.get("link") and tx.get("link") != before:
+                new_matches += 1
+        print(f"[banking] reconcile: user={user_id[:8]}… "
+              f"checked={len(normalized)} new_matches={new_matches}")
+    except Exception as e:
+        print(f"[banking] reconcile error (non-fatal): {e}")
+
+
 def _notify_match(
     user_id: str,
     *,
