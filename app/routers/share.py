@@ -120,6 +120,44 @@ async def onboard_link(token: str, request: Request):
     ))
 
 
+@router.get("/a/{token}", response_class=HTMLResponse)
+async def accountant_invite_link(token: str, request: Request):
+    """Personalized accountant-invite preview that redirects into the
+    SPA where the accountant can log in and accept."""
+    title = "Je bent uitgenodigd als accountant"
+    description = "Klik om in te loggen en de boekhouding van je klant in te zien (alleen-lezen)."
+    try:
+        invite = supabase.table("accountant_invites")\
+            .select("user_id, used")\
+            .eq("token", token).limit(1).execute()
+        if invite.data:
+            row = invite.data[0]
+            owner_id = row.get("user_id")
+            if owner_id:
+                profile = supabase.table("user_profiles")\
+                    .select("business_name, full_name")\
+                    .eq("id", owner_id).limit(1).execute()
+                if profile.data:
+                    p = profile.data[0]
+                    owner_name = (p.get("business_name") or p.get("full_name") or "").strip()
+                    if owner_name:
+                        title = f"{owner_name} nodigt je uit als accountant"
+                        description = (
+                            f"Je krijgt alleen-lezen toegang tot de boekhouding van {owner_name}. "
+                            "Log in op BigDogg om de uitnodiging te accepteren."
+                        )
+            if row.get("used"):
+                title = "Deze uitnodiging is al gebruikt"
+                description = "De uitnodiging is al geaccepteerd."
+    except Exception as e:
+        print(f"[share] accountant preview lookup failed: {e}")
+
+    redirect_to = f"{SPA_ORIGIN}/#/accountant/accept/{token}"
+    return HTMLResponse(content=_render(
+        title=title, description=description, redirect_to=redirect_to,
+    ))
+
+
 @router.get("/q/{token}", response_class=HTMLResponse)
 async def quote_link(token: str, request: Request):
     """Personalized quote-link preview (the green Accepteer offerte

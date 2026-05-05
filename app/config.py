@@ -23,5 +23,9 @@ class Settings:
     tink_client_secret: str = os.getenv("TINK_CLIENT_SECRET", "")
     gocardless_secret_id: str = os.getenv("GOCARDLESS_SECRET_ID", "")
     gocardless_secret_key: str = os.getenv("GOCARDLESS_SECRET_KEY", "")
+    # Origin used in share links (client invites + quote share). Defaults
+    # to the Railway hostname so previews render without extra DNS work;
+    # set to "https://link.bigdogg.nl" once the custom subdomain is live.
+    share_link_origin: str = os.getenv("SHARE_LINK_ORIGIN", "https://bigdogg-production.up.railway.app")
 
 settings = Settings()

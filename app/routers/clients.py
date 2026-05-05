@@ -226,9 +226,11 @@ async def create_invite(request: Request):
         token = response.data[0]['token']
         # Use the share-link short URL so WhatsApp/Slack/Facebook show
         # a personalized "Floris nodigt je uit" preview instead of the
-        # generic landing-page meta tags.
+        # generic landing-page meta tags. Host is settings-driven so
+        # swapping in `link.bigdogg.nl` later is one Railway env change.
+        from app.config import settings as _s
         return {
-            "invite_url": f"https://bigdogg-production.up.railway.app/o/{token}",
+            "invite_url": f"{_s.share_link_origin}/o/{token}",
             "token": token
         }
     except Exception as e:

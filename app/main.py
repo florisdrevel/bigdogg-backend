@@ -13,6 +13,7 @@ from app.routers import banking
 from app.routers import notifications
 from app.routers import devices
 from app.routers import share
+from app.routers import accountants
 import os
 
 
@@ -62,6 +63,7 @@ app.include_router(devices.router, prefix="/api/v1/devices", tags=["devices"])
 # Public share-link landing pages (rendered HTML for OG previews,
 # redirect into the SPA for humans). Mounted at root, NO /api prefix.
 app.include_router(share.router, tags=["share"])
+app.include_router(accountants.router, prefix="/api/v1/accountants", tags=["accountants"])
 
 
 @app.get("/health")
