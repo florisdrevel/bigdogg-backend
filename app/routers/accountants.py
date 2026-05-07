@@ -268,3 +268,88 @@ async def list_clients_of_accountant(request: Request):
             "since":         r.get("created_at"),
         })
     return {"clients": out}
+
+
+# ─── Accountant: read-only access to a specific client's data ──────
+def _verify_link(accountant_id: str, client_user_id: str) -> None:
+    """Raise 403 unless an active accountant_clients row exists."""
+    link = supabase.table("accountant_clients")\
+        .select("id")\
+        .eq("accountant_id", accountant_id)\
+        .eq("user_id", client_user_id)\
+        .eq("status", "active").limit(1).execute()
+    if not link.data:
+        raise HTTPException(status_code=403, detail="not_linked")
+
+
+@router.get("/clients/{client_user_id}/invoices")
+async def client_invoices(client_user_id: str, request: Request):
+    accountant_id = get_user_id(request)
+    _verify_link(accountant_id, client_user_id)
+    rows = supabase.table("invoices")\
+        .select("id, invoice_number, client_name, client_company, "
+                "total_incl_btw, total_excl_btw, btw_amount, "
+                "issue_date, due_date, status")\
+        .eq("user_id", client_user_id)\
+        .order("issue_date", desc=True).execute()
+    return {"invoices": rows.data or []}
+
+
+@router.get("/clients/{client_user_id}/expenses")
+async def client_expenses(client_user_id: str, request: Request):
+    accountant_id = get_user_id(request)
+    _verify_link(accountant_id, client_user_id)
+    rows = supabase.table("expenses")\
+        .select("id, vendor, description, amount_incl_btw, "
+                "amount_excl_btw, btw_amount, category, "
+                "expense_date, payment_method")\
+        .eq("user_id", client_user_id)\
+        .order("expense_date", desc=True).execute()
+    return {"expenses": rows.data or []}
+
+
+@router.get("/clients/{client_user_id}/overview")
+async def client_overview(client_user_id: str, request: Request):
+    """Annual revenue / expenses / VAT-payable summary for the linked
+    client. Calculated on the fly so the accountant always sees the
+    same numbers as the owner does on their dashboard."""
+    accountant_id = get_user_id(request)
+    _verify_link(accountant_id, client_user_id)
+
+    from datetime import datetime
+    year = datetime.now().year
+    year_start = f"{year}-01-01"
+    year_end = f"{year}-12-31"
+
+    inv = supabase.table("invoices")\
+        .select("total_excl_btw, total_incl_btw, btw_amount, status, issue_date")\
+        .eq("user_id", client_user_id)\
+        .gte("issue_date", year_start).lte("issue_date", year_end).execute()
+    exp = supabase.table("expenses")\
+        .select("amount_excl_btw, amount_incl_btw, btw_amount, expense_date")\
+        .eq("user_id", client_user_id)\
+        .gte("expense_date", year_start).lte("expense_date", year_end).execute()
+
+    revenue_excl = sum(float(r.get("total_excl_btw") or 0) for r in (inv.data or []))
+    revenue_incl = sum(float(r.get("total_incl_btw") or 0) for r in (inv.data or []))
+    btw_collected = sum(float(r.get("btw_amount") or 0) for r in (inv.data or []))
+    paid_count = sum(1 for r in (inv.data or []) if (r.get("status") or "").lower() == "paid")
+
+    expense_excl = sum(float(r.get("amount_excl_btw") or 0) for r in (exp.data or []))
+    expense_incl = sum(float(r.get("amount_incl_btw") or 0) for r in (exp.data or []))
+    btw_paid = sum(float(r.get("btw_amount") or 0) for r in (exp.data or []))
+
+    return {
+        "year":            year,
+        "revenue_excl":    round(revenue_excl, 2),
+        "revenue_incl":    round(revenue_incl, 2),
+        "btw_collected":   round(btw_collected, 2),
+        "expense_excl":    round(expense_excl, 2),
+        "expense_incl":    round(expense_incl, 2),
+        "btw_paid":        round(btw_paid, 2),
+        "btw_payable":     round(btw_collected - btw_paid, 2),
+        "profit_excl":     round(revenue_excl - expense_excl, 2),
+        "invoice_count":   len(inv.data or []),
+        "paid_count":      paid_count,
+        "expense_count":   len(exp.data or []),
+    }
