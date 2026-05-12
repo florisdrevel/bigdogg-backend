@@ -90,30 +90,103 @@ async def invite_accountant(request: Request):
     accept_url = f"{settings.share_link_origin}/a/{token}"
 
     # Best-effort email — never fail the invite creation if email errors.
+    email_sent = False
+    email_error: str | None = None
     try:
-        if settings.resend_api_key:
+        if not settings.resend_api_key:
+            email_error = "resend_api_key_missing"
+        else:
+            subject = f"{inviter} nodigt je uit als accountant op BigDogg"
+            html_body = _invite_email_html(
+                inviter=inviter,
+                recipient_email=email,
+                accept_url=accept_url,
+            )
+            text_body = (
+                f"Hallo,\n\n"
+                f"{inviter} nodigt je uit als accountant op BigDogg. "
+                f"Je krijgt alleen-lezen toegang tot hun facturen, kosten en BTW-overzicht.\n\n"
+                f"Accepteer hier: {accept_url}\n\n"
+                f"De link is 14 dagen geldig.\n\n"
+                f"---\nDit bericht is verzonden via BigDogg · bigdogg.nl\n"
+            )
             resend.Emails.send({
-                "from": "BigDogg <noreply@bigdogg.nl>",
+                "from": "BigDogg <info@bigdogg.nl>",
                 "to":   [email],
-                "subject": f"{inviter} nodigt je uit om hun boekhouding in te zien",
-                "html": (
-                    f"<p>Hallo,</p>"
-                    f"<p><strong>{inviter}</strong> nodigt je uit als accountant op BigDogg. "
-                    "Klik hieronder om je in te loggen en hun facturen, kosten en BTW-overzicht "
-                    "in te zien (alleen-lezen).</p>"
-                    f'<p><a href="{accept_url}" '
-                    'style="background:#1B3A4B;color:#fff;padding:12px 22px;'
-                    'border-radius:8px;text-decoration:none;font-weight:600">'
-                    "Accepteer uitnodiging</a></p>"
-                    f'<p style="color:#4A6572;font-size:12px">Of plak deze link in je browser: '
-                    f'<a href="{accept_url}">{accept_url}</a></p>'
-                    "<p>De link is 14 dagen geldig.</p>"
-                ),
+                "subject": subject,
+                "text": text_body,
+                "html": html_body,
             })
+            email_sent = True
     except Exception as e:
-        print(f"[accountants] invite email skipped: {e}")
+        email_error = str(e)
+        print(f"[accountants] invite email failed: {e}")
 
-    return {"success": True, "token": token, "accept_url": accept_url}
+    return {
+        "success":     True,
+        "token":       token,
+        "accept_url":  accept_url,
+        "email_sent":  email_sent,
+        "email_error": email_error,
+    }
+
+
+def _invite_email_html(*, inviter: str, recipient_email: str, accept_url: str) -> str:
+    """BigDogg-branded HTML for the accountant invitation email — matches the
+    quote-email template (teal-on-cream card, gold CTA, footer).
+    """
+    # Light escaping for any HTML-special characters in the inviter name.
+    safe_inviter = (
+        inviter.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+    return f"""<!DOCTYPE html>
+<html lang="nl">
+<body style="margin:0;padding:0;background:#F5F3EF;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#1B3A4B;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F5F3EF;padding:32px 16px;">
+    <tr><td align="center">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border-radius:12px;border:1px solid #E2DDD6;overflow:hidden;">
+        <tr><td align="center" style="padding:28px 28px 4px 28px;background:#1B3A4B;">
+          <img src="https://bigdogg.nl/icons/Icon-512.png" alt="BigDogg" width="64" height="64" style="display:block;border-radius:12px;"/>
+          <h1 style="margin:12px 0 0 0;color:#C9A96E;font-size:22px;letter-spacing:-0.3px;font-weight:700;">BigDogg.</h1>
+          <p style="margin:4px 0 16px 0;color:#F5F3EF;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Accountantsuitnodiging</p>
+        </td></tr>
+        <tr><td style="padding:28px 28px 8px 28px;">
+          <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">Hallo,</p>
+          <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">
+            <strong style="color:#1B3A4B;">{safe_inviter}</strong> nodigt je uit als accountant op
+            <strong>BigDogg</strong> — een Nederlandse boekhoud-app voor ZZP'ers.
+          </p>
+          <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">
+            Klik op de knop hieronder om in te loggen of een gratis account aan te maken.
+            Daarna krijg je <strong>alleen-lezen toegang</strong> tot hun facturen, kosten en BTW-overzicht.
+          </p>
+        </td></tr>
+        <tr><td align="center" style="padding:8px 28px 4px 28px;">
+          <a href="{accept_url}" style="display:inline-block;background:#1B3A4B;color:#ffffff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;margin:6px;">Uitnodiging accepteren</a>
+        </td></tr>
+        <tr><td align="center" style="padding:0 28px 24px 28px;">
+          <p style="margin:12px 0 0 0;font-size:12px;color:#4A6572;">
+            of plak deze link in je browser:<br>
+            <a href="{accept_url}" style="color:#1B3A4B;word-break:break-all;">{accept_url}</a>
+          </p>
+        </td></tr>
+        <tr><td style="padding:0 28px 24px 28px;border-top:1px solid #E2DDD6;">
+          <p style="margin:16px 0 6px 0;font-size:13px;line-height:1.6;color:#4A6572;">
+            <strong>Wat is BigDogg?</strong><br>
+            BigDogg is een moderne boekhoud-app gemaakt voor Nederlandse ZZP'ers. Facturen,
+            kosten, BTW en jaaroverzichten — alles op één plek.
+          </p>
+          <p style="margin:16px 0 0 0;font-size:12px;line-height:1.6;color:#4A6572;">
+            De link is 14 dagen geldig. Heb je de uitnodiging niet aangevraagd?
+            Dan kun je deze e-mail negeren.
+          </p>
+        </td></tr>
+      </table>
+      <p style="margin:16px 0 0 0;font-size:11px;color:#9CA3AF;">Verzonden via BigDogg · bigdogg.nl</p>
+    </td></tr>
+  </table>
+</body>
+</html>"""
 
 
 @router.get("/invites")
@@ -176,6 +249,47 @@ async def revoke_accountant(accountant_id: str, request: Request):
 
 
 # ─── Accountant side ────────────────────────────────────────
+@router.get("/public-invite/{token}")
+async def public_invite_info(token: str):
+    """Unauthenticated look-up so the accountant landing page can show the
+    inviter's name and a friendly status while the accountant decides to
+    log in or sign up."""
+    invite = supabase.table("accountant_invites")\
+        .select("token, user_id, email, used, expires_at")\
+        .eq("token", token).limit(1).execute()
+    if not invite.data:
+        return {"valid": False, "reason": "not_found"}
+    row = invite.data[0]
+    if row.get("used"):
+        return {"valid": False, "reason": "already_used"}
+    expires_raw = row.get("expires_at")
+    if expires_raw:
+        try:
+            exp = datetime.fromisoformat(expires_raw.replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) >= exp:
+                return {"valid": False, "reason": "expired"}
+        except Exception:
+            pass
+
+    inviter_name = ""
+    try:
+        prof = supabase.table("user_profiles")\
+            .select("business_name, full_name")\
+            .eq("id", row["user_id"]).limit(1).execute()
+        if prof.data:
+            p = prof.data[0]
+            inviter_name = (p.get("business_name") or p.get("full_name") or "").strip()
+    except Exception:
+        pass
+
+    return {
+        "valid":         True,
+        "inviter_name":  inviter_name,
+        "invite_email":  row.get("email") or "",
+        "expires_at":    expires_raw,
+    }
+
+
 @router.post("/accept-invite/{token}")
 async def accept_invite(token: str, request: Request):
     """Called by an accountant after they sign up / log in to BigDogg
