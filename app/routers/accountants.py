@@ -270,72 +270,287 @@ async def portal_meta(token: str):
     }
 
 
-@router.get("/portal/{token}/overview")
-async def portal_overview(token: str):
+_KOR_THRESHOLD = 20000.0
+_URENCRITERIUM = 1225
+_DEPRECIATION_THRESHOLD = 450.0
+
+
+def _quarter_bounds(year: int):
+    return [
+        (1, f"{year}-01-01", f"{year}-03-31"),
+        (2, f"{year}-04-01", f"{year}-06-30"),
+        (3, f"{year}-07-01", f"{year}-09-30"),
+        (4, f"{year}-10-01", f"{year}-12-31"),
+    ]
+
+
+def _resolve_year(year: int | None) -> tuple[int, str, str]:
+    y = year or datetime.now().year
+    return y, f"{y}-01-01", f"{y}-12-31"
+
+
+def _depreciation_for_year(amount: float, purchase_date: str,
+                            years: int, target_year: int) -> dict:
+    """Returns {annual, this_year, cumulative_at_year_end, book_value_at_year_end}."""
+    try:
+        purchase_year = int((purchase_date or "")[:4] or 0)
+    except Exception:
+        purchase_year = target_year
+    annual = round(amount / max(years, 1), 2)
+    end_year = purchase_year + years - 1
+    if target_year < purchase_year:
+        return {"annual": annual, "this_year": 0.0,
+                "cumulative": 0.0, "book_value": round(amount, 2)}
+    if target_year > end_year:
+        return {"annual": annual, "this_year": 0.0,
+                "cumulative": round(amount, 2), "book_value": 0.0}
+    years_so_far = target_year - purchase_year + 1
+    cumulative = round(annual * years_so_far, 2)
+    return {
+        "annual":     annual,
+        "this_year":  annual,
+        "cumulative": cumulative,
+        "book_value": round(max(amount - cumulative, 0.0), 2),
+    }
+
+
+@router.get("/portal/{token}/years")
+async def portal_years(token: str):
+    """Distinct years that contain any invoice or expense row, for the
+    year-selector dropdown on the portal."""
     row = _resolve_portal_token(token)
     owner_id = row["user_id"]
-    year = datetime.now().year
-    year_start = f"{year}-01-01"
-    year_end = f"{year}-12-31"
+    inv = supabase.table("invoices")\
+        .select("invoice_date").eq("user_id", owner_id).execute()
+    exp = supabase.table("expenses")\
+        .select("expense_date").eq("user_id", owner_id).execute()
+    years: set[int] = set()
+    for r in (inv.data or []):
+        d = (r.get("invoice_date") or "")[:4]
+        if d.isdigit():
+            years.add(int(d))
+    for r in (exp.data or []):
+        d = (r.get("expense_date") or "")[:4]
+        if d.isdigit():
+            years.add(int(d))
+    years.add(datetime.now().year)
+    return {"years": sorted(years, reverse=True)}
+
+
+@router.get("/portal/{token}/overview")
+async def portal_overview(token: str, year: int | None = None):
+    row = _resolve_portal_token(token)
+    owner_id = row["user_id"]
+    y, y_start, y_end = _resolve_year(year)
 
     inv = supabase.table("invoices")\
-        .select("total_excl_btw, total_incl_btw, btw_amount, status, issue_date")\
+        .select("subtotal_ex_btw, total_incl_btw, btw_amount, status, invoice_date")\
         .eq("user_id", owner_id)\
-        .gte("issue_date", year_start).lte("issue_date", year_end).execute()
+        .gte("invoice_date", y_start).lte("invoice_date", y_end)\
+        .neq("status", "draft").execute()
     exp = supabase.table("expenses")\
-        .select("amount_excl_btw, amount_incl_btw, btw_amount, expense_date")\
+        .select("amount_ex_btw, btw_amount, category, expense_date")\
         .eq("user_id", owner_id)\
-        .gte("expense_date", year_start).lte("expense_date", year_end).execute()
+        .gte("expense_date", y_start).lte("expense_date", y_end).execute()
 
-    revenue_excl = sum(float(r.get("total_excl_btw") or 0) for r in (inv.data or []))
-    revenue_incl = sum(float(r.get("total_incl_btw") or 0) for r in (inv.data or []))
-    btw_collected = sum(float(r.get("btw_amount") or 0) for r in (inv.data or []))
+    rev_ex = round(sum(float(r.get("subtotal_ex_btw") or 0) for r in (inv.data or [])), 2)
+    rev_incl = round(sum(float(r.get("total_incl_btw") or 0) for r in (inv.data or [])), 2)
+    btw_collected = round(sum(float(r.get("btw_amount") or 0) for r in (inv.data or [])), 2)
     paid_count = sum(1 for r in (inv.data or []) if (r.get("status") or "").lower() == "paid")
 
-    expense_excl = sum(float(r.get("amount_excl_btw") or 0) for r in (exp.data or []))
-    expense_incl = sum(float(r.get("amount_incl_btw") or 0) for r in (exp.data or []))
-    btw_paid = sum(float(r.get("btw_amount") or 0) for r in (exp.data or []))
+    exp_ex = round(sum(float(r.get("amount_ex_btw") or 0) for r in (exp.data or [])), 2)
+    btw_paid = round(sum(float(r.get("btw_amount") or 0) for r in (exp.data or [])), 2)
+    exp_incl = round(exp_ex + btw_paid, 2)
+
+    # Per-quarter (for BTW filings)
+    quarters = []
+    for q, q_start, q_end in _quarter_bounds(y):
+        qi = [r for r in (inv.data or [])
+              if q_start <= (r.get("invoice_date") or "") <= q_end]
+        qe = [r for r in (exp.data or [])
+              if q_start <= (r.get("expense_date") or "") <= q_end]
+        q_rev_ex = round(sum(float(r.get("subtotal_ex_btw") or 0) for r in qi), 2)
+        q_btw_c = round(sum(float(r.get("btw_amount") or 0) for r in qi), 2)
+        q_exp_ex = round(sum(float(r.get("amount_ex_btw") or 0) for r in qe), 2)
+        q_btw_p = round(sum(float(r.get("btw_amount") or 0) for r in qe), 2)
+        quarters.append({
+            "quarter":        q,
+            "revenue_ex":     q_rev_ex,
+            "btw_collected":  q_btw_c,
+            "expense_ex":     q_exp_ex,
+            "btw_paid":       q_btw_p,
+            "btw_payable":    round(q_btw_c - q_btw_p, 2),
+            "invoice_count":  len(qi),
+        })
+
+    # Expense categories
+    cats: dict[str, dict] = {}
+    for r in (exp.data or []):
+        c = (r.get("category") or "general").strip() or "general"
+        slot = cats.setdefault(c, {"category": c, "amount_ex": 0.0, "count": 0})
+        slot["amount_ex"] += float(r.get("amount_ex_btw") or 0)
+        slot["count"] += 1
+    categories = sorted(
+        ({"category": c["category"],
+          "amount_ex": round(c["amount_ex"], 2),
+          "count": c["count"]} for c in cats.values()),
+        key=lambda r: r["amount_ex"], reverse=True,
+    )
 
     return {
-        "year":          year,
-        "revenue_excl":  round(revenue_excl, 2),
-        "revenue_incl":  round(revenue_incl, 2),
-        "btw_collected": round(btw_collected, 2),
-        "expense_excl":  round(expense_excl, 2),
-        "expense_incl":  round(expense_incl, 2),
-        "btw_paid":      round(btw_paid, 2),
+        "year":          y,
+        "revenue_ex":    rev_ex,
+        "revenue_incl":  rev_incl,
+        "expense_ex":    exp_ex,
+        "expense_incl":  exp_incl,
+        "btw_collected": btw_collected,
+        "btw_paid":      btw_paid,
         "btw_payable":   round(btw_collected - btw_paid, 2),
-        "profit_excl":   round(revenue_excl - expense_excl, 2),
+        "profit_ex":     round(rev_ex - exp_ex, 2),
         "invoice_count": len(inv.data or []),
         "paid_count":    paid_count,
         "expense_count": len(exp.data or []),
+        "kor_threshold": _KOR_THRESHOLD,
+        "kor_ratio":     round(min(rev_ex / _KOR_THRESHOLD, 1.0), 4) if _KOR_THRESHOLD else 0,
+        "quarters":      quarters,
+        "categories":    categories,
     }
 
 
 @router.get("/portal/{token}/invoices")
-async def portal_invoices(token: str):
+async def portal_invoices(token: str, year: int | None = None):
     row = _resolve_portal_token(token)
     owner_id = row["user_id"]
+    y, y_start, y_end = _resolve_year(year)
+
     rows = supabase.table("invoices")\
         .select("id, invoice_number, client_name, client_company, "
-                "total_incl_btw, total_excl_btw, btw_amount, "
-                "issue_date, due_date, status")\
+                "total_incl_btw, subtotal_ex_btw, btw_amount, "
+                "invoice_date, due_date, status")\
         .eq("user_id", owner_id)\
-        .order("issue_date", desc=True).execute()
-    return {"invoices": rows.data or []}
+        .gte("invoice_date", y_start).lte("invoice_date", y_end)\
+        .order("invoice_date", desc=True).execute()
+
+    invoices = rows.data or []
+    if invoices:
+        ids = [i["id"] for i in invoices if i.get("id")]
+        lines = supabase.table("invoice_lines")\
+            .select("invoice_id, description, quantity, unit_price_ex_btw, "
+                    "btw_rate, line_total_ex_btw, unit")\
+            .in_("invoice_id", ids).execute()
+        by_id: dict[str, list] = {}
+        for ln in (lines.data or []):
+            by_id.setdefault(ln["invoice_id"], []).append(ln)
+        for inv in invoices:
+            inv["lines"] = by_id.get(inv["id"], [])
+
+    return {"year": y, "invoices": invoices}
 
 
 @router.get("/portal/{token}/expenses")
-async def portal_expenses(token: str):
+async def portal_expenses(token: str, year: int | None = None):
     row = _resolve_portal_token(token)
     owner_id = row["user_id"]
+    y, y_start, y_end = _resolve_year(year)
     rows = supabase.table("expenses")\
-        .select("id, vendor, description, amount_incl_btw, "
-                "amount_excl_btw, btw_amount, category, "
-                "expense_date, payment_method, receipt_url")\
+        .select("id, description, amount_ex_btw, btw_amount, btw_rate, "
+                "category, expense_date, receipt_url, payment_method")\
         .eq("user_id", owner_id)\
+        .gte("expense_date", y_start).lte("expense_date", y_end)\
         .order("expense_date", desc=True).execute()
-    return {"expenses": rows.data or []}
+    out = []
+    for r in (rows.data or []):
+        ex = float(r.get("amount_ex_btw") or 0)
+        btw = float(r.get("btw_amount") or 0)
+        out.append({**r, "amount_incl_btw": round(ex + btw, 2)})
+    return {"year": y, "expenses": out}
+
+
+@router.get("/portal/{token}/investments")
+async def portal_investments(token: str, year: int | None = None):
+    row = _resolve_portal_token(token)
+    owner_id = row["user_id"]
+    y, _, _ = _resolve_year(year)
+
+    rows = supabase.table("investments")\
+        .select("id, description, purchase_date, amount, "
+                "depreciation_years, category, receipt_url")\
+        .eq("user_id", owner_id)\
+        .order("purchase_date", desc=True).execute()
+
+    items = []
+    total_this_year = 0.0
+    for r in (rows.data or []):
+        amount = float(r.get("amount") or 0)
+        years = int(r.get("depreciation_years") or 5)
+        dep = _depreciation_for_year(amount, r.get("purchase_date") or "",
+                                      years, y)
+        total_this_year += dep["this_year"]
+        items.append({
+            **r,
+            "annual_depreciation":     dep["annual"],
+            "this_year_depreciation":  dep["this_year"],
+            "cumulative_depreciation": dep["cumulative"],
+            "book_value":              dep["book_value"],
+        })
+    return {
+        "year":                 y,
+        "investments":          items,
+        "total_this_year":      round(total_this_year, 2),
+        "depreciation_threshold": _DEPRECIATION_THRESHOLD,
+    }
+
+
+@router.get("/portal/{token}/hours")
+async def portal_hours(token: str, year: int | None = None):
+    row = _resolve_portal_token(token)
+    owner_id = row["user_id"]
+    y, y_start, y_end = _resolve_year(year)
+
+    rows = supabase.table("hours")\
+        .select("id, hours, date, description, project_id")\
+        .eq("user_id", owner_id)\
+        .gte("date", y_start).lte("date", y_end)\
+        .order("date", desc=True).execute()
+
+    project_ids = list({r.get("project_id") for r in (rows.data or [])
+                        if r.get("project_id")})
+    project_names: dict[str, str] = {}
+    if project_ids:
+        try:
+            p = supabase.table("projects")\
+                .select("id, name").in_("id", project_ids).execute()
+            for r in (p.data or []):
+                project_names[r["id"]] = r.get("name") or ""
+        except Exception:
+            pass
+
+    by_project: dict[str, float] = {}
+    total = 0.0
+    for r in (rows.data or []):
+        h = float(r.get("hours") or 0)
+        total += h
+        pid = r.get("project_id") or "_none"
+        by_project[pid] = by_project.get(pid, 0.0) + h
+
+    project_summary = [
+        {
+            "project_id":   None if pid == "_none" else pid,
+            "project_name": "Geen project" if pid == "_none"
+                            else (project_names.get(pid, "Onbekend project")),
+            "hours":        round(h, 2),
+        }
+        for pid, h in sorted(by_project.items(), key=lambda kv: kv[1], reverse=True)
+    ]
+
+    return {
+        "year":                  y,
+        "entries":               rows.data or [],
+        "project_summary":       project_summary,
+        "total_hours":           round(total, 2),
+        "urencriterium":         _URENCRITERIUM,
+        "urencriterium_ratio":   round(min(total / _URENCRITERIUM, 1.0), 4),
+    }
 
 
 @router.get("/portal/{token}/invoices/{invoice_id}/pdf")
