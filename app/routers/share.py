@@ -124,8 +124,8 @@ async def onboard_link(token: str, request: Request):
 async def accountant_invite_link(token: str, request: Request):
     """Personalized accountant-invite preview that redirects into the
     SPA where the accountant can log in and accept."""
-    title = "Je bent uitgenodigd als accountant"
-    description = "Klik om in te loggen en de boekhouding van je klant in te zien (alleen-lezen)."
+    title = "BigDogg accountantsportaal"
+    description = "Open de portal om de boekhouding van je klant in te zien (alleen-lezen)."
     try:
         invite = supabase.table("accountant_invites")\
             .select("user_id, used")\
@@ -141,18 +141,18 @@ async def accountant_invite_link(token: str, request: Request):
                     p = profile.data[0]
                     owner_name = (p.get("business_name") or p.get("full_name") or "").strip()
                     if owner_name:
-                        title = f"{owner_name} nodigt je uit als accountant"
+                        title = f"Boekhouding van {owner_name}"
                         description = (
-                            f"Je krijgt alleen-lezen toegang tot de boekhouding van {owner_name}. "
-                            "Log in op BigDogg om de uitnodiging te accepteren."
+                            f"Alleen-lezen toegang tot de BigDogg-administratie van "
+                            f"{owner_name}. Geen account nodig — open de link."
                         )
             if row.get("used"):
-                title = "Deze uitnodiging is al gebruikt"
-                description = "De uitnodiging is al geaccepteerd."
+                title = "Deze link is ingetrokken"
+                description = "De toegang is door de eigenaar ingetrokken."
     except Exception as e:
         print(f"[share] accountant preview lookup failed: {e}")
 
-    redirect_to = f"{SPA_ORIGIN}/#/accountant/accept/{token}"
+    redirect_to = f"{SPA_ORIGIN}/#/accountant/portal/{token}"
     return HTMLResponse(content=_render(
         title=title, description=description, redirect_to=redirect_to,
     ))

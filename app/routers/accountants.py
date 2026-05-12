@@ -1,34 +1,30 @@
-"""Accountant portal — invitations + read-only client list.
+"""Accountant portal — token-gated read-only access to one BigDogg user's
+administration.
 
-Two parties:
+New simpler model: the token in the email link IS the credential. The
+accountant does NOT create a BigDogg account; they just open the link
+and see the data. Validity is 14 days; the owner can revoke or
+regenerate the link.
 
-  * Owner: a regular BigDogg user. Can invite their accountant by
-    email, list/revoke active accountants, see pending invites.
-  * Accountant: a separate Supabase user (signs up like anyone else).
-    Once the owner sends an invite and the accountant taps the
-    /accept-invite link with a valid token, an `accountant_clients`
-    row is created and Postgres RLS auto-grants the accountant
-    SELECT access to the owner's invoices/expenses/etc.
+Endpoints (all under /api/v1/accountants):
 
-This module only handles the invitation / acceptance / management
-flow. Read access for the accountant is granted via the SQL RLS
-policies in migrations/accountant_portal.sql — no extra Python.
+  Owner — auth required (Bearer access_token in Authorization):
+    POST   /invite                      create a fresh access link
+    GET    /invites                     list this owner's links
+    DELETE /invites/{token}             revoke a single link
+    POST   /invites/{token}/extend      bump expiry +14 days
 
-Endpoints (under /api/v1/accountants):
-
-  POST   /invite                      — owner: invite by email
-  GET    /invites                     — owner: list pending invites
-  DELETE /invites/{token}             — owner: cancel a pending invite
-  GET    /                            — owner: list active accountants
-  DELETE /{accountant_id}             — owner: revoke an accountant
-
-  GET    /clients                     — accountant: list owners they
-                                        have access to
-  POST   /accept-invite/{token}       — accountant: redeem an invite
+  Accountant — public (token in URL path, no auth header needed):
+    GET    /portal/{token}              meta: owner name, expiry
+    GET    /portal/{token}/overview     yearly revenue / expense / BTW totals
+    GET    /portal/{token}/invoices     list invoices
+    GET    /portal/{token}/expenses     list expenses
+    GET    /portal/{token}/invoices/{invoice_id}/pdf   download PDF
 """
 
 from fastapi import APIRouter, HTTPException, Request
-from datetime import datetime, timezone
+from fastapi.responses import Response
+from datetime import datetime, timezone, timedelta
 from app.database import supabase
 from app.config import settings
 import resend
@@ -37,6 +33,7 @@ router = APIRouter()
 resend.api_key = settings.resend_api_key
 
 
+# ─── Auth helpers ────────────────────────────────────────────
 def get_user_id(request: Request) -> str:
     auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
     if not auth_header:
@@ -49,17 +46,38 @@ def get_user_id(request: Request) -> str:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 
-def _user_email(request: Request) -> str:
-    auth_header = request.headers.get("authorization") or ""
-    try:
-        token = auth_header.replace("Bearer ", "")
-        user = supabase.auth.get_user(token)
-        return (user.user.email or "").lower()
-    except Exception:
-        return ""
+def _resolve_portal_token(token: str) -> dict:
+    """Validate an accountant portal token and return its row. Raises:
+
+      404 — token does not exist
+      410 — token expired (Gone)
+      403 — token revoked
+    """
+    result = supabase.table("accountant_invites")\
+        .select("token, user_id, email, used, expires_at, created_at")\
+        .eq("token", token).limit(1).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="link_not_found")
+    row = result.data[0]
+
+    # `used=true` is repurposed for "revoked by owner" in this model.
+    if row.get("used"):
+        raise HTTPException(status_code=403, detail="link_revoked")
+
+    expires_raw = row.get("expires_at")
+    if expires_raw:
+        try:
+            exp = datetime.fromisoformat(expires_raw.replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) >= exp:
+                raise HTTPException(status_code=410, detail="link_expired")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+    return row
 
 
-# ─── Owner: invite an accountant ──────────────────────────────
+# ─── Owner: create / list / revoke / extend links ────────────
 @router.post("/invite")
 async def invite_accountant(request: Request):
     user_id = get_user_id(request)
@@ -78,7 +96,6 @@ async def invite_accountant(request: Request):
 
     token = insert.data[0]["token"]
 
-    # Fetch the inviting user's display name for the email body.
     profile = supabase.table("user_profiles")\
         .select("business_name, full_name")\
         .eq("id", user_id).limit(1).execute()
@@ -89,14 +106,13 @@ async def invite_accountant(request: Request):
 
     accept_url = f"{settings.share_link_origin}/a/{token}"
 
-    # Best-effort email — never fail the invite creation if email errors.
     email_sent = False
     email_error: str | None = None
     try:
         if not settings.resend_api_key:
             email_error = "resend_api_key_missing"
         else:
-            subject = f"{inviter} nodigt je uit als accountant op BigDogg"
+            subject = f"{inviter} geeft je toegang tot zijn BigDogg-boekhouding"
             html_body = _invite_email_html(
                 inviter=inviter,
                 recipient_email=email,
@@ -104,10 +120,10 @@ async def invite_accountant(request: Request):
             )
             text_body = (
                 f"Hallo,\n\n"
-                f"{inviter} nodigt je uit als accountant op BigDogg. "
-                f"Je krijgt alleen-lezen toegang tot hun facturen, kosten en BTW-overzicht.\n\n"
-                f"Accepteer hier: {accept_url}\n\n"
-                f"De link is 14 dagen geldig.\n\n"
+                f"{inviter} geeft je 14 dagen lang alleen-lezen toegang tot "
+                f"zijn BigDogg-boekhouding — facturen, kosten en BTW-overzicht.\n\n"
+                f"Open de portal: {accept_url}\n\n"
+                f"Er is geen account nodig — open de link en je zit erin.\n\n"
                 f"---\nDit bericht is verzonden via BigDogg · bigdogg.nl\n"
             )
             resend.Emails.send({
@@ -132,10 +148,6 @@ async def invite_accountant(request: Request):
 
 
 def _invite_email_html(*, inviter: str, recipient_email: str, accept_url: str) -> str:
-    """BigDogg-branded HTML for the accountant invitation email — matches the
-    quote-email template (teal-on-cream card, gold CTA, footer).
-    """
-    # Light escaping for any HTML-special characters in the inviter name.
     safe_inviter = (
         inviter.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     )
@@ -148,21 +160,21 @@ def _invite_email_html(*, inviter: str, recipient_email: str, accept_url: str) -
         <tr><td align="center" style="padding:28px 28px 4px 28px;background:#1B3A4B;">
           <img src="https://bigdogg.nl/icons/Icon-512.png" alt="BigDogg" width="64" height="64" style="display:block;border-radius:12px;"/>
           <h1 style="margin:12px 0 0 0;color:#C9A96E;font-size:22px;letter-spacing:-0.3px;font-weight:700;">BigDogg.</h1>
-          <p style="margin:4px 0 16px 0;color:#F5F3EF;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Accountantsuitnodiging</p>
+          <p style="margin:4px 0 16px 0;color:#F5F3EF;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Accountantsportaal</p>
         </td></tr>
         <tr><td style="padding:28px 28px 8px 28px;">
           <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">Hallo,</p>
           <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">
-            <strong style="color:#1B3A4B;">{safe_inviter}</strong> nodigt je uit als accountant op
-            <strong>BigDogg</strong> — een Nederlandse boekhoud-app voor ZZP'ers.
+            <strong style="color:#1B3A4B;">{safe_inviter}</strong> geeft je <strong>14 dagen</strong>
+            alleen-lezen toegang tot zijn BigDogg-boekhouding.
           </p>
           <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">
-            Klik op de knop hieronder om in te loggen of een gratis account aan te maken.
-            Daarna krijg je <strong>alleen-lezen toegang</strong> tot hun facturen, kosten en BTW-overzicht.
+            Klik op de knop om de portal te openen — geen account nodig, geen wachtwoord.
+            Bekijk en download facturen, kosten en het BTW-overzicht.
           </p>
         </td></tr>
         <tr><td align="center" style="padding:8px 28px 4px 28px;">
-          <a href="{accept_url}" style="display:inline-block;background:#1B3A4B;color:#ffffff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;margin:6px;">Uitnodiging accepteren</a>
+          <a href="{accept_url}" style="display:inline-block;background:#1B3A4B;color:#ffffff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;margin:6px;">Portal openen</a>
         </td></tr>
         <tr><td align="center" style="padding:0 28px 24px 28px;">
           <p style="margin:12px 0 0 0;font-size:12px;color:#4A6572;">
@@ -172,13 +184,13 @@ def _invite_email_html(*, inviter: str, recipient_email: str, accept_url: str) -
         </td></tr>
         <tr><td style="padding:0 28px 24px 28px;border-top:1px solid #E2DDD6;">
           <p style="margin:16px 0 6px 0;font-size:13px;line-height:1.6;color:#4A6572;">
-            <strong>Wat is BigDogg?</strong><br>
-            BigDogg is een moderne boekhoud-app gemaakt voor Nederlandse ZZP'ers. Facturen,
-            kosten, BTW en jaaroverzichten — alles op één plek.
+            <strong>Hoe werkt het?</strong><br>
+            Open de link op je telefoon of desktop. De portal toont een leesbaar
+            overzicht en je kunt PDF's van facturen downloaden. De link is 14
+            dagen geldig en kan op elk moment door {safe_inviter} worden ingetrokken.
           </p>
           <p style="margin:16px 0 0 0;font-size:12px;line-height:1.6;color:#4A6572;">
-            De link is 14 dagen geldig. Heb je de uitnodiging niet aangevraagd?
-            Dan kun je deze e-mail negeren.
+            Heb je de link niet aangevraagd? Negeer deze e-mail.
           </p>
         </td></tr>
       </table>
@@ -201,247 +213,78 @@ async def list_invites(request: Request):
 
 @router.delete("/invites/{token}")
 async def cancel_invite(token: str, request: Request):
+    """Revoke a link. We soft-revoke by setting used=true so the row stays
+    around for audit + so the token can never be reused."""
     user_id = get_user_id(request)
-    supabase.table("accountant_invites").delete()\
+    supabase.table("accountant_invites").update({"used": True})\
         .eq("user_id", user_id).eq("token", token).execute()
     return {"success": True}
 
 
-# ─── Owner: list / revoke active accountants ─────────────────
-@router.get("/")
-async def list_accountants(request: Request):
+@router.post("/invites/{token}/extend")
+async def extend_invite(token: str, request: Request):
+    """Push expires_at out by another 14 days."""
     user_id = get_user_id(request)
-    rows = supabase.table("accountant_clients")\
-        .select("id, accountant_id, status, created_at")\
-        .eq("user_id", user_id)\
-        .eq("status", "active").execute()
-
-    out = []
-    for r in (rows.data or []):
-        # Lookup display name for the accountant.
-        try:
-            ap = supabase.table("user_profiles")\
-                .select("full_name, business_name")\
-                .eq("id", r["accountant_id"]).limit(1).execute()
-            display_name = ""
-            if ap.data:
-                d = ap.data[0]
-                display_name = (d.get("business_name") or d.get("full_name") or "").strip()
-        except Exception:
-            display_name = ""
-        out.append({
-            "id":            r["id"],
-            "accountant_id": r["accountant_id"],
-            "display_name":  display_name,
-            "since":         r.get("created_at"),
-        })
-    return {"accountants": out}
+    new_expiry = (datetime.now(timezone.utc) + timedelta(days=14)).isoformat()
+    supabase.table("accountant_invites").update({
+        "expires_at": new_expiry,
+        "used": False,
+    }).eq("user_id", user_id).eq("token", token).execute()
+    return {"success": True, "expires_at": new_expiry}
 
 
-@router.delete("/{accountant_id}")
-async def revoke_accountant(accountant_id: str, request: Request):
-    user_id = get_user_id(request)
-    supabase.table("accountant_clients").update({
-        "status": "revoked",
-        "revoked_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("user_id", user_id).eq("accountant_id", accountant_id).execute()
-    return {"success": True}
-
-
-# ─── Accountant side ────────────────────────────────────────
-@router.get("/public-invite/{token}")
-async def public_invite_info(token: str):
-    """Unauthenticated look-up so the accountant landing page can show the
-    inviter's name and a friendly status while the accountant decides to
-    log in or sign up."""
-    invite = supabase.table("accountant_invites")\
-        .select("token, user_id, email, used, expires_at")\
-        .eq("token", token).limit(1).execute()
-    if not invite.data:
-        return {"valid": False, "reason": "not_found"}
-    row = invite.data[0]
-    if row.get("used"):
-        return {"valid": False, "reason": "already_used"}
-    expires_raw = row.get("expires_at")
-    if expires_raw:
-        try:
-            exp = datetime.fromisoformat(expires_raw.replace("Z", "+00:00"))
-            if datetime.now(timezone.utc) >= exp:
-                return {"valid": False, "reason": "expired"}
-        except Exception:
-            pass
-
+# ─── Accountant portal — public, token-gated ─────────────────
+@router.get("/portal/{token}")
+async def portal_meta(token: str):
+    """Public landing info — owner name, expiry, link status."""
+    row = _resolve_portal_token(token)
+    owner_id = row["user_id"]
     inviter_name = ""
+    business_name = ""
+    kvk = ""
+    btw = ""
     try:
         prof = supabase.table("user_profiles")\
-            .select("business_name, full_name")\
-            .eq("id", row["user_id"]).limit(1).execute()
+            .select("business_name, full_name, kvk_number, btw_number")\
+            .eq("id", owner_id).limit(1).execute()
         if prof.data:
             p = prof.data[0]
-            inviter_name = (p.get("business_name") or p.get("full_name") or "").strip()
+            business_name = (p.get("business_name") or "").strip()
+            inviter_name = (
+                business_name
+                or (p.get("full_name") or "").strip()
+                or "BigDogg-gebruiker"
+            )
+            kvk = (p.get("kvk_number") or "").strip()
+            btw = (p.get("btw_number") or "").strip()
     except Exception:
         pass
-
     return {
-        "valid":         True,
-        "inviter_name":  inviter_name,
-        "invite_email":  row.get("email") or "",
-        "expires_at":    expires_raw,
+        "owner_name":     inviter_name,
+        "business_name":  business_name,
+        "kvk_number":     kvk,
+        "btw_number":     btw,
+        "invite_email":   row.get("email"),
+        "expires_at":     row.get("expires_at"),
+        "created_at":     row.get("created_at"),
     }
 
 
-@router.post("/accept-invite/{token}")
-async def accept_invite(token: str, request: Request):
-    """Called by an accountant after they sign up / log in to BigDogg
-    and tap the link in their email. Validates the token, creates the
-    accountant_clients row, marks the invite used."""
-    accountant_id = get_user_id(request)
-    accountant_email = _user_email(request)
-
-    invite = supabase.table("accountant_invites")\
-        .select("token, user_id, email, used, expires_at")\
-        .eq("token", token).limit(1).execute()
-    if not invite.data:
-        raise HTTPException(status_code=404, detail="invite_not_found")
-    row = invite.data[0]
-    if row.get("used"):
-        raise HTTPException(status_code=400, detail="invite_already_used")
-
-    # Sanity: the email on the invite must match the authenticated
-    # accountant's email. This is the only guard against forwarding the
-    # link to someone else.
-    invite_email = (row.get("email") or "").lower().strip()
-    if invite_email and accountant_email and invite_email != accountant_email:
-        raise HTTPException(status_code=403, detail="email_mismatch")
-
-    expires_raw = row.get("expires_at")
-    if expires_raw:
-        try:
-            exp = datetime.fromisoformat(expires_raw.replace("Z", "+00:00"))
-            if datetime.now(timezone.utc) >= exp:
-                raise HTTPException(status_code=400, detail="invite_expired")
-        except HTTPException:
-            raise
-        except Exception:
-            pass
-
+@router.get("/portal/{token}/overview")
+async def portal_overview(token: str):
+    row = _resolve_portal_token(token)
     owner_id = row["user_id"]
-
-    # Idempotent insert: re-accepting just refreshes status.
-    supabase.table("accountant_clients").upsert({
-        "accountant_id": accountant_id,
-        "user_id":       owner_id,
-        "status":        "active",
-        "revoked_at":    None,
-    }, on_conflict="accountant_id,user_id").execute()
-    supabase.table("accountant_invites").update({
-        "used": True,
-    }).eq("token", token).execute()
-
-    # Notify the owner that their accountant is now linked.
-    try:
-        from app.routers.notifications import create_notification
-        create_notification(
-            user_id=owner_id,
-            notification_type="accountant_linked",
-            title="Accountant heeft toegang",
-            body="Je accountant heeft de uitnodiging geaccepteerd en kan nu je administratie inzien.",
-            data={"accountant_id": accountant_id},
-        )
-    except Exception as e:
-        print(f"[accountants] linked-notification skipped: {e}")
-
-    return {"success": True, "owner_id": owner_id}
-
-
-@router.get("/clients")
-async def list_clients_of_accountant(request: Request):
-    """Accountant view: list every BigDogg user that has an active
-    `accountant_clients` row pointing at me."""
-    accountant_id = get_user_id(request)
-    rows = supabase.table("accountant_clients")\
-        .select("id, user_id, status, created_at")\
-        .eq("accountant_id", accountant_id)\
-        .eq("status", "active").execute()
-
-    out = []
-    for r in (rows.data or []):
-        try:
-            up = supabase.table("user_profiles")\
-                .select("full_name, business_name")\
-                .eq("id", r["user_id"]).limit(1).execute()
-            display_name = ""
-            if up.data:
-                d = up.data[0]
-                display_name = (d.get("business_name") or d.get("full_name") or "").strip()
-        except Exception:
-            display_name = ""
-        out.append({
-            "user_id":       r["user_id"],
-            "display_name":  display_name,
-            "since":         r.get("created_at"),
-        })
-    return {"clients": out}
-
-
-# ─── Accountant: read-only access to a specific client's data ──────
-def _verify_link(accountant_id: str, client_user_id: str) -> None:
-    """Raise 403 unless an active accountant_clients row exists."""
-    link = supabase.table("accountant_clients")\
-        .select("id")\
-        .eq("accountant_id", accountant_id)\
-        .eq("user_id", client_user_id)\
-        .eq("status", "active").limit(1).execute()
-    if not link.data:
-        raise HTTPException(status_code=403, detail="not_linked")
-
-
-@router.get("/clients/{client_user_id}/invoices")
-async def client_invoices(client_user_id: str, request: Request):
-    accountant_id = get_user_id(request)
-    _verify_link(accountant_id, client_user_id)
-    rows = supabase.table("invoices")\
-        .select("id, invoice_number, client_name, client_company, "
-                "total_incl_btw, total_excl_btw, btw_amount, "
-                "issue_date, due_date, status")\
-        .eq("user_id", client_user_id)\
-        .order("issue_date", desc=True).execute()
-    return {"invoices": rows.data or []}
-
-
-@router.get("/clients/{client_user_id}/expenses")
-async def client_expenses(client_user_id: str, request: Request):
-    accountant_id = get_user_id(request)
-    _verify_link(accountant_id, client_user_id)
-    rows = supabase.table("expenses")\
-        .select("id, vendor, description, amount_incl_btw, "
-                "amount_excl_btw, btw_amount, category, "
-                "expense_date, payment_method")\
-        .eq("user_id", client_user_id)\
-        .order("expense_date", desc=True).execute()
-    return {"expenses": rows.data or []}
-
-
-@router.get("/clients/{client_user_id}/overview")
-async def client_overview(client_user_id: str, request: Request):
-    """Annual revenue / expenses / VAT-payable summary for the linked
-    client. Calculated on the fly so the accountant always sees the
-    same numbers as the owner does on their dashboard."""
-    accountant_id = get_user_id(request)
-    _verify_link(accountant_id, client_user_id)
-
-    from datetime import datetime
     year = datetime.now().year
     year_start = f"{year}-01-01"
     year_end = f"{year}-12-31"
 
     inv = supabase.table("invoices")\
         .select("total_excl_btw, total_incl_btw, btw_amount, status, issue_date")\
-        .eq("user_id", client_user_id)\
+        .eq("user_id", owner_id)\
         .gte("issue_date", year_start).lte("issue_date", year_end).execute()
     exp = supabase.table("expenses")\
         .select("amount_excl_btw, amount_incl_btw, btw_amount, expense_date")\
-        .eq("user_id", client_user_id)\
+        .eq("user_id", owner_id)\
         .gte("expense_date", year_start).lte("expense_date", year_end).execute()
 
     revenue_excl = sum(float(r.get("total_excl_btw") or 0) for r in (inv.data or []))
@@ -454,16 +297,91 @@ async def client_overview(client_user_id: str, request: Request):
     btw_paid = sum(float(r.get("btw_amount") or 0) for r in (exp.data or []))
 
     return {
-        "year":            year,
-        "revenue_excl":    round(revenue_excl, 2),
-        "revenue_incl":    round(revenue_incl, 2),
-        "btw_collected":   round(btw_collected, 2),
-        "expense_excl":    round(expense_excl, 2),
-        "expense_incl":    round(expense_incl, 2),
-        "btw_paid":        round(btw_paid, 2),
-        "btw_payable":     round(btw_collected - btw_paid, 2),
-        "profit_excl":     round(revenue_excl - expense_excl, 2),
-        "invoice_count":   len(inv.data or []),
-        "paid_count":      paid_count,
-        "expense_count":   len(exp.data or []),
+        "year":          year,
+        "revenue_excl":  round(revenue_excl, 2),
+        "revenue_incl":  round(revenue_incl, 2),
+        "btw_collected": round(btw_collected, 2),
+        "expense_excl":  round(expense_excl, 2),
+        "expense_incl":  round(expense_incl, 2),
+        "btw_paid":      round(btw_paid, 2),
+        "btw_payable":   round(btw_collected - btw_paid, 2),
+        "profit_excl":   round(revenue_excl - expense_excl, 2),
+        "invoice_count": len(inv.data or []),
+        "paid_count":    paid_count,
+        "expense_count": len(exp.data or []),
     }
+
+
+@router.get("/portal/{token}/invoices")
+async def portal_invoices(token: str):
+    row = _resolve_portal_token(token)
+    owner_id = row["user_id"]
+    rows = supabase.table("invoices")\
+        .select("id, invoice_number, client_name, client_company, "
+                "total_incl_btw, total_excl_btw, btw_amount, "
+                "issue_date, due_date, status")\
+        .eq("user_id", owner_id)\
+        .order("issue_date", desc=True).execute()
+    return {"invoices": rows.data or []}
+
+
+@router.get("/portal/{token}/expenses")
+async def portal_expenses(token: str):
+    row = _resolve_portal_token(token)
+    owner_id = row["user_id"]
+    rows = supabase.table("expenses")\
+        .select("id, vendor, description, amount_incl_btw, "
+                "amount_excl_btw, btw_amount, category, "
+                "expense_date, payment_method, receipt_url")\
+        .eq("user_id", owner_id)\
+        .order("expense_date", desc=True).execute()
+    return {"expenses": rows.data or []}
+
+
+@router.get("/portal/{token}/invoices/{invoice_id}/pdf")
+async def portal_invoice_pdf(token: str, invoice_id: str):
+    """Generate the invoice PDF on demand, scoped to the link's owner."""
+    row = _resolve_portal_token(token)
+    owner_id = row["user_id"]
+
+    invoice_result = supabase.table("invoices")\
+        .select("*, clients(*)")\
+        .eq("id", invoice_id)\
+        .eq("user_id", owner_id)\
+        .single().execute()
+    if not invoice_result.data:
+        raise HTTPException(status_code=404, detail="invoice_not_found")
+
+    lines_result = supabase.table("invoice_lines")\
+        .select("*").eq("invoice_id", invoice_id).execute()
+
+    profile_result = supabase.table("user_profiles")\
+        .select("*").eq("id", owner_id).execute()
+
+    invoice = invoice_result.data
+    lines = lines_result.data
+    profile = profile_result.data[0] if profile_result.data else {}
+    client = invoice.get("clients") or {
+        "contact_name":  invoice.get("client_name", ""),
+        "email":         invoice.get("client_email", ""),
+        "company_name":  invoice.get("client_company", ""),
+    }
+
+    # Re-use the same PDF generator the owner-facing endpoint uses.
+    from app.routers.pdf import _generate_pdf
+    sender_email = ""
+    try:
+        owner_email = supabase.auth.admin.get_user_by_id(owner_id)
+        sender_email = (owner_email.user.email or "")
+    except Exception:
+        pass
+
+    pdf_bytes = _generate_pdf(invoice, lines, profile, client, sender_email)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition":
+                f"attachment; filename={invoice['invoice_number']}.pdf"
+        },
+    )
