@@ -23,11 +23,13 @@ Endpoints (all under /api/v1/accountants):
 """
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import Response
-from datetime import datetime, timezone, timedelta
+from fastapi.responses import Response, PlainTextResponse
+from datetime import datetime, timezone, timedelta, date
 from app.database import supabase
 from app.config import settings
 import resend
+import csv
+import io
 
 router = APIRouter()
 resend.api_key = settings.resend_api_key
@@ -452,9 +454,11 @@ async def portal_expenses(token: str, year: int | None = None):
     row = _resolve_portal_token(token)
     owner_id = row["user_id"]
     y, y_start, y_end = _resolve_year(year)
+    # NOTE: do not select payment_method — column does not exist on the
+    # expenses table and including it causes postgrest to 500.
     rows = supabase.table("expenses")\
         .select("id, description, amount_ex_btw, btw_amount, btw_rate, "
-                "category, expense_date, receipt_url, payment_method")\
+                "category, expense_date, receipt_url")\
         .eq("user_id", owner_id)\
         .gte("expense_date", y_start).lte("expense_date", y_end)\
         .order("expense_date", desc=True).execute()
@@ -464,6 +468,223 @@ async def portal_expenses(token: str, year: int | None = None):
         btw = float(r.get("btw_amount") or 0)
         out.append({**r, "amount_incl_btw": round(ex + btw, 2)})
     return {"year": y, "expenses": out}
+
+
+# ── BTW aangifte breakdown ──────────────────────────────────
+def _btw_breakdown_for_year(owner_id: str, year: int) -> dict:
+    """For the BTW aangifte card: per-quarter revenue split by rate
+    (21% → 1a, 9% → 1b, 0% → 1c) and total voorbelasting (5b)."""
+    y_start = f"{year}-01-01"
+    y_end = f"{year}-12-31"
+
+    inv = supabase.table("invoices")\
+        .select("id, invoice_date, status")\
+        .eq("user_id", owner_id)\
+        .gte("invoice_date", y_start).lte("invoice_date", y_end)\
+        .neq("status", "draft").execute()
+    invoices = inv.data or []
+    by_id = {i["id"]: i for i in invoices}
+
+    lines: list[dict] = []
+    if invoices:
+        ln = supabase.table("invoice_lines")\
+            .select("invoice_id, quantity, unit_price_ex_btw, "
+                    "btw_rate, line_total_ex_btw")\
+            .in_("invoice_id", [i["id"] for i in invoices]).execute()
+        for line in (ln.data or []):
+            inv_row = by_id.get(line["invoice_id"])
+            if not inv_row:
+                continue
+            ex = float(line.get("line_total_ex_btw") or
+                       (float(line.get("quantity") or 0) *
+                        float(line.get("unit_price_ex_btw") or 0)))
+            rate = int(line.get("btw_rate") or 0)
+            btw = round(ex * rate / 100, 2)
+            lines.append({
+                "invoice_date": inv_row.get("invoice_date") or "",
+                "ex":           ex,
+                "btw":          btw,
+                "rate":         rate,
+            })
+
+    exp = supabase.table("expenses")\
+        .select("amount_ex_btw, btw_amount, expense_date")\
+        .eq("user_id", owner_id)\
+        .gte("expense_date", y_start).lte("expense_date", y_end).execute()
+    expenses = exp.data or []
+
+    def _bucket():
+        return {
+            "rate_21":      {"ex": 0.0, "btw": 0.0},
+            "rate_9":       {"ex": 0.0, "btw": 0.0},
+            "rate_0":       {"ex": 0.0, "btw": 0.0},
+            "voorbelasting": 0.0,
+        }
+
+    quarters = {q: _bucket() for q in range(1, 5)}
+    year_total = _bucket()
+
+    for line in lines:
+        d = line["invoice_date"]
+        if not d:
+            continue
+        try:
+            m = int(d[5:7])
+        except Exception:
+            continue
+        q = (m - 1) // 3 + 1
+        if line["rate"] == 21:
+            key = "rate_21"
+        elif line["rate"] == 9:
+            key = "rate_9"
+        elif line["rate"] == 0:
+            key = "rate_0"
+        else:
+            continue
+        quarters[q][key]["ex"] += line["ex"]
+        quarters[q][key]["btw"] += line["btw"]
+        year_total[key]["ex"] += line["ex"]
+        year_total[key]["btw"] += line["btw"]
+
+    for e in expenses:
+        d = (e.get("expense_date") or "")
+        if not d:
+            continue
+        try:
+            m = int(d[5:7])
+        except Exception:
+            continue
+        q = (m - 1) // 3 + 1
+        btw = float(e.get("btw_amount") or 0)
+        quarters[q]["voorbelasting"] += btw
+        year_total["voorbelasting"] += btw
+
+    def _finalize(b):
+        b = {k: ({"ex": round(v["ex"], 2), "btw": round(v["btw"], 2)}
+                  if isinstance(v, dict) else round(v, 2))
+             for k, v in b.items()}
+        total_btw_out = (b["rate_21"]["btw"] + b["rate_9"]["btw"]
+                          + b["rate_0"]["btw"])
+        b["btw_owed"] = round(total_btw_out, 2)
+        b["btw_payable"] = round(total_btw_out - b["voorbelasting"], 2)
+        return b
+
+    return {
+        "quarters": {str(q): _finalize(v) for q, v in quarters.items()},
+        "year":     _finalize(year_total),
+    }
+
+
+@router.get("/portal/{token}/btw-breakdown")
+async def portal_btw_breakdown(token: str, year: int | None = None):
+    row = _resolve_portal_token(token)
+    owner_id = row["user_id"]
+    y, _, _ = _resolve_year(year)
+    return {"year": y, **_btw_breakdown_for_year(owner_id, y)}
+
+
+# ── Debiteuren aging ────────────────────────────────────────
+@router.get("/portal/{token}/aging")
+async def portal_aging(token: str):
+    """Aging buckets of outstanding (non-paid) invoices, based on due_date
+    relative to today. Returns 4 buckets + a totals/items rollup."""
+    row = _resolve_portal_token(token)
+    owner_id = row["user_id"]
+
+    inv = supabase.table("invoices")\
+        .select("id, invoice_number, client_name, client_company, "
+                "invoice_date, due_date, total_incl_btw, status")\
+        .eq("user_id", owner_id)\
+        .neq("status", "paid").neq("status", "draft").execute()
+
+    today = date.today()
+    buckets = {
+        "0-30":  {"label": "0–30 dagen",  "total": 0.0, "count": 0, "items": []},
+        "31-60": {"label": "31–60 dagen", "total": 0.0, "count": 0, "items": []},
+        "61-90": {"label": "61–90 dagen", "total": 0.0, "count": 0, "items": []},
+        "90+":   {"label": "90+ dagen",   "total": 0.0, "count": 0, "items": []},
+    }
+    grand_total = 0.0
+    grand_count = 0
+
+    for r in (inv.data or []):
+        due_raw = r.get("due_date") or ""
+        if not due_raw:
+            continue
+        try:
+            due = datetime.fromisoformat(due_raw[:10]).date()
+        except Exception:
+            continue
+        days_overdue = (today - due).days
+        if days_overdue < 0:
+            continue  # not yet due — not "aging"
+        if days_overdue <= 30:
+            key = "0-30"
+        elif days_overdue <= 60:
+            key = "31-60"
+        elif days_overdue <= 90:
+            key = "61-90"
+        else:
+            key = "90+"
+        amount = float(r.get("total_incl_btw") or 0)
+        item = {
+            "id":             r["id"],
+            "invoice_number": r.get("invoice_number"),
+            "client":         (r.get("client_name") or
+                                r.get("client_company") or "—"),
+            "invoice_date":   r.get("invoice_date"),
+            "due_date":       due_raw,
+            "days_overdue":   days_overdue,
+            "amount":         amount,
+        }
+        buckets[key]["items"].append(item)
+        buckets[key]["total"] += amount
+        buckets[key]["count"] += 1
+        grand_total += amount
+        grand_count += 1
+
+    for v in buckets.values():
+        v["total"] = round(v["total"], 2)
+        v["items"].sort(key=lambda i: i["days_overdue"], reverse=True)
+
+    return {
+        "today":           today.isoformat(),
+        "grand_total":     round(grand_total, 2),
+        "grand_count":     grand_count,
+        "buckets":         buckets,
+        "buckets_order":   ["0-30", "31-60", "61-90", "90+"],
+    }
+
+
+def _depreciation_schedule(amount: float, purchase_date: str,
+                            years: int) -> list[dict]:
+    """Full year-by-year schedule for one asset."""
+    try:
+        purchase_year = int((purchase_date or "")[:4] or 0)
+    except Exception:
+        purchase_year = datetime.now().year
+    if years < 1:
+        years = 1
+    annual = round(amount / years, 2)
+    schedule = []
+    cumulative = 0.0
+    for i in range(years):
+        year = purchase_year + i
+        cumulative = round(cumulative + annual, 2)
+        # On the last year, absorb any rounding drift into the last row
+        if i == years - 1:
+            cumulative = round(amount, 2)
+            this_year = round(amount - sum(s["amount"] for s in schedule), 2)
+        else:
+            this_year = annual
+        book_value = round(max(amount - cumulative, 0.0), 2)
+        schedule.append({
+            "year":       year,
+            "amount":     this_year,
+            "cumulative": cumulative,
+            "book_value": book_value,
+        })
+    return schedule
 
 
 @router.get("/portal/{token}/investments")
@@ -483,8 +704,9 @@ async def portal_investments(token: str, year: int | None = None):
     for r in (rows.data or []):
         amount = float(r.get("amount") or 0)
         years = int(r.get("depreciation_years") or 5)
-        dep = _depreciation_for_year(amount, r.get("purchase_date") or "",
-                                      years, y)
+        purchase = r.get("purchase_date") or ""
+        dep = _depreciation_for_year(amount, purchase, years, y)
+        schedule = _depreciation_schedule(amount, purchase, years)
         total_this_year += dep["this_year"]
         items.append({
             **r,
@@ -492,6 +714,7 @@ async def portal_investments(token: str, year: int | None = None):
             "this_year_depreciation":  dep["this_year"],
             "cumulative_depreciation": dep["cumulative"],
             "book_value":              dep["book_value"],
+            "schedule":                schedule,
         })
     return {
         "year":                 y,
@@ -499,6 +722,116 @@ async def portal_investments(token: str, year: int | None = None):
         "total_this_year":      round(total_this_year, 2),
         "depreciation_threshold": _DEPRECIATION_THRESHOLD,
     }
+
+
+# ── CSV export ──────────────────────────────────────────────
+# Default grootboekrekening mapping. Accountants can re-map in their own
+# software; this just gives them a populated column to start from.
+_LEDGER_INVOICES = {
+    21: "8000",  # Omzet 21%
+    9:  "8001",  # Omzet 9%
+    0:  "8002",  # Omzet 0% / vrijgesteld
+}
+_LEDGER_EXPENSES = {
+    "travel":    "4350",
+    "materials": "4400",
+    "software":  "4410",
+    "food":      "4360",
+    "office":    "4500",
+    "general":   "4900",
+    "other":     "4900",
+}
+
+
+@router.get("/portal/{token}/export.csv")
+async def portal_export_csv(token: str, year: int | None = None):
+    """CSV dump combining invoice lines + expenses for the year. Columns
+    match what accountants typically import into Exact/AFAS/Twinfield."""
+    row = _resolve_portal_token(token)
+    owner_id = row["user_id"]
+    y, y_start, y_end = _resolve_year(year)
+
+    inv = supabase.table("invoices")\
+        .select("id, invoice_number, invoice_date, status, client_name, client_company")\
+        .eq("user_id", owner_id)\
+        .gte("invoice_date", y_start).lte("invoice_date", y_end)\
+        .neq("status", "draft").execute()
+    invoices = inv.data or []
+    by_id = {i["id"]: i for i in invoices}
+
+    lines = []
+    if invoices:
+        ln = supabase.table("invoice_lines")\
+            .select("invoice_id, description, quantity, unit_price_ex_btw, "
+                    "btw_rate, line_total_ex_btw")\
+            .in_("invoice_id", [i["id"] for i in invoices]).execute()
+        lines = ln.data or []
+
+    exp = supabase.table("expenses")\
+        .select("expense_date, description, amount_ex_btw, btw_amount, btw_rate, category")\
+        .eq("user_id", owner_id)\
+        .gte("expense_date", y_start).lte("expense_date", y_end)\
+        .order("expense_date", desc=False).execute()
+    expenses = exp.data or []
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, delimiter=";")
+    writer.writerow([
+        "Type", "Datum", "Factuurnummer", "Relatie", "Omschrijving",
+        "Bedrag excl. BTW", "BTW%", "BTW bedrag", "Bedrag incl. BTW",
+        "Grootboekrekening",
+    ])
+
+    # Invoice line items as revenue
+    for line in lines:
+        inv_row = by_id.get(line["invoice_id"]) or {}
+        ex = float(line.get("line_total_ex_btw") or
+                   (float(line.get("quantity") or 0) *
+                    float(line.get("unit_price_ex_btw") or 0)))
+        rate = int(line.get("btw_rate") or 0)
+        btw = round(ex * rate / 100, 2)
+        incl = round(ex + btw, 2)
+        client = (inv_row.get("client_name")
+                  or inv_row.get("client_company") or "")
+        writer.writerow([
+            "Verkoop",
+            inv_row.get("invoice_date") or "",
+            inv_row.get("invoice_number") or "",
+            client,
+            line.get("description") or "",
+            f"{ex:.2f}".replace(".", ","),
+            f"{rate}%",
+            f"{btw:.2f}".replace(".", ","),
+            f"{incl:.2f}".replace(".", ","),
+            _LEDGER_INVOICES.get(rate, "8000"),
+        ])
+
+    # Expenses as costs
+    for e in expenses:
+        ex = float(e.get("amount_ex_btw") or 0)
+        btw = float(e.get("btw_amount") or 0)
+        rate = int(e.get("btw_rate") or 0)
+        cat = (e.get("category") or "general").strip() or "general"
+        writer.writerow([
+            "Inkoop",
+            e.get("expense_date") or "",
+            "",
+            "",
+            e.get("description") or "",
+            f"{ex:.2f}".replace(".", ","),
+            f"{rate}%",
+            f"{btw:.2f}".replace(".", ","),
+            f"{ex + btw:.2f}".replace(".", ","),
+            _LEDGER_EXPENSES.get(cat.lower(), "4900"),
+        ])
+
+    return PlainTextResponse(
+        content=buffer.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f"attachment; filename=bigdogg-export-{y}.csv",
+        },
+    )
 
 
 @router.get("/portal/{token}/hours")

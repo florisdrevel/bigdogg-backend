@@ -1,5 +1,5 @@
 """Tests for the token-gated accountant portal."""
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 import types
 import pytest
 from fastapi import HTTPException
@@ -239,6 +239,124 @@ async def test_portal_years_distinct(monkeypatch):
     assert 2025 in result["years"]
     assert datetime.now().year in result["years"]
     assert result["years"] == sorted(result["years"], reverse=True)
+
+
+async def test_portal_btw_breakdown_per_rate(monkeypatch):
+    invoices = [
+        {"id": "inv1", "invoice_date": "2026-02-01", "status": "paid"},
+        {"id": "inv2", "invoice_date": "2026-05-01", "status": "sent"},
+    ]
+    lines = [
+        {"invoice_id": "inv1", "quantity": 1, "unit_price_ex_btw": 100,
+         "btw_rate": 21, "line_total_ex_btw": 100},
+        {"invoice_id": "inv1", "quantity": 1, "unit_price_ex_btw": 50,
+         "btw_rate": 9,  "line_total_ex_btw": 50},
+        {"invoice_id": "inv2", "quantity": 2, "unit_price_ex_btw": 200,
+         "btw_rate": 21, "line_total_ex_btw": 400},
+    ]
+    expenses = [
+        {"amount_ex_btw": 80, "btw_amount": 16.8, "expense_date": "2026-02-15"},
+        {"amount_ex_btw": 50, "btw_amount": 4.5,  "expense_date": "2026-05-15"},
+    ]
+    _patch_supabase(monkeypatch, {
+        "accountant_invites": [_active_invite_row()],
+        "invoices":           invoices,
+        "invoice_lines":      lines,
+        "expenses":           expenses,
+    })
+    result = await acc.portal_btw_breakdown("tok", year=2026)
+    q1 = result["quarters"]["1"]
+    q2 = result["quarters"]["2"]
+    assert q1["rate_21"]["ex"] == 100.0
+    assert q1["rate_21"]["btw"] == 21.0
+    assert q1["rate_9"]["ex"] == 50.0
+    assert q1["rate_9"]["btw"] == 4.5
+    assert q1["voorbelasting"] == 16.8
+    assert q2["rate_21"]["ex"] == 400.0
+    assert q2["voorbelasting"] == 4.5
+    assert result["year"]["btw_owed"] == round(21.0 + 4.5 + 84.0, 2)
+
+
+async def test_portal_aging_buckets(monkeypatch):
+    today = date.today()
+    inv = [
+        # 10 days overdue → 0-30
+        {"id": "a", "invoice_number": "1", "client_name": "A", "client_company": "",
+         "invoice_date": "2026-01-01",
+         "due_date": (today - timedelta(days=10)).isoformat(),
+         "total_incl_btw": 121.0, "status": "sent"},
+        # 45 days overdue → 31-60
+        {"id": "b", "invoice_number": "2", "client_name": "B", "client_company": "",
+         "invoice_date": "2026-01-01",
+         "due_date": (today - timedelta(days=45)).isoformat(),
+         "total_incl_btw": 242.0, "status": "overdue"},
+        # 100 days overdue → 90+
+        {"id": "c", "invoice_number": "3", "client_name": "C", "client_company": "",
+         "invoice_date": "2026-01-01",
+         "due_date": (today - timedelta(days=100)).isoformat(),
+         "total_incl_btw": 50.0, "status": "sent"},
+        # not yet due → excluded
+        {"id": "d", "invoice_number": "4", "client_name": "D", "client_company": "",
+         "invoice_date": "2026-04-01",
+         "due_date": (today + timedelta(days=5)).isoformat(),
+         "total_incl_btw": 99.0, "status": "sent"},
+    ]
+    _patch_supabase(monkeypatch, {
+        "accountant_invites": [_active_invite_row()],
+        "invoices":           inv,
+    })
+    result = await acc.portal_aging("tok")
+    assert result["buckets"]["0-30"]["count"] == 1
+    assert result["buckets"]["0-30"]["total"] == 121.0
+    assert result["buckets"]["31-60"]["count"] == 1
+    assert result["buckets"]["31-60"]["total"] == 242.0
+    assert result["buckets"]["90+"]["count"] == 1
+    assert result["buckets"]["90+"]["total"] == 50.0
+    assert result["grand_count"] == 3  # the not-yet-due one is excluded
+    assert result["grand_total"] == round(121.0 + 242.0 + 50.0, 2)
+
+
+def test_depreciation_schedule_full_period():
+    # €1000 over 5 years starting 2024
+    schedule = acc._depreciation_schedule(1000.0, "2024-06-15", 5)
+    assert len(schedule) == 5
+    assert schedule[0]["year"] == 2024
+    assert schedule[-1]["year"] == 2028
+    assert schedule[0]["amount"] == 200.0
+    # Cumulative must add up to the original amount on the last row
+    assert schedule[-1]["cumulative"] == 1000.0
+    assert schedule[-1]["book_value"] == 0.0
+
+
+async def test_portal_export_csv_contains_invoice_and_expense_rows(monkeypatch):
+    invoices = [
+        {"id": "inv1", "invoice_number": "2026-000001",
+         "invoice_date": "2026-03-01", "status": "paid",
+         "client_name": "ACME", "client_company": "ACME BV"},
+    ]
+    lines = [
+        {"invoice_id": "inv1", "description": "Hours",
+         "quantity": 1, "unit_price_ex_btw": 100,
+         "btw_rate": 21, "line_total_ex_btw": 100},
+    ]
+    expenses = [
+        {"expense_date": "2026-03-15", "description": "Office supplies",
+         "amount_ex_btw": 50, "btw_amount": 10.5, "btw_rate": 21,
+         "category": "office"},
+    ]
+    _patch_supabase(monkeypatch, {
+        "accountant_invites": [_active_invite_row()],
+        "invoices":           invoices,
+        "invoice_lines":      lines,
+        "expenses":           expenses,
+    })
+    response = await acc.portal_export_csv("tok", year=2026)
+    body = response.body.decode("utf-8")
+    assert "Verkoop;2026-03-01;2026-000001" in body
+    assert "Inkoop;2026-03-15" in body
+    # Default ledger mapping
+    assert ";8000" in body          # 21% revenue
+    assert ";4500" in body          # office expense
 
 
 async def test_portal_meta_owner_name_fallback(monkeypatch):
