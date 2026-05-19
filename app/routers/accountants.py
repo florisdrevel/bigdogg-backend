@@ -215,12 +215,26 @@ async def list_invites(request: Request):
 
 @router.delete("/invites/{token}")
 async def cancel_invite(token: str, request: Request):
-    """Revoke a link. We soft-revoke by setting used=true so the row stays
-    around for audit + so the token can never be reused."""
+    """Revoke a link. Hard-delete the row so it disappears from the
+    owner's Settings → My accountant list. Previously we soft-revoked
+    via used=true, but the accountant_invites table only has SELECT/
+    INSERT/DELETE RLS policies — UPDATE silently no-ops — so the row
+    kept reappearing. Hard delete also matches user expectation: tap
+    Revoke → it's gone."""
     user_id = get_user_id(request)
-    supabase.table("accountant_invites").update({"used": True})\
-        .eq("user_id", user_id).eq("token", token).execute()
-    return {"success": True}
+    try:
+        result = supabase.table("accountant_invites").delete()\
+            .eq("user_id", user_id).eq("token", token).execute()
+    except Exception as e:
+        print(f"[accountants] revoke failed for token={token}: {e}")
+        raise HTTPException(status_code=400, detail="revoke_failed")
+    deleted = len(result.data or [])
+    if deleted == 0:
+        # Either the token doesn't exist, or it belongs to a different
+        # user. Don't 404 — the desired end state ("no longer in my
+        # list") is already true.
+        return {"success": True, "deleted": 0}
+    return {"success": True, "deleted": deleted}
 
 
 @router.post("/invites/{token}/extend")
