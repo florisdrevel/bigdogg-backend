@@ -834,8 +834,68 @@ async def portal_export_csv(token: str, year: int | None = None):
     )
 
 
+_HOURS_PER_DAY = 9.0
+
+
+def _invoice_derived_hours(owner_id: str, y_start: str, y_end: str) -> tuple[float, list[dict]]:
+    """Same logic as the user-facing /api/v1/hours endpoint:
+    invoice_lines with unit='day' count as quantity*9 hours, unit='hour'
+    as quantity*1 hour. Anything else (fixed, piece, km) yields 0.
+
+    Returning both the total and a per-line breakdown so the portal can
+    surface it alongside manually-logged hours.
+    """
+    try:
+        inv = supabase.table("invoices")\
+            .select("id, invoice_date, invoice_number, project_id, status")\
+            .eq("user_id", owner_id)\
+            .neq("status", "draft")\
+            .gte("invoice_date", y_start).lte("invoice_date", y_end)\
+            .execute()
+        invoices = inv.data or []
+        if not invoices:
+            return 0.0, []
+        inv_map = {i["id"]: i for i in invoices}
+        ln = supabase.table("invoice_lines")\
+            .select("invoice_id, description, quantity, unit")\
+            .in_("invoice_id", [i["id"] for i in invoices]).execute()
+        total = 0.0
+        breakdown: list[dict] = []
+        for line in (ln.data or []):
+            unit = (line.get("unit") or "fixed").lower()
+            qty = float(line.get("quantity") or 0)
+            if unit == "day":
+                hrs = qty * _HOURS_PER_DAY
+            elif unit == "hour":
+                hrs = qty
+            else:
+                continue
+            if hrs <= 0:
+                continue
+            total += hrs
+            inv_row = inv_map.get(line["invoice_id"], {})
+            breakdown.append({
+                "source":         "invoice",
+                "invoice_number": inv_row.get("invoice_number", ""),
+                "invoice_id":     line["invoice_id"],
+                "project_id":     inv_row.get("project_id"),
+                "description":    line.get("description", ""),
+                "quantity":       qty,
+                "unit":           unit,
+                "hours":          round(hrs, 2),
+                "date":           inv_row.get("invoice_date", ""),
+            })
+        return round(total, 2), breakdown
+    except Exception as e:
+        print(f"[accountants] _invoice_derived_hours failed: {e}")
+        return 0.0, []
+
+
 @router.get("/portal/{token}/hours")
 async def portal_hours(token: str, year: int | None = None):
+    """Total hours for the year — matches the user's own /api/v1/hours
+    screen exactly (manual entries + invoice-derived: day*9, hour*1).
+    Also returns a per-month breakdown for the table the portal renders."""
     row = _resolve_portal_token(token)
     owner_id = row["user_id"]
     y, y_start, y_end = _resolve_year(year)
@@ -845,9 +905,20 @@ async def portal_hours(token: str, year: int | None = None):
         .eq("user_id", owner_id)\
         .gte("date", y_start).lte("date", y_end)\
         .order("date", desc=True).execute()
+    manual_entries = rows.data or []
 
-    project_ids = list({r.get("project_id") for r in (rows.data or [])
-                        if r.get("project_id")})
+    # Invoice-derived hours (parity with /api/v1/hours)
+    invoice_hours, invoice_breakdown = _invoice_derived_hours(
+        owner_id, y_start, y_end,
+    )
+
+    # Look up project names for both manual entries AND invoice-derived
+    # rows. Without including the invoice side, hours attached to a
+    # project_id via an invoice would render as "Onbekend project".
+    project_ids = list({
+        *(r.get("project_id") for r in manual_entries if r.get("project_id")),
+        *(ib.get("project_id") for ib in invoice_breakdown if ib.get("project_id")),
+    })
     project_names: dict[str, str] = {}
     if project_ids:
         try:
@@ -858,13 +929,19 @@ async def portal_hours(token: str, year: int | None = None):
         except Exception:
             pass
 
+    # Per-project totals — include invoice-derived rows that have a
+    # project_id attached at the invoice level. Hours without a project
+    # roll up under the "Geen project" bucket.
     by_project: dict[str, float] = {}
-    total = 0.0
-    for r in (rows.data or []):
+    manual_total = 0.0
+    for r in manual_entries:
         h = float(r.get("hours") or 0)
-        total += h
+        manual_total += h
         pid = r.get("project_id") or "_none"
         by_project[pid] = by_project.get(pid, 0.0) + h
+    for ib in invoice_breakdown:
+        pid = ib.get("project_id") or "_none"
+        by_project[pid] = by_project.get(pid, 0.0) + ib["hours"]
 
     project_summary = [
         {
@@ -876,14 +953,132 @@ async def portal_hours(token: str, year: int | None = None):
         for pid, h in sorted(by_project.items(), key=lambda kv: kv[1], reverse=True)
     ]
 
+    # Per-month breakdown for the table on the Uren tab.
+    monthly_manual = [0.0] * 12
+    monthly_invoice = [0.0] * 12
+    for r in manual_entries:
+        d = (r.get("date") or "")
+        try:
+            m = int(d[5:7])
+            if 1 <= m <= 12:
+                monthly_manual[m - 1] += float(r.get("hours") or 0)
+        except Exception:
+            continue
+    for ib in invoice_breakdown:
+        d = ib.get("date") or ""
+        try:
+            m = int(d[5:7])
+            if 1 <= m <= 12:
+                monthly_invoice[m - 1] += ib["hours"]
+        except Exception:
+            continue
+    monthly = [
+        {
+            "month":         i + 1,
+            "manual_hours":  round(monthly_manual[i], 2),
+            "invoice_hours": round(monthly_invoice[i], 2),
+            "total_hours":   round(monthly_manual[i] + monthly_invoice[i], 2),
+        }
+        for i in range(12)
+    ]
+
+    total_hours = round(manual_total + invoice_hours, 2)
+
     return {
         "year":                  y,
-        "entries":               rows.data or [],
+        "entries":               manual_entries,
+        "invoice_breakdown":     invoice_breakdown,
         "project_summary":       project_summary,
-        "total_hours":           round(total, 2),
+        "monthly":               monthly,
+        "manual_hours":          round(manual_total, 2),
+        "invoice_hours":         round(invoice_hours, 2),
+        "total_hours":           total_hours,
         "urencriterium":         _URENCRITERIUM,
-        "urencriterium_ratio":   round(min(total / _URENCRITERIUM, 1.0), 4),
+        "urencriterium_met":     total_hours >= _URENCRITERIUM,
+        "urencriterium_ratio":   round(min(total_hours / _URENCRITERIUM, 1.0), 4),
     }
+
+
+@router.get("/portal/{token}/annual-report.pdf")
+async def portal_annual_report_pdf(
+    token: str,
+    year: int | None = None,
+    lang: str = "nl",
+):
+    """The same annual PDF the user themselves can download — including
+    the AI-generated tax tips. Reuses `get_year_data` + `get_ai_tax_tips`
+    + `_generate_annual_pdf` from the annual_report router; no logic
+    duplication. The accountant token authorises access for the owner;
+    `require_active_paid` is enforced identically to the user-facing
+    endpoint so free-tier owners can't grant their accountant the PDF
+    either."""
+    row = _resolve_portal_token(token)
+    owner_id = row["user_id"]
+
+    # Import lazily to avoid a circular import at module load time.
+    from app.routers.annual_report import (
+        get_year_data, get_ai_tax_tips, _generate_annual_pdf,
+    )
+    from app.routers.subscription import require_active_paid
+
+    require_active_paid(owner_id)
+
+    y = year or (datetime.now().year - 1)
+
+    profile_result = supabase.table("user_profiles")\
+        .select("*").eq("id", owner_id).execute()
+    profile = profile_result.data[0] if profile_result.data else {}
+
+    data_current = get_year_data(owner_id, y)
+    data_prev = get_year_data(owner_id, y - 1)
+
+    if lang == "en":
+        fallback_tips = (
+            "1. Check if you qualify for the self-employed deduction (zelfstandigenaftrek).\n"
+            "2. Apply the SME profit exemption (MKB-winstvrijstelling).\n"
+            "3. Review all business costs for deductibility.\n"
+            "4. Consider a pension reserve (FOR) to reduce taxable profit.\n"
+            "5. Ensure all invoices are in your administration."
+        )
+    else:
+        fallback_tips = (
+            "1. Controleer of je in aanmerking komt voor de zelfstandigenaftrek.\n"
+            "2. Pas de MKB-winstvrijstelling toe op je winst.\n"
+            "3. Bekijk alle zakelijke kosten op aftrekbaarheid.\n"
+            "4. Overweeg een fiscale oudedagsreserve (FOR) om belastbare winst te verlagen.\n"
+            "5. Zorg dat alle facturen in je administratie zitten."
+        )
+    import asyncio
+    try:
+        tax_tips = await asyncio.wait_for(
+            get_ai_tax_tips(data_current, data_prev, profile, lang),
+            timeout=25.0,
+        )
+    except Exception:
+        tax_tips = fallback_tips
+
+    pdf_bytes = _generate_annual_pdf(
+        data_current, data_prev, profile, tax_tips, lang,
+    )
+
+    # Filename: BigDogg_Jaarrapport_<KvK or business slug>_<year>.pdf
+    kvk = (profile.get("kvk_number") or "").strip()
+    business = (
+        profile.get("business_name")
+        or profile.get("full_name")
+        or "client"
+    ).strip()
+    base = kvk if kvk else business
+    safe = "".join(
+        c if c.isalnum() or c in ("-", "_") else "-" for c in base
+    )[:48].strip("-") or "client"
+    filename = f"BigDogg_Jaarrapport_{safe}_{y}.pdf"
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 @router.get("/portal/{token}/invoices/{invoice_id}/pdf")

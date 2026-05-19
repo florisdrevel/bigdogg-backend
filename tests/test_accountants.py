@@ -217,9 +217,67 @@ async def test_portal_hours_per_project(monkeypatch):
     })
     result = await acc.portal_hours("tok", year=2026)
     assert result["total_hours"] == 9.0
+    assert result["manual_hours"] == 9.0
+    assert result["invoice_hours"] == 0.0
     # Highest first
     assert result["project_summary"][0]["project_name"] == "Project Alpha"
     assert result["project_summary"][0]["hours"] == 6.0
+    # Monthly breakdown — 9 manual hours in March, 0 elsewhere
+    march = next(r for r in result["monthly"] if r["month"] == 3)
+    assert march["manual_hours"] == 9.0
+    assert march["total_hours"] == 9.0
+    feb = next(r for r in result["monthly"] if r["month"] == 2)
+    assert feb["total_hours"] == 0.0
+
+
+async def test_portal_hours_includes_invoice_derived(monkeypatch):
+    """Portal hours must match the user's own /hours screen: manual
+    entries + invoice lines with unit='day' (x9) and unit='hour' (x1).
+    A line with unit='fixed' or 'piece' must NOT count."""
+    hours_rows = [
+        {"id": "h1", "hours": 10, "date": "2026-01-15", "description": "consult", "project_id": None},
+    ]
+    invoices_rows = [
+        {"id": "inv1", "invoice_date": "2026-02-10", "invoice_number": "I-001",
+         "project_id": "p1", "status": "sent"},
+        {"id": "inv2", "invoice_date": "2026-03-05", "invoice_number": "I-002",
+         "project_id": None, "status": "paid"},
+        # Drafts must be excluded — matches user-facing /hours behavior.
+        {"id": "drf", "invoice_date": "2026-02-12", "invoice_number": "DRAFT",
+         "project_id": None, "status": "draft"},
+    ]
+    invoice_lines_rows = [
+        {"invoice_id": "inv1", "quantity": 3, "unit": "day",   "description": "onsite"},   # 27 h
+        {"invoice_id": "inv1", "quantity": 5, "unit": "hour",  "description": "support"},  # 5 h
+        {"invoice_id": "inv2", "quantity": 1, "unit": "fixed", "description": "setup"},    # 0 h
+        {"invoice_id": "inv2", "quantity": 4, "unit": "hour",  "description": "calls"},    # 4 h
+    ]
+    projects = [{"id": "p1", "name": "Project Alpha"}]
+    _patch_supabase(monkeypatch, {
+        "accountant_invites": [_active_invite_row()],
+        "hours":              hours_rows,
+        "invoices":           invoices_rows,
+        "invoice_lines":      invoice_lines_rows,
+        "projects":           projects,
+    })
+    result = await acc.portal_hours("tok", year=2026)
+    # 10 manual + 27 + 5 + 4 = 46. The fixed line yields 0.
+    assert result["manual_hours"]  == 10.0
+    assert result["invoice_hours"] == 36.0
+    assert result["total_hours"]   == 46.0
+    # Urencriterium status reflects the combined total.
+    assert result["urencriterium_met"] is False  # 46 < 1225
+    # Project Alpha rolls up invoice-derived hours from inv1 (27 + 5 = 32)
+    alpha = next(p for p in result["project_summary"]
+                 if p["project_name"] == "Project Alpha")
+    assert alpha["hours"] == 32.0
+    # Monthly breakdown spreads invoice hours across the invoice_date months
+    feb = next(r for r in result["monthly"] if r["month"] == 2)
+    assert feb["invoice_hours"] == 32.0
+    mar = next(r for r in result["monthly"] if r["month"] == 3)
+    assert mar["invoice_hours"] == 4.0
+    jan = next(r for r in result["monthly"] if r["month"] == 1)
+    assert jan["manual_hours"] == 10.0
 
 
 async def test_portal_years_distinct(monkeypatch):
