@@ -196,6 +196,10 @@ def _generate_pdf(invoice, lines, profile, client, sender_email=''):
             f"{client.get('postcode', '')} {client.get('city', '')}".strip(), value_style))
     if client.get('email'):
         client_lines.append(Paragraph(client['email'], subtitle_style))
+    if client.get('kvk_number'):
+        client_lines.append(Paragraph(f"KVK: {client['kvk_number']}", subtitle_style))
+    if client.get('btw_number'):
+        client_lines.append(Paragraph(f"BTW: {client['btw_number']}", subtitle_style))
 
     date_lines = [
         Paragraph('FACTUURDATUM', label_style),
