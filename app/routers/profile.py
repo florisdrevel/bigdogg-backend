@@ -16,12 +16,19 @@ class ProfileUpdate(BaseModel):
     kvk_number: Optional[str] = None
     btw_number: Optional[str] = None
     iban: Optional[str] = None
+    # Optional override for the "Ten name van" line on invoice emails.
+    # Falls back to business_name / full_name when blank.
+    bank_account_name: Optional[str] = None
     language: Optional[str] = None
     onboarding_complete: Optional[bool] = None
     # Hex strings like "#1B3A4B". Used as the line/header color and the
     # accent (totals row, OFFERTE/FACTUUR label) on PDF invoices/quotes.
     invoice_primary_color: Optional[str] = None
     invoice_accent_color: Optional[str] = None
+    # Per-user default for whether outgoing invoice emails should include
+    # the Stripe payment link. The per-send toggle in the send dialog
+    # always wins; this is just the initial check state.
+    default_exclude_payment_link: Optional[bool] = None
 
 
 def get_user_id(request: Request) -> str:

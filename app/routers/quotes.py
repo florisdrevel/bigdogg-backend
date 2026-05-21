@@ -674,6 +674,71 @@ def _lookup_quote_by_token(token: str) -> dict:
     return quote_result.data[0]
 
 
+def _esc_html(value) -> str:
+    s = '' if value is None else str(value)
+    return (
+        s.replace('&', '&amp;')
+         .replace('<', '&lt;')
+         .replace('>', '&gt;')
+         .replace('"', '&quot;')
+    )
+
+
+def _freelancer_notify_html(*, first_name: str, sender_name: str,
+                             client_name: str, quote_number: str,
+                             total: str, accepted: bool) -> str:
+    """Branded HTML body for the email to the freelancer when their
+    client accepts or declines an offerte."""
+    badge = "Geaccepteerd" if accepted else "Afgewezen"
+    headline = (
+        f"<strong>{_esc_html(client_name)}</strong> heeft je offerte "
+        f"<strong>{_esc_html(quote_number)}</strong> "
+        f"(€ {_esc_html(total)}) "
+        + ("<strong style='color:#10B981;'>geaccepteerd</strong>."
+           if accepted else
+           "<strong style='color:#B91C1C;'>afgewezen</strong>.")
+    )
+    follow_up = (
+        "Je kunt 'm nu in BigDogg met één tik omzetten naar een factuur."
+        if accepted else
+        "Geen zorgen — je kunt altijd een nieuwe offerte sturen."
+    )
+    cta_label = (
+        "Open BigDogg" if accepted else "Nieuwe offerte maken"
+    )
+    return f"""<!DOCTYPE html>
+<html lang="nl">
+<body style="margin:0;padding:0;background:#F5F3EF;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#1B3A4B;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F5F3EF;padding:32px 16px;">
+    <tr><td align="center">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border-radius:12px;border:1px solid #E2DDD6;overflow:hidden;">
+        <tr><td align="center" style="padding:28px 28px 18px 28px;background:#1B3A4B;">
+          <img src="https://bigdogg.nl/icons/Icon-512.png" alt="BigDogg" width="64" height="64" style="display:block;border-radius:12px;"/>
+          <h1 style="margin:12px 0 0 0;color:#C9A96E;font-size:22px;letter-spacing:-0.3px;font-weight:700;">BigDogg.</h1>
+          <p style="margin:4px 0 0 0;color:#F5F3EF;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Offerte {badge.lower()}</p>
+        </td></tr>
+        <tr><td style="padding:24px 28px 6px 28px;">
+          <p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">Hoi {_esc_html(first_name)},</p>
+          <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">{headline}</p>
+          <p style="margin:0 0 16px 0;font-size:14px;line-height:1.6;color:#4A6572;">{follow_up}</p>
+        </td></tr>
+        <tr><td align="center" style="padding:6px 28px 22px 28px;">
+          <a href="https://bigdogg.nl/#/dashboard" style="display:inline-block;background:#1B3A4B;color:#ffffff;text-decoration:none;padding:14px 28px;border-radius:8px;font-weight:700;font-size:15px;">{cta_label}</a>
+        </td></tr>
+        <tr><td style="padding:0 28px 24px 28px;border-top:1px solid #E2DDD6;">
+          <p style="margin:14px 0 0 0;font-size:13px;line-height:1.6;color:#4A6572;">
+            Met vriendelijke groet,<br>
+            <strong>Team BigDogg</strong>
+          </p>
+        </td></tr>
+      </table>
+      <p style="margin:14px 0 0 0;font-size:11px;color:#9CA3AF;">Verzonden via BigDogg · bigdogg.nl</p>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
 def _notify_freelancer(quote: dict, decision: str) -> None:
     """Email the freelancer (quote author) when the client accepts/declines."""
     if not settings.resend_api_key:
@@ -693,35 +758,51 @@ def _notify_freelancer(quote: dict, decision: str) -> None:
             .select("business_name, full_name").eq("id", user_id).execute()
         profile = profile_result.data[0] if profile_result.data else {}
         sender_name = profile.get("business_name") or profile.get("full_name") or "BigDogg"
+        first_name = (
+            (profile.get("full_name") or "").strip().split()[0]
+            if (profile.get("full_name") or "").strip()
+            else sender_name.split()[0]
+        )
         client_name = quote.get("client_name") or "je klant"
         quote_number = quote.get("quote_number") or "?"
         total = quote.get("total_incl_btw") or 0
+        accepted = decision == "accepted"
 
-        if decision == "accepted":
+        if accepted:
             subject = f"{client_name} heeft offerte {quote_number} geaccepteerd"
-            body = (
-                f"Hoi {sender_name.split()[0]},\n\n"
+            text_body = (
+                f"Hoi {first_name},\n\n"
                 f"Goed nieuws — {client_name} heeft je offerte {quote_number} "
                 f"(€ {total}) geaccepteerd.\n\n"
                 f"Je kunt 'm nu in BigDogg met één tik omzetten naar een factuur.\n\n"
-                f"Met vriendelijke groet,\nBigDogg\n\n---\nbigdogg.nl"
+                f"Met vriendelijke groet,\nTeam BigDogg\n\n---\nbigdogg.nl"
             )
         else:
             subject = f"{client_name} heeft offerte {quote_number} afgewezen"
-            body = (
-                f"Hoi {sender_name.split()[0]},\n\n"
+            text_body = (
+                f"Hoi {first_name},\n\n"
                 f"{client_name} heeft je offerte {quote_number} "
                 f"(€ {total}) afgewezen.\n\n"
                 f"Geen zorgen — je kunt altijd een nieuwe offerte sturen.\n\n"
-                f"Met vriendelijke groet,\nBigDogg\n\n---\nbigdogg.nl"
+                f"Met vriendelijke groet,\nTeam BigDogg\n\n---\nbigdogg.nl"
             )
+
+        html_body = _freelancer_notify_html(
+            first_name=first_name,
+            sender_name=sender_name,
+            client_name=client_name,
+            quote_number=quote_number,
+            total=str(total),
+            accepted=accepted,
+        )
 
         resend.api_key = settings.resend_api_key
         resend.Emails.send({
             "from": "BigDogg <info@bigdogg.nl>",
             "to": [freelancer_email],
             "subject": subject,
-            "text": body,
+            "text": text_body,
+            "html": html_body,
         })
     except Exception as e:
         # Don't let a missing notification break the accept/decline flow.
