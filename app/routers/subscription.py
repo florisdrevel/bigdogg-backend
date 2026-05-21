@@ -233,16 +233,22 @@ async def get_subscription_status(request: Request):
             sub = result.data[0]
 
         now = datetime.now(timezone.utc)
-        trial_ends = datetime.fromisoformat(sub['trial_ends_at'].replace('Z', '+00:00'))
 
         if sub['status'] == 'trial':
+            # Only parse trial_ends_at on trial rows. Active/expired rows
+            # may have it as null after an upgrade, and `.replace()` on
+            # None throws AttributeError before the status branch returns.
+            trial_ends_raw = sub.get('trial_ends_at')
+            if not trial_ends_raw:
+                return {"status": "trial", "is_active": False, "days_left": 0}
+            trial_ends = datetime.fromisoformat(trial_ends_raw.replace('Z', '+00:00'))
             days_left = (trial_ends - now).days
             is_active = now < trial_ends
             return {
                 "status": "trial",
                 "is_active": is_active,
                 "days_left": max(0, days_left),
-                "trial_ends_at": sub['trial_ends_at'],
+                "trial_ends_at": trial_ends_raw,
             }
         elif sub['status'] == 'active':
             return {

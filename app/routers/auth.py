@@ -473,9 +473,19 @@ async def delete_account(request: Request):
         except Exception:
             pass
 
-        # 3. Delete all user data
-        for table in ["invoices", "expenses", "clients", "products", "user_profiles",
-                      "hours", "investments", "projects", "subscriptions"]:
+        # 3. Delete all user data. Cover every table that stores a user_id
+        # so nothing is left orphaned referencing a deleted auth user —
+        # especially accountant_invites (would otherwise leave valid
+        # portal tokens pointing at a deleted owner) and the various
+        # notification / device / bank-link tables.
+        for table in [
+            "invoices", "expenses", "clients", "products", "user_profiles",
+            "hours", "investments", "projects", "subscriptions",
+            "accountant_invites", "client_invites", "quotes",
+            "notifications", "user_devices", "fcm_device_tokens",
+            "bank_transactions", "bank_transaction_links",
+            "invoice_reminders", "referral_signups",
+        ]:
             try:
                 supabase.table(table).delete().eq("user_id", user_id).execute()
             except Exception:

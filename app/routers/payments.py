@@ -293,7 +293,9 @@ async def create_payment_link(invoice_id: str, request: Request):
                 "payment_link_id": invoice["payment_link_id"],
             }
 
-        total_cents = int(float(invoice["total_incl_btw"]) * 100)
+        # Round AFTER multiplying — float * 100 lands on 1998.999… for
+        # 19.99 etc, so a naive int() truncation drops a cent.
+        total_cents = int(round(float(invoice["total_incl_btw"]) * 100))
         invoice_number = invoice["invoice_number"]
         business_name = profile.get("business_name") or profile.get("full_name") or "BigDogg"
 

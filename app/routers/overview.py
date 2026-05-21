@@ -56,13 +56,13 @@ async def get_quarterly_overview(request: Request, year: int = None, quarter: in
             .lte("expense_date", end_date)\
             .execute()
 
-        revenue_ex_btw = sum(i["subtotal_ex_btw"] for i in invoices.data)
-        revenue_btw = sum(i["btw_amount"] for i in invoices.data)
-        paid_revenue = sum(i["total_incl_btw"] for i in invoices.data if i["status"] == "paid")
-        outstanding = sum(i["total_incl_btw"] for i in invoices.data if i["status"] in ["sent", "overdue"])
+        revenue_ex_btw = sum(float(i.get("subtotal_ex_btw") or 0) for i in invoices.data)
+        revenue_btw = sum(float(i.get("btw_amount") or 0) for i in invoices.data)
+        paid_revenue = sum(float(i.get("total_incl_btw") or 0) for i in invoices.data if i.get("status") == "paid")
+        outstanding = sum(float(i.get("total_incl_btw") or 0) for i in invoices.data if i.get("status") in ["sent", "overdue"])
 
-        expenses_ex_btw = sum(e["amount_ex_btw"] for e in expenses.data)
-        expenses_btw = sum(e["btw_amount"] for e in expenses.data)
+        expenses_ex_btw = sum(float(e.get("amount_ex_btw") or 0) for e in expenses.data)
+        expenses_btw = sum(float(e.get("btw_amount") or 0) for e in expenses.data)
 
         btw_to_pay = round(revenue_btw - expenses_btw, 2)
 
@@ -115,10 +115,10 @@ async def get_annual_overview(request: Request, year: int = None):
             .lte("expense_date", end_date)\
             .execute()
 
-        revenue_ex_btw = sum(i["subtotal_ex_btw"] for i in invoices.data)
-        revenue_btw = sum(i["btw_amount"] for i in invoices.data)
-        expenses_ex_btw = sum(e["amount_ex_btw"] for e in expenses.data)
-        expenses_btw = sum(e["btw_amount"] for e in expenses.data)
+        revenue_ex_btw = sum(float(i.get("subtotal_ex_btw") or 0) for i in invoices.data)
+        revenue_btw = sum(float(i.get("btw_amount") or 0) for i in invoices.data)
+        expenses_ex_btw = sum(float(e.get("amount_ex_btw") or 0) for e in expenses.data)
+        expenses_btw = sum(float(e.get("btw_amount") or 0) for e in expenses.data)
 
         quarters.append({
             "quarter": q,

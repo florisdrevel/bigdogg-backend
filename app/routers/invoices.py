@@ -156,7 +156,9 @@ async def create_invoice(invoice: InvoiceCreate, request: Request):
                 stripe_lib.api_key = settings.stripe_secret_key
 
                 business_name = profile.get("business_name") or profile.get("full_name") or "BigDogg"
-                total_cents = int(round(total, 2) * 100)
+                # Round AFTER multiplying by 100 — `int(round(19.99, 2) * 100)`
+                # returns 1998 because 19.99*100 evaluates to 1998.999… in float.
+                total_cents = int(round(total * 100))
 
                 product = stripe_lib.Product.create(
                     name=f"Factuur {invoice_number} — {business_name}",
