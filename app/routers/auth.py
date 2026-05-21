@@ -384,7 +384,6 @@ async def change_password(request: Request):
             user_data = supabase.auth.get_user(token)
             email = user_data.user.email if user_data.user else None
             if email:
-                from datetime import datetime
                 resend.Emails.send({
                     "from": "BigDogg <info@bigdogg.nl>",
                     "to": [email],
@@ -485,7 +484,6 @@ async def delete_account(request: Request):
         # 4. Send goodbye email (non-fatal)
         try:
             if user_email:
-                from datetime import datetime
                 resend.Emails.send({
                     "from": "BigDogg <info@bigdogg.nl>",
                     "to": [user_email],

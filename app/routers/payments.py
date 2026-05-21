@@ -1,3 +1,4 @@
+from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, HTTPException, Request
 from app.database import supabase
 from app.config import settings
@@ -59,7 +60,6 @@ def _mark_invoice_paid(invoice_id: str):
                         active=False,
                         stripe_account=account_id,
                     )
-                    print(f"Payment link {payment_link_id} deactivated")
                 except Exception as e:
                     print(f"Could not deactivate payment link: {e}")
 
@@ -158,7 +158,6 @@ def _mark_invoice_paid(invoice_id: str):
 </body>
 </html>""",
                     })
-                    print(f"Payment notification email sent to {email}")
                 # In-app notification for the bell-icon dropdown.
                 from app.routers.notifications import create_notification
                 create_notification(
@@ -170,8 +169,6 @@ def _mark_invoice_paid(invoice_id: str):
                 )
         except Exception as email_err:
             print(f"Could not send payment notification email: {email_err}")
-
-        print(f"Invoice {invoice_id} marked as paid")
     except Exception as e:
         print(f"Error marking invoice paid: {e}")
 
@@ -437,7 +434,6 @@ async def main_webhook(request: Request):
                 if payment_status == "paid":
                     _mark_invoice_paid(invoice_id)
             elif user_id:
-                from datetime import datetime, timezone, timedelta
                 ends_at = datetime.now(timezone.utc) + timedelta(days=30)
                 existing = supabase.table("subscriptions")\
                     .select("id")\
@@ -465,7 +461,6 @@ async def main_webhook(request: Request):
         elif event_type == "invoice.payment_succeeded":
             customer_id = data.get("customer")
             if customer_id:
-                from datetime import datetime, timezone, timedelta
                 ends_at = datetime.now(timezone.utc) + timedelta(days=30)
                 supabase.table("subscriptions")\
                     .update({

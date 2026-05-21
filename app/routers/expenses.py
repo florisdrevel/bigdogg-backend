@@ -88,7 +88,6 @@ async def parse_receipt(request: Request, file: UploadFile = File(...)):
     get_user_id(request)
     try:
         content = await file.read()
-        print(f"PARSE RECEIPT: filename={file.filename}, content_type={file.content_type}, size={len(content)} bytes")
 
         filename = file.filename or "receipt.jpg"
         ext = filename.lower().split(".")[-1]
@@ -173,7 +172,6 @@ Rules:
                     img.save(buf, format="JPEG", quality=75)
                     content = buf.getvalue()
                     media_type = "image/jpeg"
-                    print(f"RESIZED to {len(content)} bytes")
                 except Exception as resize_err:
                     print(f"RESIZE FAILED: {resize_err}")
 
@@ -198,7 +196,6 @@ Rules:
             )
 
         raw = message.content[0].text.strip()
-        print(f"CLAUDE RESPONSE: {raw}")
         parsed = _extract_json(raw)
 
         return {
@@ -257,7 +254,6 @@ async def upload_receipt(expense_id: str, request: Request, file: UploadFile = F
             )
 
         public_url = supabase.storage.from_("receipts").get_public_url(file_path)
-        print(f"UPLOAD RECEIPT: path={file_path}, url={public_url}")
 
         supabase.table("expenses")\
             .update({"receipt_url": public_url})\

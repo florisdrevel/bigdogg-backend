@@ -441,7 +441,6 @@ def _generate_quote_pdf(quote, lines, profile, client, sender_email=""):
     primary = _safe_hex(profile.get('invoice_primary_color'), TEAL)
     accent  = _safe_hex(profile.get('invoice_accent_color'),  GOLD)
 
-    title_style    = ParagraphStyle('Title', fontName='Helvetica-Bold', fontSize=28, textColor=primary, spaceAfter=2*mm)
     subtitle_style = ParagraphStyle('Subtitle', fontName='Helvetica', fontSize=10, textColor=TEXT_SECONDARY, spaceAfter=1*mm)
     label_style    = ParagraphStyle('Label', fontName='Helvetica-Bold', fontSize=8, textColor=TEXT_SECONDARY, spaceAfter=1*mm, leading=12)
     value_style    = ParagraphStyle('Value', fontName='Helvetica', fontSize=10, textColor=primary, spaceAfter=1*mm, leading=14)
@@ -684,7 +683,7 @@ def _esc_html(value) -> str:
     )
 
 
-def _freelancer_notify_html(*, first_name: str, sender_name: str,
+def _freelancer_notify_html(*, first_name: str,
                              client_name: str, quote_number: str,
                              total: str, accepted: bool) -> str:
     """Branded HTML body for the email to the freelancer when their
@@ -789,7 +788,6 @@ def _notify_freelancer(quote: dict, decision: str) -> None:
 
         html_body = _freelancer_notify_html(
             first_name=first_name,
-            sender_name=sender_name,
             client_name=client_name,
             quote_number=quote_number,
             total=str(total),

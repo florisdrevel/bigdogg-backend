@@ -189,8 +189,6 @@ async def create_invoice(invoice: InvoiceCreate, request: Request):
                     "payment_link": payment_link_url,
                     "payment_link_id": payment_link.id,
                 }).eq("id", invoice_id).execute()
-
-                print(f"Auto-generated payment link for invoice {invoice_number}")
         except Exception as e:
             print(f"Auto payment link failed (non-fatal): {e}")
 

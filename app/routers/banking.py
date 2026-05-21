@@ -1212,10 +1212,6 @@ async def set_transaction_link(tx_id: str, request: Request):
     return {"success": True, "link": {"type": link_type, "linked_id": linked_id, "auto": False}}
 
 
-class _CreateExpenseFromTx(dict):
-    pass
-
-
 @router.post("/transactions/{tx_id}/create-expense")
 async def create_expense_from_transaction(tx_id: str, request: Request):
     """Create an expense from a transaction and link it.

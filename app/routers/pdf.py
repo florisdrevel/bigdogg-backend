@@ -111,7 +111,6 @@ def _generate_pdf(invoice, lines, profile, client, sender_email=''):
 
     story = []
 
-    title_style = ParagraphStyle('Title', fontName='Helvetica-Bold', fontSize=28, textColor=primary, spaceAfter=2*mm)
     subtitle_style = ParagraphStyle('Subtitle', fontName='Helvetica', fontSize=10, textColor=TEXT_SECONDARY, spaceAfter=1*mm)
     label_style = ParagraphStyle('Label', fontName='Helvetica-Bold', fontSize=8, textColor=TEXT_SECONDARY, spaceAfter=1*mm, leading=12)
     value_style = ParagraphStyle('Value', fontName='Helvetica', fontSize=10, textColor=primary, spaceAfter=1*mm, leading=14)
@@ -138,7 +137,6 @@ def _generate_pdf(invoice, lines, profile, client, sender_email=''):
     if logo_url:
         try:
             from reportlab.platypus import Image as RLImage
-            import tempfile, os
             req = urllib.request.Request(logo_url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=5) as resp:
                 logo_bytes = resp.read()

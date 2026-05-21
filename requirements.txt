@@ -8,12 +8,10 @@ passlib[bcrypt]==1.7.4
 httpx==0.28.1
 pydantic-settings==2.13.1
 anthropic
-sendgrid
 python-multipart
 stripe
 reportlab
 resend
 Pillow
-fpdf2
 mt-940
 google-auth==2.43.0

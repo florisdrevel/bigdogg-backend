@@ -87,7 +87,6 @@ Use this exact format:
             system=system_prompt
         )
         response_text = message.content[0].text.strip()
-        print(f"RAW RESPONSE: {repr(response_text)}")
 
         if response_text.startswith("```"):
             response_text = response_text.split("```")[1]
@@ -102,10 +101,8 @@ Use this exact format:
             "original_prompt": data.prompt
         }
     except json.JSONDecodeError as e:
-        print(f"JSON ERROR: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Failed to parse AI response: {str(e)}")
     except Exception as e:
-        print(f"AI ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -177,7 +174,6 @@ Use this exact format:
             system=system_prompt
         )
         response_text = message.content[0].text.strip()
-        print(f"RAW QUOTE RESPONSE: {repr(response_text)}")
 
         if response_text.startswith("```"):
             response_text = response_text.split("```")[1]
@@ -192,8 +188,6 @@ Use this exact format:
             "original_prompt": data.prompt
         }
     except json.JSONDecodeError as e:
-        print(f"QUOTE JSON ERROR: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Failed to parse AI response: {str(e)}")
     except Exception as e:
-        print(f"AI QUOTE ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

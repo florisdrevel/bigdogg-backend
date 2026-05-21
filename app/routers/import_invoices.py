@@ -120,7 +120,6 @@ Rules:
     )
 
     raw = message.content[0].text.strip()
-    print(f"IMPORT PARSE RESPONSE: {raw}")
     return _extract_json(raw)
 
 
@@ -141,7 +140,6 @@ async def import_invoices(
         try:
             content = await file.read()
             content_type = file.content_type or "application/pdf"
-            print(f"IMPORTING: {filename}, type={content_type}, size={len(content)}")
 
             parsed = await _parse_invoice_file(content, filename, content_type)
 
@@ -277,7 +275,6 @@ async def import_expenses(
         try:
             content = await file.read()
             content_type = file.content_type or "application/pdf"
-            print(f"IMPORTING EXPENSE: {filename}, type={content_type}, size={len(content)}")
 
             parsed = await _parse_invoice_file(content, filename, content_type)
 
@@ -339,8 +336,3 @@ async def import_expenses(
         "total_failed": len(failed),
         "total_duplicates": len(duplicates),
     }
-
-
-# Removed: /file-imports endpoints. The "Imported files" UI section was
-# pulled — duplicates are blocked at insert time and users find imported
-# items via the normal Invoices/Expenses lists.
