@@ -19,10 +19,12 @@ class Settings:
     gmail_app_password: str = os.getenv("GMAIL_APP_PASSWORD", "")
     resend_api_key: str = os.getenv("RESEND_API_KEY", "")
     cron_secret: str = os.getenv("CRON_SECRET", "bigdogg-cron-2026")
-    tink_client_id: str = os.getenv("TINK_CLIENT_ID", "")
-    tink_client_secret: str = os.getenv("TINK_CLIENT_SECRET", "")
-    gocardless_secret_id: str = os.getenv("GOCARDLESS_SECRET_ID", "")
-    gocardless_secret_key: str = os.getenv("GOCARDLESS_SECRET_KEY", "")
+    # TrueLayer Open Banking. Sandbox is free and instant for testing;
+    # live access requires KYC (uploaded business docs in the Console).
+    # Flip `truelayer_use_sandbox` to "false" once live creds are issued.
+    truelayer_client_id: str = os.getenv("TRUELAYER_CLIENT_ID", "")
+    truelayer_client_secret: str = os.getenv("TRUELAYER_CLIENT_SECRET", "")
+    truelayer_use_sandbox: str = os.getenv("TRUELAYER_USE_SANDBOX", "true")
     # Origin used in share links (client invites + quote share). Defaults
     # to the Railway hostname so previews render without extra DNS work;
     # set to "https://link.bigdogg.nl" once the custom subdomain is live.

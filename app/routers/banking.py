@@ -1,43 +1,50 @@
 """
-Tink bank connection — Tink Money / Account Aggregation flow (NL only).
+TrueLayer Open Banking Data — NL bank connection + transaction sync.
+
+Why TrueLayer: polished hosted bank-picker UI, broad NL coverage
+(ING, Rabobank, ABN AMRO, SNS, ASN, Triodos, bunq, Knab, Revolut,
+N26, …) via the Open Banking PSD2 license. One-step "connect" flow
+where the user picks their bank inside TrueLayer's UI — no separate
+institutions endpoint needed on our side.
 
 End-to-end flow:
   1. App calls POST /api/v1/banking/connect.
-  2. Backend authenticates with Tink (client_credentials), creates a Tink
-     user for this BigDogg user if one doesn't exist yet, mints a one-time
-     authorization code, and returns a Tink Link URL.
-  3. App opens that URL. User picks their bank, authenticates via the
-     bank's hosted UI, and Tink redirects to:
-        GET /api/v1/banking/callback?code=...&credentials=...&state=...
-  4. Backend validates the state, exchanges the callback code for a
-     user access_token + refresh_token, stores them on user_profiles,
-     and 302s the user back into the app.
+  2. Backend mints a random state, stores it on user_profiles, and
+     returns the TrueLayer auth URL.
+  3. App opens that URL externally. User picks their bank, authenticates
+     via the bank's hosted UI, and TrueLayer redirects to:
+        GET /api/v1/banking/callback?code=...&state=...
+  4. Backend validates the state, exchanges the authorization code for
+     access + refresh tokens, stores them on user_profiles, and 302s the
+     user back into the app with `?bank=success`.
   5. App calls GET /api/v1/banking/transactions to pull recent activity.
-     Tokens are auto-refreshed via the refresh_token when they expire.
+     Tokens are auto-refreshed via the refresh_token when they expire
+     (TrueLayer access tokens last ~1 hour, refresh tokens last 90 days).
 
 Required environment variables (Railway):
-  - TINK_CLIENT_ID
-  - TINK_CLIENT_SECRET
+  - TRUELAYER_CLIENT_ID
+  - TRUELAYER_CLIENT_SECRET
+  - TRUELAYER_USE_SANDBOX ("true" / "false") — defaults to sandbox
 
-Required Supabase columns on user_profiles (see SQL block at the bottom
-of this file's deployment notes):
-  tink_user_id              text
-  tink_access_token         text
-  tink_refresh_token        text
-  tink_token_expires_at     timestamptz
-  tink_credentials_id       text
-  tink_connected_at         timestamptz
-  tink_link_state           text
+Required Supabase columns on user_profiles (see migrations/truelayer_columns.sql):
+  tl_access_token       text
+  tl_refresh_token      text
+  tl_token_expires_at   timestamptz
+  tl_connected_at       timestamptz
+  tl_link_state         text
+  tl_provider_id        text
 
-The redirect URI registered in the Tink console must be exactly:
+The redirect URI registered in the TrueLayer Console must be exactly:
   https://bigdogg-production.up.railway.app/api/v1/banking/callback
 """
 
 from fastapi import APIRouter, HTTPException, Request, Query, UploadFile, File
 from fastapi.responses import RedirectResponse
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Any
 from urllib.parse import urlencode
+import base64
+import json as _json
 import secrets
 import httpx
 
@@ -49,42 +56,44 @@ from app.services.bank_statement_parser import parse_statement
 
 router = APIRouter()
 
-# ─── Tink endpoints ─────────────────────────────────────────────
-TINK_API_BASE = "https://api.tink.com"
-TINK_LINK_BASE = "https://link.tink.com/1.0"
 
-TOKEN_ENDPOINT = f"{TINK_API_BASE}/api/v1/oauth/token"
-USER_CREATE_ENDPOINT = f"{TINK_API_BASE}/api/v1/user/create"
-AUTHORIZATION_GRANT_ENDPOINT = f"{TINK_API_BASE}/api/v1/oauth/authorization-grant"
-ACCOUNTS_ENDPOINT = f"{TINK_API_BASE}/data/v2/accounts"
-TRANSACTIONS_ENDPOINT = f"{TINK_API_BASE}/data/v2/transactions"
-TINK_LINK_CONNECT_URL = f"{TINK_LINK_BASE}/transactions/connect-accounts"
+# ─── TrueLayer endpoints ────────────────────────────────────────
+def _is_sandbox() -> bool:
+    return (settings.truelayer_use_sandbox or "").strip().lower() in (
+        "1", "true", "yes", "y",
+    )
+
+
+def _auth_base() -> str:
+    return ("https://auth.truelayer-sandbox.com" if _is_sandbox()
+            else "https://auth.truelayer.com")
+
+
+def _api_base() -> str:
+    return ("https://api.truelayer-sandbox.com" if _is_sandbox()
+            else "https://api.truelayer.com")
+
 
 REDIRECT_URI = "https://bigdogg-production.up.railway.app/api/v1/banking/callback"
 APP_RETURN_OK = "https://bigdogg.nl/#/dashboard?bank=success"
 APP_RETURN_ERR = "https://bigdogg.nl/#/dashboard?bank_error="
 
-MARKET = "NL"
-LOCALE = "en_US"
+# TrueLayer scopes for AIS (read-only account data).
+# `offline_access` is what gives us a refresh_token.
+SCOPES = "info accounts balance transactions offline_access"
 
-# Scopes the user grants when connecting their bank. Tink Link's
-# connect-accounts flow needs the WRITE scopes (credentials:write,
-# credentials:refresh, providers:read, authorization:read) to actually
-# create credentials — read-only scopes triggered the Link UI error
-# REQUEST_FAILED_FETCH_EXISTING_USER on freshly-created users.
-USER_SCOPES = (
-    "transactions:read,"
-    "accounts:read,"
-    "credentials:read,"
-    "credentials:write,"
-    "credentials:refresh,"
-    "providers:read,"
-    "authorization:read,"
-    "user:read"
-)
 
-# Scopes used when authenticating the app itself (client_credentials).
-APP_SCOPES = "user:create,user:read,authorization:grant"
+def _provider_filter() -> str:
+    """Which TrueLayer providers to surface in the hosted picker.
+
+    Sandbox includes `uk-cs-mock` so we can test against TrueLayer's mock
+    bank without real credentials. `nl-ob-all` is the catch-all that
+    enables every NL Open Banking provider TrueLayer supports.
+    """
+    if _is_sandbox():
+        return "uk-cs-mock,uk-ob-all,nl-ob-all"
+    return "nl-ob-all"
+
 
 HTTP_TIMEOUT = 20.0
 
@@ -103,306 +112,220 @@ def get_user_id(request: Request) -> str:
 
 
 def _ensure_credentials_configured() -> None:
-    if not settings.tink_client_id or not settings.tink_client_secret:
+    if not settings.truelayer_client_id or not settings.truelayer_client_secret:
         raise HTTPException(
             status_code=500,
-            detail="Tink credentials missing (TINK_CLIENT_ID / TINK_CLIENT_SECRET).",
+            detail="TrueLayer credentials missing (TRUELAYER_CLIENT_ID / TRUELAYER_CLIENT_SECRET).",
         )
 
 
-# ─── App-level (client_credentials) authentication ──────────────
-async def _get_app_access_token(scope: str = APP_SCOPES) -> str:
+# ─── Token management ──────────────────────────────────────────
+def _build_auth_url(state: str) -> str:
+    """Construct the TrueLayer hosted-auth URL the user opens in browser.
+
+    TrueLayer's hosted UI shows a list of supported providers (banks),
+    handles all the PSD2 consent screens, and finally 302s back to our
+    REDIRECT_URI with `?code=...&state=...`.
+    """
+    params = {
+        "response_type": "code",
+        "client_id": settings.truelayer_client_id,
+        "scope": SCOPES,
+        "redirect_uri": REDIRECT_URI,
+        "providers": _provider_filter(),
+        "state": state,
+    }
+    return f"{_auth_base()}/?" + urlencode(params)
+
+
+async def _exchange_code(code: str) -> dict:
+    """Authorization code → { access_token, refresh_token, expires_in }."""
     _ensure_credentials_configured()
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         r = await client.post(
-            TOKEN_ENDPOINT,
+            f"{_auth_base()}/connect/token",
             data={
-                "client_id": settings.tink_client_id,
-                "client_secret": settings.tink_client_secret,
-                "grant_type": "client_credentials",
-                "scope": scope,
+                "grant_type": "authorization_code",
+                "client_id": settings.truelayer_client_id,
+                "client_secret": settings.truelayer_client_secret,
+                "redirect_uri": REDIRECT_URI,
+                "code": code,
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
     if r.status_code >= 400:
-        print(f"[tink] app token error: {r.status_code} {r.text}")
-        raise HTTPException(status_code=502, detail="Tink app authentication failed")
-    return r.json()["access_token"]
+        print(f"[truelayer] code exchange failed: {r.status_code} {r.text}")
+        raise HTTPException(status_code=502, detail="TrueLayer code exchange failed")
+    return r.json()
 
 
-async def _create_tink_user(bigdogg_user_id: str) -> str:
-    """Create a fresh Tink user, persist its id, return it."""
-    app_token = await _get_app_access_token()
+async def _refresh_user_token(refresh_token: str) -> dict:
+    """refresh_token → fresh { access_token, refresh_token, expires_in }."""
+    _ensure_credentials_configured()
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         r = await client.post(
-            USER_CREATE_ENDPOINT,
-            json={
-                "market": MARKET,
-                "locale": LOCALE,
-                "external_user_id": bigdogg_user_id,
-            },
-            headers={
-                "Authorization": f"Bearer {app_token}",
-                "Content-Type": "application/json",
-            },
-        )
-    if r.status_code >= 400:
-        print(f"[tink] user create error: {r.status_code} {r.text}")
-        raise HTTPException(status_code=502, detail="Tink user creation failed")
-    tink_user_id = r.json()["user_id"]
-
-    profile_result = supabase.table("user_profiles")\
-        .select("id").eq("id", bigdogg_user_id).execute()
-    if profile_result.data:
-        supabase.table("user_profiles")\
-            .update({"tink_user_id": tink_user_id})\
-            .eq("id", bigdogg_user_id).execute()
-    else:
-        supabase.table("user_profiles")\
-            .insert({"id": bigdogg_user_id, "tink_user_id": tink_user_id})\
-            .execute()
-    return tink_user_id
-
-
-async def _get_or_create_tink_user(bigdogg_user_id: str) -> str:
-    """Return the persistent Tink user_id, creating it once if needed."""
-    profile_result = supabase.table("user_profiles")\
-        .select("tink_user_id")\
-        .eq("id", bigdogg_user_id)\
-        .execute()
-    profile = profile_result.data[0] if profile_result.data else None
-    if profile and profile.get("tink_user_id"):
-        return profile["tink_user_id"]
-    return await _create_tink_user(bigdogg_user_id)
-
-
-async def _generate_authorization_code(tink_user_id: str, hint: str) -> Tuple[Optional[str], Optional[dict]]:
-    """Mint a one-time authorization code that Tink Link will consume.
-
-    Returns (code, error_payload). On success, error_payload is None.
-    On failure, returns (None, parsed JSON or {"_status": code, "_text": text}).
-
-    Uses /authorization-grant — the same-app permanent users flow Tink Link's
-    connect-accounts URL expects.
-    """
-    app_token = await _get_app_access_token()
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        r = await client.post(
-            AUTHORIZATION_GRANT_ENDPOINT,
+            f"{_auth_base()}/connect/token",
             data={
-                "user_id": tink_user_id,
-                "id_hint": hint,
-                "scope": USER_SCOPES,
+                "grant_type": "refresh_token",
+                "client_id": settings.truelayer_client_id,
+                "client_secret": settings.truelayer_client_secret,
+                "refresh_token": refresh_token,
             },
-            headers={
-                "Authorization": f"Bearer {app_token}",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
     if r.status_code >= 400:
-        print(f"[tink] auth-grant error: {r.status_code} {r.text}")
-        try:
-            err = r.json()
-        except Exception:
-            err = {"_status": r.status_code, "_text": r.text}
-        err.setdefault("_status", r.status_code)
-        return None, err
-    return r.json()["code"], None
+        print(f"[truelayer] refresh failed: {r.status_code} {r.text}")
+        raise HTTPException(status_code=401, detail="TrueLayer refresh failed")
+    return r.json()
 
 
-# ─── User access-token management ───────────────────────────────
 async def _get_user_access_token(bigdogg_user_id: str) -> str:
-    """Return a fresh user access_token.
+    """Fetch the user's TrueLayer access token, refreshing if needed.
 
-    The one-time-user flow returns an access_token but NO refresh_token
-    (there is no persistent user to refresh against). The permanent-user
-    flow returns both. We support both: if a refresh_token is present
-    and the access_token has expired we refresh; otherwise we use the
-    stored access_token directly. If no access_token at all, the user
-    has not connected a bank yet (or needs to reconnect).
+    Refresh kicks in when the cached token has under 60 seconds of life
+    left, so a slow-running request that started near the boundary won't
+    end up sending an expired token.
     """
     profile_result = supabase.table("user_profiles")\
-        .select("tink_access_token, tink_refresh_token, tink_token_expires_at")\
-        .eq("id", bigdogg_user_id)\
-        .execute()
+        .select("tl_access_token, tl_refresh_token, tl_token_expires_at")\
+        .eq("id", bigdogg_user_id).execute()
     if not profile_result.data:
         raise HTTPException(status_code=404, detail="No bank connection")
     profile = profile_result.data[0]
-    access_token = profile.get("tink_access_token")
-    refresh_token = profile.get("tink_refresh_token")
-    expires_at_raw = profile.get("tink_token_expires_at")
+    access_token = profile.get("tl_access_token")
+    refresh = profile.get("tl_refresh_token")
+    expires_at_raw = profile.get("tl_token_expires_at")
     if not access_token:
         raise HTTPException(status_code=404, detail="No bank connection")
 
-    expired = False
+    needs_refresh = False
     if expires_at_raw:
         try:
-            expires_at = datetime.fromisoformat(
-                expires_at_raw.replace("Z", "+00:00")
-            )
-            expired = datetime.now(timezone.utc) >= expires_at
+            exp = datetime.fromisoformat(expires_at_raw.replace("Z", "+00:00"))
+            if (exp - datetime.now(timezone.utc)).total_seconds() < 60:
+                needs_refresh = True
         except Exception:
-            expired = False  # if we can't parse, trust the token until Tink rejects it
+            needs_refresh = True
+    else:
+        needs_refresh = True
 
-    if not expired or not refresh_token:
-        # Either still valid, OR no refresh_token to swap (one-time flow):
-        # return whatever we have and let the upstream call surface a 401
-        # if Tink has actually expired the token server-side.
-        return access_token
+    if needs_refresh and refresh:
+        try:
+            tokens = await _refresh_user_token(refresh)
+        except HTTPException:
+            # Refresh chain is broken — surface to caller, which will
+            # bubble up to the frontend as "reconnect needed".
+            raise
+        access_token = tokens["access_token"]
+        new_refresh = tokens.get("refresh_token", refresh)
+        expires_in = int(tokens.get("expires_in", 3600))
+        new_expires = datetime.now(timezone.utc) + timedelta(seconds=expires_in - 30)
+        supabase.table("user_profiles").update({
+            "tl_access_token": access_token,
+            "tl_refresh_token": new_refresh,
+            "tl_token_expires_at": new_expires.isoformat(),
+        }).eq("id", bigdogg_user_id).execute()
 
-    # Have a refresh_token AND token is expired: refresh.
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        r = await client.post(
-            TOKEN_ENDPOINT,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "client_id": settings.tink_client_id,
-                "client_secret": settings.tink_client_secret,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-    if r.status_code >= 400:
-        print(f"[tink] refresh error: {r.status_code} {r.text}")
-        # Refresh failed: fall back to the stored access_token. Tink may
-        # have rotated it on their side; the next API call will surface
-        # the actual error to the user.
-        return access_token
-
-    payload = r.json()
-    new_access = payload.get("access_token") or access_token
-    new_refresh = payload.get("refresh_token") or refresh_token
-    expires_in = int(payload.get("expires_in") or 3600)
-    new_expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in - 30)
-
-    supabase.table("user_profiles")\
-        .update({
-            "tink_access_token": new_access,
-            "tink_refresh_token": new_refresh,
-            "tink_token_expires_at": new_expires_at.isoformat(),
-        })\
-        .eq("id", bigdogg_user_id)\
-        .execute()
-    return new_access
+    return access_token
 
 
-# ─── Endpoints ─────────────────────────────────────────────────
+# ─── Connect / callback ────────────────────────────────────────
 @router.post("/connect")
 async def connect_bank(request: Request):
-    """Returns a Tink Link URL the app should open in a browser/webview.
+    """Mint a fresh TrueLayer auth URL and return it to the caller.
 
-    Uses Tink's one-time-user flow (no client-side user/create or
-    authorization-grant). This is the same shape Tink Console's
-    "Create a URL" feature generates, and avoids the Tink Link UI
-    error REQUEST_FAILED_FETCH_EXISTING_USER which fires when the
-    permanent-user flow points at a freshly-minted user with no
-    attached credentials yet.
-
-    Tink Link will spin up a temporary user on its side, run the
-    bank-picker → bank-login → consent flow, then redirect back to
-    /banking/callback with `code` + `credentials` + our `state`. The
-    callback exchanges `code` for a long-lived access/refresh token
-    pair, so subsequent transaction fetches still work without
-    re-auth — the only thing we lose vs. the permanent-user flow is
-    the ability to read other previously-created credentials in one
-    Link UI session, which we never used anyway.
+    The app should open this URL in an external browser (mobile) or a
+    new tab (web). TrueLayer's hosted UI handles bank picker + PSD2
+    consent flow; on completion, TrueLayer redirects to /callback.
     """
     bigdogg_user_id = get_user_id(request)
     _ensure_credentials_configured()
 
-    state = secrets.token_urlsafe(32)
-    supabase.table("user_profiles")\
-        .update({"tink_link_state": state})\
-        .eq("id", bigdogg_user_id)\
-        .execute()
+    state = secrets.token_urlsafe(24)
 
-    qs = urlencode({
-        "client_id": settings.tink_client_id,
-        "redirect_uri": REDIRECT_URI,
-        "market": MARKET,
-        "locale": LOCALE,
-        "state": state,
-    })
-    link_url = f"{TINK_LINK_CONNECT_URL}/?{qs}"
-    cid = settings.tink_client_id or ""
-    cid_masked = f"{cid[:4]}...{cid[-4:]}" if len(cid) >= 8 else "<missing>"
-    print(
-        f"[tink] connect (one-time flow): client_id={cid_masked} "
-        f"redirect_uri={REDIRECT_URI} market={MARKET}"
-    )
-    return {"link_url": link_url}
+    profile_check = supabase.table("user_profiles")\
+        .select("id").eq("id", bigdogg_user_id).execute()
+    if profile_check.data:
+        supabase.table("user_profiles").update({
+            "tl_link_state": state,
+        }).eq("id", bigdogg_user_id).execute()
+    else:
+        supabase.table("user_profiles").insert({
+            "id": bigdogg_user_id,
+            "tl_link_state": state,
+        }).execute()
+
+    return {"link_url": _build_auth_url(state)}
 
 
 @router.get("/callback")
 async def banking_callback(
     code: Optional[str] = Query(None),
-    credentials_id: Optional[str] = Query(None),
     state: Optional[str] = Query(None),
     error: Optional[str] = Query(None),
-    error_message: Optional[str] = Query(None),
+    error_description: Optional[str] = Query(None),
 ):
-    """Tink redirects here after the user finishes (or cancels) the flow."""
+    """TrueLayer redirects here after the user finishes the bank flow.
+
+    On success we exchange the authorization code for tokens, persist
+    them, and redirect back into the app. Errors are funneled through
+    `?bank_error=<reason>` so the dashboard can surface them.
+    """
     if error or not code or not state:
-        msg = error_message or error or "missing_code"
+        msg = error_description or error or "missing_code"
         return RedirectResponse(url=f"{APP_RETURN_ERR}{msg}")
 
     state_lookup = supabase.table("user_profiles")\
-        .select("id")\
-        .eq("tink_link_state", state)\
-        .limit(1)\
-        .execute()
+        .select("id, tl_link_state")\
+        .eq("tl_link_state", state)\
+        .limit(1).execute()
     if not state_lookup.data:
         return RedirectResponse(url=f"{APP_RETURN_ERR}invalid_state")
     bigdogg_user_id = state_lookup.data[0]["id"]
 
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        r = await client.post(
-            TOKEN_ENDPOINT,
-            data={
-                "code": code,
-                "client_id": settings.tink_client_id,
-                "client_secret": settings.tink_client_secret,
-                "grant_type": "authorization_code",
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-    if r.status_code >= 400:
-        print(f"[tink] code-exchange error: {r.status_code} {r.text}")
-        return RedirectResponse(url=f"{APP_RETURN_ERR}exchange_failed")
+    try:
+        tokens = await _exchange_code(code)
+    except HTTPException:
+        return RedirectResponse(url=f"{APP_RETURN_ERR}token_exchange_failed")
 
-    payload = r.json()
-    access_token = payload.get("access_token")
-    refresh_token = payload.get("refresh_token")
-    expires_in = int(payload.get("expires_in") or 3600)
+    expires_in = int(tokens.get("expires_in", 3600))
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in - 30)
 
-    supabase.table("user_profiles")\
-        .update({
-            "tink_access_token": access_token,
-            "tink_refresh_token": refresh_token,
-            "tink_token_expires_at": expires_at.isoformat(),
-            "tink_credentials_id": credentials_id,
-            "tink_connected_at": datetime.now(timezone.utc).isoformat(),
-            "tink_link_state": None,
-        })\
-        .eq("id", bigdogg_user_id)\
-        .execute()
+    # Best-effort: ask /data/v1/me which provider the user just connected
+    # to, so we can show "Bank: ING" on the Settings card. Non-fatal.
+    provider_id: Optional[str] = None
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            r = await client.get(
+                f"{_api_base()}/data/v1/me",
+                headers={"Authorization": f"Bearer {tokens['access_token']}"},
+            )
+        if r.status_code == 200:
+            me_results = (r.json() or {}).get("results", [])
+            if me_results:
+                provider_id = ((me_results[0] or {}).get("provider") or {}).get("provider_id")
+    except Exception as e:
+        print(f"[truelayer] /me lookup failed (non-fatal): {e}")
 
+    supabase.table("user_profiles").update({
+        "tl_access_token": tokens["access_token"],
+        "tl_refresh_token": tokens.get("refresh_token"),
+        "tl_token_expires_at": expires_at.isoformat(),
+        "tl_connected_at": datetime.now(timezone.utc).isoformat(),
+        "tl_link_state": None,
+        "tl_provider_id": provider_id,
+    }).eq("id", bigdogg_user_id).execute()
+
+    print(f"[truelayer] connected: user={bigdogg_user_id[:8]}… provider={provider_id}")
     return RedirectResponse(url=APP_RETURN_OK)
 
 
-# ─── Auto-matching: tx → invoice / expense ─────────────────────
+# ─── Matcher constants ─────────────────────────────────────────
 # Confidence thresholds. Above AUTO we mark the link without asking;
 # between SUGGEST and AUTO we attach the match as a hint the user can
 # confirm in one tap. Below SUGGEST we show nothing.
 MATCH_AUTO_SCORE = 80
 MATCH_SUGGEST_SCORE = 55
-
-# Days after which a yellow "suggestion" badge auto-decays. The match
-# row is deleted on the next /transactions read so the matcher gets a
-# fresh shot at it (which may simply not surface anything if the
-# original signals are gone).
-SUGGESTION_TTL_DAYS = 7
 
 # Stripe fee model used to predict the amount that arrives in the
 # freelancer's bank account when a customer pays a BigDogg invoice via
@@ -417,6 +340,7 @@ STRIPE_FEE_VARIANTS = [
 ]
 
 
+# ─── Matcher ───────────────────────────────────────────────────
 def _amount_close(a: float, b: float, tol: float = 0.01) -> bool:
     return abs(a - b) <= tol
 
@@ -628,6 +552,7 @@ def _format_amount_eur(amount: float) -> str:
     return f"€ {abs(amount):.2f}".replace(".", ",")
 
 
+# ─── Link persistence + hydration ─────────────────────────────
 def _enrich_transaction_with_link(
     tx: dict,
     existing_links: dict,
@@ -752,152 +677,6 @@ def _enrich_transaction_with_link(
     return tx
 
 
-def schedule_reconcile(user_id: str) -> None:
-    """Fire-and-forget kickoff for the matcher. Safe to call from any
-    request handler — never raises, never blocks."""
-    import asyncio
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(reconcile_user_transactions(user_id))
-    except RuntimeError:
-        # No running loop (e.g. sync context) — drop the request.
-        # Reconcile will run next time /banking/transactions is called.
-        pass
-    except Exception as e:
-        print(f"[banking] reconcile schedule failed (non-fatal): {e}")
-
-
-async def reconcile_user_transactions(user_id: str) -> None:
-    """Re-run the matcher across the user's recent bank transactions.
-
-    Called as a FastAPI background task whenever the user creates an
-    invoice, expense, or investment — so a freshly-added entry that
-    happens to correspond to an existing bank transaction gets linked
-    immediately (and the user gets a notification) instead of waiting
-    until they next open the Transactions screen.
-
-    Silent on every kind of failure. Reconciliation must never break
-    the upstream POST that triggered it.
-    """
-    try:
-        # Skip silently if no bank connection / token died (sandbox).
-        profile_result = supabase.table("user_profiles")\
-            .select("tink_access_token, tink_token_expires_at, tink_refresh_token")\
-            .eq("id", user_id).execute()
-        if not profile_result.data:
-            return
-        profile = profile_result.data[0]
-        if not profile.get("tink_access_token"):
-            return
-        # Sanity-check expiry for one-time-flow tokens.
-        expires_at_raw = profile.get("tink_token_expires_at")
-        if expires_at_raw and not profile.get("tink_refresh_token"):
-            try:
-                exp = datetime.fromisoformat(expires_at_raw.replace("Z", "+00:00"))
-                if datetime.now(timezone.utc) >= exp:
-                    return
-            except Exception:
-                pass
-
-        access_token = await _get_user_access_token(user_id)
-
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.get(
-                TRANSACTIONS_ENDPOINT,
-                params={"pageSize": 100},
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-        if r.status_code >= 400:
-            print(f"[banking] reconcile fetch failed: {r.status_code}")
-            return
-
-        items = (r.json().get("transactions")) or []
-        normalized = [_normalize_tink_transaction(t) for t in items]
-
-        invoices = (supabase.table("invoices").select(
-            "id, invoice_number, total_incl_btw, status, client_name, "
-            "client_company, invoice_date").eq("user_id", user_id).execute().data) or []
-        expenses = (supabase.table("expenses").select(
-            "id, description, amount_ex_btw, btw_amount, expense_date"
-        ).eq("user_id", user_id).execute().data) or []
-        investments = (supabase.table("investments").select(
-            "id, description, amount, purchase_date, category"
-        ).eq("user_id", user_id).execute().data) or []
-
-        tx_ids = [t.get("id") for t in normalized if t.get("id")]
-        existing_links: dict = {}
-        if tx_ids:
-            try:
-                links_result = supabase.table("bank_transaction_links")\
-                    .select("tx_id, link_type, linked_id, auto")\
-                    .eq("user_id", user_id)\
-                    .in_("tx_id", tx_ids).execute()
-                for row in (links_result.data or []):
-                    existing_links[row["tx_id"]] = row
-            except Exception as e:
-                print(f"[banking] reconcile link lookup failed: {e}")
-
-        # Only run the matcher on transactions that aren't already
-        # linked. Auto-linking + notifications happen inside
-        # _enrich_transaction_with_link as a side effect.
-        new_matches = 0
-        for tx in normalized:
-            if existing_links.get(tx.get("id")):
-                continue
-            before = tx.get("link")
-            _enrich_transaction_with_link(
-                tx, existing_links, invoices, expenses, investments, user_id,
-            )
-            if tx.get("link") and tx.get("link") != before:
-                new_matches += 1
-        print(f"[banking] reconcile: user={user_id[:8]}… "
-              f"checked={len(normalized)} new_matches={new_matches}")
-    except Exception as e:
-        print(f"[banking] reconcile error (non-fatal): {e}")
-
-
-def _notify_match(
-    user_id: str,
-    *,
-    kind: str,                 # "auto" or "suggest"
-    title: str,
-    body: str,
-    link_type: str,            # "invoice" | "expense" | "investment"
-    linked_id: str,
-    tx_id: str,
-) -> None:
-    """In-app notification surfaced via the existing bell icon.
-
-    Two flavours, sharing the same plumbing so the frontend can route on
-    `notification_type`:
-
-      bank_auto_link  — high-confidence link already applied; user can
-                        revert by tapping into the transaction.
-      bank_suggest    — medium-confidence guess waiting for confirmation;
-                        tapping the notification opens the transaction
-                        with the yellow "Klopt? / Anders" sheet ready.
-
-    Stays silent on failure — a notification must never break a
-    /transactions fetch.
-    """
-    notification_type = "bank_auto_link" if kind == "auto" else "bank_suggest"
-    try:
-        create_notification(
-            user_id=user_id,
-            notification_type=notification_type,
-            title=title,
-            body=body,
-            data={
-                "link_type": link_type,
-                "linked_id": linked_id,
-                "tx_id": tx_id,
-                "kind": kind,
-            },
-        )
-    except Exception as e:
-        print(f"[banking] notification skipped: {e}")
-
-
 def _hydrate_link(link_row: dict, invoices: list, expenses: list, investments: list) -> dict:
     """Convert a bank_transaction_links row into the shape the frontend
     wants, looking up the linked record's display label."""
@@ -949,161 +728,304 @@ def _mark_invoice_paid(invoice_id: str) -> None:
         print(f"[banking] invoice paid-mark failed (non-fatal): {e}")
 
 
-def _normalize_tink_transaction(tx: dict) -> dict:
-    """Flatten Tink's verbose transaction shape into the fields BigDogg
-    cares about. Returns positive amounts for incoming and negative for
-    outgoing, in the natural decimal form (so 12.34 not "1234"/"100")."""
-    amount_obj = tx.get("amount") or {}
-    value_obj = amount_obj.get("value") or {}
-    try:
-        unscaled = int(value_obj.get("unscaledValue") or "0")
-        scale = int(value_obj.get("scale") or "0")
-        decimal_amount = unscaled / (10 ** scale) if scale else float(unscaled)
-    except Exception:
-        decimal_amount = 0.0
+def _notify_match(
+    user_id: str,
+    *,
+    kind: str,                 # "auto" or "suggest"
+    title: str,
+    body: str,
+    link_type: str,            # "invoice" | "expense" | "investment"
+    linked_id: str,
+    tx_id: str,
+) -> None:
+    """In-app notification surfaced via the existing bell icon.
 
-    descriptions = tx.get("descriptions") or {}
-    dates = tx.get("dates") or {}
-    merchant_info = tx.get("merchantInformation") or {}
+    Two flavours, sharing the same plumbing so the frontend can route on
+    `notification_type`:
+
+      bank_auto_link  — high-confidence link already applied; user can
+                        revert by tapping into the transaction.
+      bank_suggest    — medium-confidence guess waiting for confirmation;
+                        tapping the notification opens the transaction
+                        with the yellow "Klopt? / Anders" sheet ready.
+
+    Stays silent on failure — a notification must never break a
+    /transactions fetch.
+    """
+    notification_type = "bank_auto_link" if kind == "auto" else "bank_suggest"
+    try:
+        create_notification(
+            user_id=user_id,
+            notification_type=notification_type,
+            title=title,
+            body=body,
+            data={
+                "link_type": link_type,
+                "linked_id": linked_id,
+                "tx_id": tx_id,
+                "kind": kind,
+            },
+        )
+    except Exception as e:
+        print(f"[banking] notification skipped: {e}")
+
+
+# ─── TrueLayer transaction normalization ──────────────────────
+def _normalize_truelayer_transaction(tx: dict, account_id: str) -> dict:
+    """Flatten TrueLayer's transaction shape to the internal fields the
+    matcher expects: positive amount for incoming, negative for outgoing,
+    natural decimal form, lowercase-friendly strings.
+
+    TrueLayer schema reference:
+      https://docs.truelayer.com/reference/datav1transactions
+    """
+    raw_amount = float(tx.get("amount") or 0)
+    tx_type = (tx.get("transaction_type") or "").upper()
+    if tx_type == "DEBIT":
+        amount = -abs(raw_amount)
+    elif tx_type == "CREDIT":
+        amount = abs(raw_amount)
+    else:
+        # Fallback to whatever TL gave us (some providers omit type).
+        amount = raw_amount
+
+    timestamp = tx.get("timestamp") or ""
+    tx_date = timestamp[:10] if timestamp else ""
 
     return {
-        "id": tx.get("id"),
-        "date": dates.get("booked") or dates.get("value"),
-        "description": descriptions.get("display") or descriptions.get("original") or "",
-        "merchant": merchant_info.get("merchantName"),
-        "amount": decimal_amount,
-        "currency": amount_obj.get("currencyCode") or "EUR",
-        "type": (tx.get("types") or {}).get("type"),
-        "status": tx.get("status"),
+        "id": tx.get("transaction_id") or "",
+        "amount": amount,
+        "currency": tx.get("currency") or "EUR",
+        "description": tx.get("description") or "",
+        "merchant": tx.get("merchant_name") or "",
+        "date": tx_date,
+        "account_id": account_id,
+        "raw": tx,
     }
 
 
+async def _fetch_truelayer_transactions(
+    access_token: str,
+) -> List[dict]:
+    """Aggregate booked transactions across every account on this
+    connection. Best-effort — failures on one account don't abort the
+    others. Returns the internal-shape list (already normalized)."""
+    aggregated: List[dict] = []
+
+    # 1. List accounts
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            r = await client.get(
+                f"{_api_base()}/data/v1/accounts",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+        if r.status_code != 200:
+            print(f"[truelayer] /accounts failed: {r.status_code} {r.text}")
+            return []
+        accounts = (r.json() or {}).get("results", []) or []
+    except Exception as e:
+        print(f"[truelayer] /accounts failed: {e}")
+        return []
+
+    # 2. For each account, pull transactions
+    for acc in accounts:
+        account_id = acc.get("account_id")
+        if not account_id:
+            continue
+        try:
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+                r = await client.get(
+                    f"{_api_base()}/data/v1/accounts/{account_id}/transactions",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+            if r.status_code != 200:
+                print(f"[truelayer] /transactions for {account_id} failed: {r.status_code}")
+                continue
+            results = (r.json() or {}).get("results", []) or []
+            for tx in results:
+                aggregated.append(_normalize_truelayer_transaction(tx, account_id))
+        except Exception as e:
+            print(f"[truelayer] transactions fetch for {account_id} failed: {e}")
+            continue
+
+    aggregated.sort(key=lambda t: t.get("date") or "", reverse=True)
+    return aggregated
+
+
+def _cache_transactions(user_id: str, normalized: List[dict]) -> None:
+    """Upsert the just-fetched live transactions into the bank_transactions
+    cache. The unique index on (user_id, external_id) makes repeated calls
+    a no-op. Source is tagged `truelayer` so the file-import (MT940/CAMT)
+    rows remain distinguishable."""
+    if not normalized:
+        return
+    rows = []
+    for tx in normalized:
+        if not tx.get("id"):
+            continue
+        rows.append({
+            "user_id": user_id,
+            "external_id": tx["id"],
+            "source": "truelayer",
+            "date": tx.get("date") or None,
+            "amount": tx.get("amount"),
+            "currency": tx.get("currency") or "EUR",
+            "description": tx.get("description") or "",
+            "merchant": tx.get("merchant") or "",
+            "account_iban": None,
+            "raw": tx.get("raw"),
+        })
+    if not rows:
+        return
+    try:
+        supabase.table("bank_transactions").upsert(
+            rows, on_conflict="user_id,external_id"
+        ).execute()
+    except Exception as e:
+        print(f"[truelayer] cache upsert failed: {e}")
+
+
+# ─── Reconcile (background) ────────────────────────────────────
+def schedule_reconcile(user_id: str) -> None:
+    """Fire-and-forget kickoff for the matcher. Safe to call from any
+    request handler — never raises, never blocks."""
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(reconcile_user_transactions(user_id))
+    except RuntimeError:
+        # No running loop (e.g. sync context) — drop the request.
+        # Reconcile will run next time /banking/transactions is called.
+        pass
+    except Exception as e:
+        print(f"[banking] reconcile schedule failed (non-fatal): {e}")
+
+
+async def reconcile_user_transactions(user_id: str) -> None:
+    """Re-run the matcher across the user's recent bank transactions.
+
+    Called as a FastAPI background task whenever the user creates an
+    invoice, expense, or investment — so a freshly-added entry that
+    happens to correspond to an existing bank transaction gets linked
+    immediately (and the user gets a notification) instead of waiting
+    until they next open the Transactions screen.
+
+    Silent on every kind of failure. Reconciliation must never break
+    the upstream POST that triggered it.
+    """
+    try:
+        # Skip silently if no bank connection.
+        profile_result = supabase.table("user_profiles")\
+            .select("tl_access_token, tl_refresh_token, tl_token_expires_at")\
+            .eq("id", user_id).execute()
+        if not profile_result.data:
+            return
+        profile = profile_result.data[0]
+        if not profile.get("tl_access_token"):
+            return
+
+        try:
+            access_token = await _get_user_access_token(user_id)
+        except HTTPException:
+            return  # refresh chain broken — surface on next user-driven fetch
+        except Exception as e:
+            print(f"[banking] reconcile token fetch failed: {e}")
+            return
+
+        normalized = await _fetch_truelayer_transactions(access_token)
+        if not normalized:
+            return
+        _cache_transactions(user_id, normalized)
+
+        invoices = (supabase.table("invoices").select(
+            "id, invoice_number, total_incl_btw, status, client_name, "
+            "client_company, invoice_date").eq("user_id", user_id).execute().data) or []
+        expenses = (supabase.table("expenses").select(
+            "id, description, amount_ex_btw, btw_amount, expense_date"
+        ).eq("user_id", user_id).execute().data) or []
+        investments = (supabase.table("investments").select(
+            "id, description, amount, purchase_date, category"
+        ).eq("user_id", user_id).execute().data) or []
+
+        tx_ids = [t.get("id") for t in normalized if t.get("id")]
+        existing_links: dict = {}
+        if tx_ids:
+            try:
+                links_result = supabase.table("bank_transaction_links")\
+                    .select("tx_id, link_type, linked_id, auto")\
+                    .eq("user_id", user_id)\
+                    .in_("tx_id", tx_ids).execute()
+                for row in (links_result.data or []):
+                    existing_links[row["tx_id"]] = row
+            except Exception as e:
+                print(f"[banking] reconcile link lookup failed: {e}")
+
+        # Only run the matcher on transactions that aren't already
+        # linked. Auto-linking + notifications happen inside
+        # _enrich_transaction_with_link as a side effect.
+        new_matches = 0
+        for tx in normalized:
+            if existing_links.get(tx.get("id")):
+                continue
+            before = tx.get("link")
+            _enrich_transaction_with_link(
+                tx, existing_links, invoices, expenses, investments, user_id,
+            )
+            if tx.get("link") and tx.get("link") != before:
+                new_matches += 1
+        print(f"[banking] reconcile: user={user_id[:8]}… "
+              f"checked={len(normalized)} new_matches={new_matches}")
+    except Exception as e:
+        print(f"[banking] reconcile error (non-fatal): {e}")
+
+
+# ─── Transactions endpoint ─────────────────────────────────────
 @router.get("/transactions")
 async def get_transactions(
     request: Request,
     page_size: int = Query(100, ge=1, le=500),
-    page_token: Optional[str] = Query(None),
 ):
-    """Combined transactions feed.
+    """Aggregate booked transactions across all connected accounts.
 
-    Sources, in priority order:
-      1. Live Tink fetch (PSD2 connection) — fresh data.
-      2. Cached `bank_transactions` rows — populated by file imports
-         (MT940 / CAMT.053) AND by previous Tink fetches we cached for
-         offline / token-expired use.
+    Flow:
+      1. Refresh the user's TrueLayer access token if needed.
+      2. Live-fetch transactions from TrueLayer (all accounts).
+      3. Upsert them into the bank_transactions cache so the matcher
+         and file-import paths see the same data.
+      4. Look up existing links + run the matcher to auto-link / suggest.
+      5. Return enriched list to the frontend.
 
-    Either source can be empty; if both are, we return an empty list
-    rather than a 404. The 401 "bank_session_expired" surfaces only
-    when the user has a Tink connection that has aged out — the
-    frontend uses this to nudge a reconnect, but ONLY if no cached
-    rows exist either.
+    Falls back to the cache (read-only) if TrueLayer returns an error
+    state — so a temporary aggregator outage doesn't blank the screen.
     """
     bigdogg_user_id = get_user_id(request)
 
-    # ── 1. Try Tink ──
-    tink_txs: List[dict] = []
-    next_page_token: Optional[str] = None
-    tink_session_expired = False
     profile_result = supabase.table("user_profiles")\
-        .select("tink_access_token, tink_refresh_token, tink_token_expires_at, tink_credentials_id")\
+        .select("tl_access_token")\
         .eq("id", bigdogg_user_id).execute()
-    has_tink_token = bool(profile_result.data and profile_result.data[0].get("tink_access_token"))
+    if not profile_result.data or not profile_result.data[0].get("tl_access_token"):
+        return {"transactions": []}
 
-    if has_tink_token:
-        try:
-            access_token = await _get_user_access_token(bigdogg_user_id)
-            params: dict = {"pageSize": min(page_size, 100)}
-            if page_token:
-                params["pageToken"] = page_token
-            async with httpx.AsyncClient(timeout=30) as client:
-                r = await client.get(
-                    TRANSACTIONS_ENDPOINT, params=params,
-                    headers={"Authorization": f"Bearer {access_token}"},
-                )
-            if r.status_code == 401:
-                tink_session_expired = True
-                print(f"[tink] transactions 401 (session expired)")
-            elif r.status_code >= 400:
-                print(f"[tink] transactions error: {r.status_code} {r.text}")
-            else:
-                raw = r.json()
-                items = raw.get("transactions") or []
-                tink_txs = [_normalize_tink_transaction(t) for t in items]
-                next_page_token = raw.get("nextPageToken")
-
-                # Persist to bank_transactions cache so this data is
-                # available even after the Tink token expires.
-                try:
-                    cache_rows = [{
-                        "user_id": bigdogg_user_id,
-                        "external_id": t["id"],
-                        "source": "tink",
-                        "date": t.get("date"),
-                        "amount": t.get("amount"),
-                        "currency": t.get("currency") or "EUR",
-                        "description": t.get("description") or "",
-                        "merchant": t.get("merchant") or "",
-                        "raw": {"type": t.get("type"), "status": t.get("status")},
-                    } for t in tink_txs if t.get("id")]
-                    if cache_rows:
-                        supabase.table("bank_transactions").upsert(
-                            cache_rows, on_conflict="user_id,external_id"
-                        ).execute()
-                except Exception as e:
-                    print(f"[banking] tink cache upsert failed (non-fatal): {e}")
-        except HTTPException as e:
-            # _get_user_access_token throws 404 when no/expired token.
-            # Treat as "no live data this round".
-            if e.status_code == 401:
-                tink_session_expired = True
-            else:
-                print(f"[tink] live fetch skipped: {e.detail}")
-        except Exception as e:
-            print(f"[tink] live fetch errored (non-fatal): {e}")
-
-    # ── 2. Read cached rows (file imports + previous Tink hits) ──
-    cached_rows: List[dict] = []
     try:
-        cached_result = supabase.table("bank_transactions")\
-            .select("external_id, date, amount, currency, description, merchant, source")\
-            .eq("user_id", bigdogg_user_id)\
-            .order("date", desc=True)\
-            .limit(500).execute()
-        for row in (cached_result.data or []):
-            cached_rows.append({
-                "id": row.get("external_id"),
-                "date": str(row["date"]) if row.get("date") else None,
-                "amount": float(row.get("amount") or 0),
-                "currency": row.get("currency") or "EUR",
-                "description": row.get("description") or "",
-                "merchant": row.get("merchant") or "",
-                "type": "BOOKING",
-                "status": "BOOKED",
-                "source": row.get("source") or "tink",
-            })
-    except Exception as e:
-        print(f"[banking] cached read failed: {e}")
+        access_token = await _get_user_access_token(bigdogg_user_id)
+    except HTTPException as e:
+        # 401 means refresh failed — surface as a structured response so
+        # the frontend can show a "reconnect needed" message instead of a
+        # generic error.
+        if e.status_code == 401:
+            return {"transactions": [], "reconnect_required": True}
+        raise
 
-    # ── 3. Merge by external_id; live Tink data wins on collision ──
-    by_id: dict = {tx["id"]: tx for tx in cached_rows if tx.get("id")}
-    for tx in tink_txs:
-        if tx.get("id"):
-            by_id[tx["id"]] = tx
-    combined = list(by_id.values())
-    combined.sort(key=lambda t: t.get("date") or "", reverse=True)
+    normalized = await _fetch_truelayer_transactions(access_token)
 
-    # ── 4. If nothing in either source, surface the right error ──
-    if not combined:
-        if tink_session_expired:
-            raise HTTPException(status_code=401, detail="bank_session_expired")
-        # No data, no expired session: just return empty (e.g. user
-        # never connected Tink and never imported a file).
-        return {"transactions": [], "next_page_token": None}
+    # Cache writes regardless of whether we found new rows — keeps the
+    # source-of-truth for the matcher up to date.
+    if normalized:
+        _cache_transactions(bigdogg_user_id, normalized)
 
-    # ── 5. Run the matcher / link hydration ──
     invoices = (supabase.table("invoices").select(
-        "id, invoice_number, total_incl_btw, status, client_name, client_company, invoice_date"
-    ).eq("user_id", bigdogg_user_id).execute().data) or []
+        "id, invoice_number, total_incl_btw, status, client_name, "
+        "client_company, invoice_date").eq("user_id", bigdogg_user_id).execute().data) or []
     expenses = (supabase.table("expenses").select(
         "id, description, amount_ex_btw, btw_amount, expense_date"
     ).eq("user_id", bigdogg_user_id).execute().data) or []
@@ -1111,55 +1033,51 @@ async def get_transactions(
         "id, description, amount, purchase_date, category"
     ).eq("user_id", bigdogg_user_id).execute().data) or []
 
+    # If TrueLayer returned nothing (e.g. transient error), fall back to
+    # the cache so the screen isn't blank.
+    combined = normalized
+    if not combined:
+        try:
+            cache_result = supabase.table("bank_transactions")\
+                .select("external_id, date, amount, currency, description, merchant")\
+                .eq("user_id", bigdogg_user_id)\
+                .order("date", desc=True)\
+                .limit(page_size).execute()
+            for row in (cache_result.data or []):
+                combined.append({
+                    "id": row["external_id"],
+                    "amount": float(row.get("amount") or 0),
+                    "currency": row.get("currency") or "EUR",
+                    "description": row.get("description") or "",
+                    "merchant": row.get("merchant") or "",
+                    "date": (row.get("date") or "")[:10] if row.get("date") else "",
+                    "account_id": None,
+                    "raw": None,
+                })
+        except Exception as e:
+            print(f"[banking] cache fallback failed: {e}")
+
     tx_ids = [t.get("id") for t in combined if t.get("id")]
     existing_links: dict = {}
-    stale_suggestion_ids: list = []
     if tx_ids:
         try:
             links_result = supabase.table("bank_transaction_links")\
-                .select("tx_id, link_type, linked_id, auto, created_at")\
+                .select("tx_id, link_type, linked_id, auto")\
                 .eq("user_id", bigdogg_user_id)\
                 .in_("tx_id", tx_ids).execute()
-            cutoff = datetime.now(timezone.utc) - timedelta(days=SUGGESTION_TTL_DAYS)
             for row in (links_result.data or []):
-                lt = row.get("link_type") or ""
-                # Auto-decay stale suggestions: a yellow "Match?" badge
-                # the user ignored for SUGGESTION_TTL_DAYS days probably
-                # is not the right match (or they would have confirmed).
-                # Drop it from the in-memory map so the matcher gets a
-                # second chance with whatever the data looks like NOW.
-                if lt.startswith("suggested_"):
-                    created_raw = row.get("created_at")
-                    if created_raw:
-                        try:
-                            created = datetime.fromisoformat(
-                                created_raw.replace("Z", "+00:00"))
-                            if created < cutoff:
-                                stale_suggestion_ids.append(row["tx_id"])
-                                continue
-                        except Exception:
-                            pass
                 existing_links[row["tx_id"]] = row
-        except Exception as e:
-            print(f"[banking] link lookup failed: {e}")
-
-    # Best-effort cleanup of stale suggestions.
-    if stale_suggestion_ids:
-        try:
-            supabase.table("bank_transaction_links").delete()\
-                .eq("user_id", bigdogg_user_id)\
-                .in_("tx_id", stale_suggestion_ids).execute()
-            print(f"[banking] expired {len(stale_suggestion_ids)} stale suggestions")
-        except Exception as e:
-            print(f"[banking] suggestion cleanup failed (non-fatal): {e}")
+        except Exception:
+            pass
 
     enriched = [
         _enrich_transaction_with_link(t, existing_links, invoices, expenses, investments, bigdogg_user_id)
-        for t in combined
+        for t in combined[:page_size]
     ]
-    return {"transactions": enriched, "next_page_token": next_page_token}
+    return {"transactions": enriched}
 
 
+# ─── Link / create-from-tx endpoints ───────────────────────────
 @router.post("/transactions/{tx_id}/link")
 async def set_transaction_link(tx_id: str, request: Request):
     """Confirm or change a transaction link.
@@ -1292,23 +1210,137 @@ async def create_investment_from_transaction(tx_id: str, request: Request):
     }
 
 
+# ─── Manual statement upload (MT940 / CAMT.053 / PDF) ───────────
+async def _parse_pdf_statement(raw: bytes) -> Tuple[str, List[dict]]:
+    """Extract transactions from a PDF bank statement using Claude vision.
+
+    Most NL banks let users download a monthly statement as a PDF
+    (ING "rekeningoverzicht", Rabobank "rekeningafschrift", etc).
+    We send the PDF bytes to Claude with a tight extraction prompt and
+    parse the JSON it returns. The output matches the MT940 / CAMT
+    parsers' shape so the cache write + matcher path stays identical.
+    """
+    if not settings.anthropic_api_key:
+        raise HTTPException(status_code=500, detail="ai_not_configured")
+    import anthropic
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+
+    b64 = base64.standard_b64encode(raw).decode("utf-8")
+    prompt = """Extract every transaction from this bank statement PDF.
+
+Return ONLY a raw JSON array (no markdown, no code fences). Each item:
+{
+  "date": "YYYY-MM-DD",
+  "amount": -45.67,
+  "currency": "EUR",
+  "description": "...",
+  "merchant": "..."
+}
+
+Rules:
+- amount is SIGNED: outgoing/debit/af NEGATIVE, incoming/credit/bij POSITIVE
+- include EVERY transaction shown, even small ones
+- description: payment reference / free-text / mededeling from the bank
+- merchant: counterparty name (creditor for outgoing, debtor for incoming)
+- skip opening/closing balance rows, totals, page headers
+- convert any date format (e.g. 14-05-2026) to YYYY-MM-DD
+- if currency isn't shown, default to EUR
+- return [] if no transactions are found"""
+
+    msg = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=16000,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": b64,
+                    },
+                },
+                {"type": "text", "text": prompt},
+            ],
+        }],
+    )
+
+    raw_text = msg.content[0].text.strip()
+    # Strip markdown fencing if Claude returned any despite the prompt.
+    if raw_text.startswith("```"):
+        raw_text = raw_text.split("```")[1]
+        if raw_text.lower().startswith("json"):
+            raw_text = raw_text[4:]
+        raw_text = raw_text.strip()
+
+    try:
+        parsed_txs = _json.loads(raw_text)
+    except Exception as e:
+        print(f"[banking] pdf json parse failed: {e} — head: {raw_text[:200]}")
+        return "pdf", []
+    if not isinstance(parsed_txs, list):
+        return "pdf", []
+
+    result: List[dict] = []
+    for i, tx in enumerate(parsed_txs):
+        if not isinstance(tx, dict):
+            continue
+        date_str = (tx.get("date") or "").strip() or None
+        try:
+            amount = float(tx.get("amount") or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        currency = (tx.get("currency") or "EUR").strip() or "EUR"
+        description = (tx.get("description") or "").strip()
+        merchant = (tx.get("merchant") or "").strip()
+        # Synthetic external_id — same scheme as MT940/CAMT for dedupe
+        # on repeat uploads. Include the row index so two rows with
+        # identical date/amount/description don't collide.
+        ext_id = f"pdf:{date_str}:{amount}:{description[:40]}:{i}"
+        result.append({
+            "id": ext_id,
+            "date": date_str,
+            "amount": amount,
+            "currency": currency,
+            "description": description,
+            "merchant": merchant,
+            "type": "BOOKING",
+            "status": "BOOKED",
+        })
+    return "pdf", result
+
+
 @router.post("/import")
 async def import_bank_statement(request: Request, file: UploadFile = File(...)):
-    """Parse an uploaded MT940 or CAMT.053 statement, persist its
-    entries into the `bank_transactions` cache, and run the matcher
-    against the user's invoices/expenses/investments. Returns a
+    """Parse an uploaded bank statement (MT940, CAMT.053, or PDF),
+    persist its entries into the `bank_transactions` cache, and run the
+    matcher against the user's invoices/expenses/investments. Returns a
     summary the frontend can show in a snackbar.
 
     No PSD2 connection needed — this is the file-import alternative to
-    the live Tink flow, and the format every NL bank's online-banking
-    portal can export.
+    the live TrueLayer flow. Banks export to one of:
+      * MT940 (SWIFT legacy) — parsed locally via mt-940 library
+      * CAMT.053 (ISO 20022 XML) — parsed locally via stdlib xml
+      * PDF (rekeningoverzicht) — parsed via Claude vision
     """
     user_id = get_user_id(request)
     raw = await file.read()
     if not raw:
         raise HTTPException(status_code=400, detail="empty_file")
 
-    fmt, parsed = parse_statement(raw)
+    # PDF magic bytes — try Claude vision before falling through to the
+    # local MT940/CAMT detection (those text formats never start with %PDF).
+    if raw[:5] == b"%PDF-":
+        try:
+            fmt, parsed = await _parse_pdf_statement(raw)
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"[banking] pdf parse failed: {e}")
+            raise HTTPException(status_code=400, detail="pdf_parse_failed")
+    else:
+        fmt, parsed = parse_statement(raw)
     if fmt == "unknown":
         raise HTTPException(status_code=400, detail="unrecognised_format")
     if not parsed:
@@ -1347,8 +1379,8 @@ async def import_bank_statement(request: Request, file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"import_failed: {e}")
 
     # Run the matcher. We use the same _enrich_transaction_with_link
-    # that the live Tink path uses; auto-matches fire notifications via
-    # the existing bell-icon flow.
+    # that the live TrueLayer path uses; auto-matches fire notifications
+    # via the existing bell-icon flow.
     invoices = (supabase.table("invoices").select(
         "id, invoice_number, total_incl_btw, status, client_name, client_company, invoice_date"
     ).eq("user_id", user_id).execute().data) or []
@@ -1395,71 +1427,93 @@ async def import_bank_statement(request: Request, file: UploadFile = File(...)):
     }
 
 
+# ─── Status / accounts / disconnect ───────────────────────────
 @router.get("/accounts")
 async def get_accounts(request: Request):
-    bigdogg_user_id = get_user_id(request)
-    access_token = await _get_user_access_token(bigdogg_user_id)
+    """List the accounts attached to this user's TrueLayer connection.
 
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        r = await client.get(
-            ACCOUNTS_ENDPOINT,
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-    if r.status_code >= 400:
-        print(f"[tink] accounts error: {r.status_code} {r.text}")
-        raise HTTPException(status_code=502, detail="Could not fetch accounts")
-    return r.json()
+    Returns the IBAN, display name, currency, and account type so the
+    settings card can show e.g. "ING Betaalrekening · NL12RABO…".
+    """
+    bigdogg_user_id = get_user_id(request)
+    try:
+        access_token = await _get_user_access_token(bigdogg_user_id)
+    except HTTPException:
+        return {"accounts": []}
+
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            r = await client.get(
+                f"{_api_base()}/data/v1/accounts",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+        if r.status_code != 200:
+            return {"accounts": []}
+        results = (r.json() or {}).get("results", []) or []
+    except Exception as e:
+        print(f"[truelayer] /accounts failed: {e}")
+        return {"accounts": []}
+
+    out = []
+    for acc in results:
+        acc_num = acc.get("account_number") or {}
+        provider = acc.get("provider") or {}
+        out.append({
+            "id": acc.get("account_id"),
+            "iban": acc_num.get("iban"),
+            "name": acc.get("display_name") or provider.get("display_name"),
+            "currency": acc.get("currency"),
+            "product": acc.get("account_type"),
+        })
+    return {"accounts": out}
 
 
 @router.get("/status")
 async def banking_status(request: Request):
+    """Whether the user has a connected bank, plus enough metadata for
+    the Settings card to render."""
     bigdogg_user_id = get_user_id(request)
     profile_result = supabase.table("user_profiles")\
-        .select("tink_user_id, tink_credentials_id, tink_connected_at, "
-                "tink_token_expires_at, tink_refresh_token, tink_access_token")\
-        .eq("id", bigdogg_user_id)\
-        .execute()
+        .select("tl_access_token, tl_connected_at, tl_token_expires_at, tl_provider_id")\
+        .eq("id", bigdogg_user_id).execute()
     if not profile_result.data:
         return {"connected": False}
     profile = profile_result.data[0]
-
-    has_credentials = bool(profile.get("tink_credentials_id"))
-    has_access_token = bool(profile.get("tink_access_token"))
-    has_refresh_token = bool(profile.get("tink_refresh_token"))
-    expires_at_raw = profile.get("tink_token_expires_at")
-    expired = False
-    if has_access_token and not has_refresh_token and expires_at_raw:
-        try:
-            exp = datetime.fromisoformat(expires_at_raw.replace("Z", "+00:00"))
-            expired = datetime.now(timezone.utc) >= exp
-        except Exception:
-            expired = False
-
     return {
-        # Only treat as "connected" if we still have a usable token. A
-        # one-time-flow token that has aged past its expires_at can no
-        # longer fetch transactions, so the UI should prompt to reconnect.
-        "connected": has_credentials and not expired,
-        "expired": expired,
-        "tink_user_id": profile.get("tink_user_id"),
-        "credentials_id": profile.get("tink_credentials_id"),
-        "connected_at": profile.get("tink_connected_at"),
-        "token_expires_at": expires_at_raw,
+        "connected": bool(profile.get("tl_access_token")),
+        "connected_at": profile.get("tl_connected_at"),
+        "token_expires_at": profile.get("tl_token_expires_at"),
+        "provider_id": profile.get("tl_provider_id"),
     }
 
 
 @router.delete("/disconnect")
 async def banking_disconnect(request: Request):
+    """Revoke the TrueLayer connection and clear local state."""
     bigdogg_user_id = get_user_id(request)
-    supabase.table("user_profiles")\
-        .update({
-            "tink_access_token": None,
-            "tink_refresh_token": None,
-            "tink_token_expires_at": None,
-            "tink_credentials_id": None,
-            "tink_connected_at": None,
-            "tink_link_state": None,
-        })\
-        .eq("id", bigdogg_user_id)\
-        .execute()
+
+    # Best-effort revoke at TrueLayer. Their /api/delete endpoint
+    # invalidates the access token and the corresponding consent.
+    profile_result = supabase.table("user_profiles")\
+        .select("tl_access_token").eq("id", bigdogg_user_id).execute()
+    access_token = (profile_result.data[0].get("tl_access_token")
+                    if profile_result.data else None)
+    if access_token:
+        try:
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+                await client.post(
+                    f"{_auth_base()}/api/delete",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+        except Exception as e:
+            print(f"[truelayer] revoke failed (non-fatal): {e}")
+
+    supabase.table("user_profiles").update({
+        "tl_access_token": None,
+        "tl_refresh_token": None,
+        "tl_token_expires_at": None,
+        "tl_connected_at": None,
+        "tl_link_state": None,
+        "tl_provider_id": None,
+    }).eq("id", bigdogg_user_id).execute()
     return {"success": True}
