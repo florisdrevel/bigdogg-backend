@@ -105,11 +105,39 @@ def get_year_data(user_id: str, year: int):
     inv_ids = [i["id"] for i in (inv_ids_result.data or [])]
     invoice_hours = 0.0
     if inv_ids:
-        lines = supabase.table("invoice_lines").select("quantity, unit")\
+        lines = supabase.table("invoice_lines")\
+            .select("quantity, unit, description")\
             .in_("invoice_id", inv_ids).execute()
+
+        # Products fallback: if a line was saved with unit='fixed' but its
+        # description matches a day/hour product, use that product's unit.
+        # Matches the resolution in /api/v1/hours so all three surfaces
+        # (Uren screen, accountant portal, annual PDF) agree.
+        product_unit_map: dict = {}
+        try:
+            prod = supabase.table("products")\
+                .select("name, unit").eq("user_id", user_id).execute()
+            for p in (prod.data or []):
+                name = (p.get("name") or "").strip().lower()
+                u = (p.get("unit") or "").strip().lower()
+                if name and u:
+                    product_unit_map[name] = u
+        except Exception as e:
+            print(f"[annual_report] product unit map load failed: {e}")
+
         for line in (lines.data or []):
             unit = (line.get("unit") or "fixed").lower()
             qty = float(line.get("quantity", 0) or 0)
+            description = (line.get("description") or "")
+            if unit not in ("day", "hour") and product_unit_map:
+                desc_lower = description.lower().strip()
+                if desc_lower in product_unit_map:
+                    unit = product_unit_map[desc_lower]
+                else:
+                    for name in sorted(product_unit_map.keys(), key=len, reverse=True):
+                        if name and name in desc_lower:
+                            unit = product_unit_map[name]
+                            break
             if unit == "day":
                 invoice_hours += qty * 9.0
             elif unit == "hour":

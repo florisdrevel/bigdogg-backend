@@ -19,12 +19,47 @@ def get_user_id(request: Request) -> str:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 
+def _resolve_line_unit(line_unit: str, description: str,
+                       product_unit_map: dict) -> str:
+    """Pick the effective unit for an invoice line.
+
+    Trust `line.unit` if it's already 'day' or 'hour'. Otherwise look the
+    line up against the user's products by description — first exact
+    (case-insensitive) match, then substring (e.g. line description
+    "Dayfee — March 2026" still resolves to a product named "dayfee").
+
+    Returns the resolved unit string (or 'fixed' if nothing matches).
+    """
+    if line_unit in ("day", "hour"):
+        return line_unit
+    desc = (description or "").lower().strip()
+    if not desc or not product_unit_map:
+        return line_unit
+    # Exact match first — cheapest, most common case.
+    if desc in product_unit_map:
+        return product_unit_map[desc]
+    # Substring fallback — handles "Dayfee — May 2026" matching product
+    # "dayfee". Longest product name first so a generic "fee" product
+    # doesn't shadow a more specific "dayfee".
+    for name in sorted(product_unit_map.keys(), key=len, reverse=True):
+        if name and name in desc:
+            return product_unit_map[name]
+    return line_unit
+
+
 def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
     """
-    Calculate hours from invoice lines using unit field only.
-    unit='day'  -> quantity * 9 hours
-    unit='hour' -> quantity * 1 hour
-    anything else (fixed, piece, km, etc) -> 0 hours
+    Calculate hours from invoice lines.
+
+    Unit resolution order:
+      1. line.unit if it's 'day' or 'hour'
+      2. Otherwise: match line.description against the user's products
+         (exact then substring); use that product's unit.
+      3. Otherwise: skip (fixed, piece, km, etc → 0 hours).
+
+    Scoring:
+      'day'  -> quantity * 9 hours
+      'hour' -> quantity * 1 hour
     """
     try:
         inv_result = supabase.table("invoices")\
@@ -47,10 +82,26 @@ def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
             .execute()
         lines = lines_result.data or []
 
+        # Build a lowercased name → unit map of the user's products once,
+        # for the description-fallback resolution.
+        product_unit_map: dict[str, str] = {}
+        try:
+            prod_result = supabase.table("products")\
+                .select("name, unit").eq("user_id", user_id).execute()
+            for p in (prod_result.data or []):
+                name = (p.get("name") or "").strip().lower()
+                unit = (p.get("unit") or "").strip().lower()
+                if name and unit:
+                    product_unit_map[name] = unit
+        except Exception as e:
+            print(f"Error loading products for hour resolution: {e}")
+
         total = 0.0
         breakdown = []
         for line in lines:
-            unit = (line.get("unit") or "fixed").lower()
+            raw_unit = (line.get("unit") or "fixed").lower()
+            description = line.get("description", "")
+            unit = _resolve_line_unit(raw_unit, description, product_unit_map)
             qty = float(line.get("quantity", 0) or 0)
             inv = inv_map.get(line["invoice_id"], {})
 
@@ -70,7 +121,7 @@ def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
                 "invoice_number": inv.get("invoice_number", ""),
                 "invoice_id": line["invoice_id"],
                 "project_id": inv.get("project_id"),
-                "description": line.get("description", ""),
+                "description": description,
                 "quantity": qty,
                 "unit": unit,
                 "hours": hrs,

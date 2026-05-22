@@ -89,9 +89,13 @@ def _provider_filter() -> str:
     Sandbox includes `uk-cs-mock` so we can test against TrueLayer's mock
     bank without real credentials. `nl-ob-all` is the catch-all that
     enables every NL Open Banking provider TrueLayer supports.
+
+    TrueLayer expects SPACE-separated provider IDs in this param.
+    Comma-separated yields a hosted-UI "Bad Request error" on
+    login.truelayer(-sandbox).com/providers.
     """
     if _is_sandbox():
-        return "uk-cs-mock,uk-ob-all,nl-ob-all"
+        return "uk-cs-mock uk-ob-all nl-ob-all"
     return "nl-ob-all"
 
 
