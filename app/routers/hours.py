@@ -45,17 +45,34 @@ def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
             .lte("invoice_date", year_end)\
             .execute()
         invoices = inv_result.data or []
+        print(f"[hours] user={user_id[:8]}… range={year_start}..{year_end} invoices={len(invoices)}")
         if not invoices:
             return 0.0, []
 
         inv_ids = [i["id"] for i in invoices]
         inv_map = {i["id"]: i for i in invoices}
 
-        lines_result = supabase.table("invoice_lines")\
-            .select("invoice_id, description, quantity, unit, product_id")\
-            .in_("invoice_id", inv_ids)\
-            .execute()
-        lines = lines_result.data or []
+        # Try with product_id; if the column doesn't exist (migration not
+        # yet run), retry without it. This way the endpoint keeps working
+        # against the old schema and we get a clear log of which path we
+        # took.
+        lines = []
+        product_id_available = True
+        try:
+            lines_result = supabase.table("invoice_lines")\
+                .select("invoice_id, description, quantity, unit, product_id")\
+                .in_("invoice_id", inv_ids)\
+                .execute()
+            lines = lines_result.data or []
+        except Exception as e:
+            print(f"[hours] product_id column missing — falling back: {e}")
+            product_id_available = False
+            lines_result = supabase.table("invoice_lines")\
+                .select("invoice_id, description, quantity, unit")\
+                .in_("invoice_id", inv_ids)\
+                .execute()
+            lines = lines_result.data or []
+        print(f"[hours] lines={len(lines)} product_id_col={product_id_available}")
 
         # Build both lookup maps in one round trip.
         product_unit_by_id: dict[str, str] = {}
@@ -75,6 +92,7 @@ def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
                     product_unit_by_name[name] = unit
         except Exception as e:
             print(f"[hours] product load failed: {e}")
+        print(f"[hours] products by_id={len(product_unit_by_id)} by_name={list(product_unit_by_name.items())}")
 
         total = 0.0
         breakdown = []
@@ -87,18 +105,22 @@ def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
 
             # 1) product_id wins outright (the link is unambiguous)
             unit = None
+            via = "line.unit"
             if product_id and product_id in product_unit_by_id:
                 unit = product_unit_by_id[product_id]
+                via = f"product_id={product_id[:8]}…"
             # 2) description match for legacy lines without product_id
             if unit is None and product_unit_by_name:
                 desc_lower = description.lower().strip()
                 if desc_lower in product_unit_by_name:
                     unit = product_unit_by_name[desc_lower]
+                    via = f"name[{desc_lower}]"
                 else:
                     # Longest first so a 'fee' product doesn't shadow 'dayfee'
                     for name in sorted(product_unit_by_name.keys(), key=len, reverse=True):
                         if name and name in desc_lower:
                             unit = product_unit_by_name[name]
+                            via = f"substr[{name}]"
                             break
             # 3) fall back to whatever line.unit says
             if unit is None:
@@ -109,7 +131,9 @@ def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
             elif unit == "hour":
                 hrs = qty
             else:
-                continue
+                hrs = 0.0
+
+            print(f"[hours]   line desc='{description[:30]}' pid={(product_id or '')[:8]}… raw_unit={raw_unit} resolved={unit} via={via} qty={qty} hrs={hrs}")
 
             if hrs <= 0:
                 continue
@@ -126,9 +150,10 @@ def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
                 "hours": hrs,
                 "date": inv.get("invoice_date", ""),
             })
+        print(f"[hours] total={total}")
         return round(total, 2), breakdown
     except Exception as e:
-        print(f"Error calculating invoice hours: {e}")
+        print(f"[hours] _calc_invoice_hours error: {e}")
         return 0.0, []
 
 
