@@ -94,6 +94,13 @@ async def get_invoice(invoice_id: str, request: Request):
 @router.post("/")
 async def create_invoice(invoice: InvoiceCreate, request: Request):
     user_id = get_user_id(request)
+    # Diagnostic: show what the frontend actually sent for each line so
+    # we can verify product_id is making the round-trip. Strip after the
+    # hours-resolution issue is resolved.
+    try:
+        print(f"[create-invoice] user={user_id[:8]}… lines={[{'desc': l.description[:25], 'qty': l.quantity, 'unit': l.unit, 'product_id': l.product_id} for l in invoice.lines]}")
+    except Exception:
+        pass
     try:
         invoice_number = generate_invoice_number(user_id)
         invoice_date = invoice.invoice_date or date.today().isoformat()
