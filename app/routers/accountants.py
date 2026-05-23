@@ -871,22 +871,27 @@ def _invoice_derived_hours(owner_id: str, y_start: str, y_end: str) -> tuple[flo
             return 0.0, []
         inv_map = {i["id"]: i for i in invoices}
         ln = supabase.table("invoice_lines")\
-            .select("invoice_id, description, quantity, unit")\
+            .select("invoice_id, description, quantity, unit, product_id")\
             .in_("invoice_id", [i["id"] for i in invoices]).execute()
 
-        # Build a products name → unit map so we can fall back when an
-        # invoice line was saved with unit='fixed' but the underlying
-        # product is actually a day/hour product. Matches the resolution
-        # used by /api/v1/hours so user + accountant see the same number.
-        product_unit_map: dict[str, str] = {}
+        # Lookup maps: product_id → unit (firmest), name → unit (legacy
+        # fallback for lines without product_id). Same resolution order
+        # as /api/v1/hours so the accountant sees identical numbers.
+        product_unit_by_id: dict[str, str] = {}
+        product_unit_by_name: dict[str, str] = {}
         try:
             prod = supabase.table("products")\
-                .select("name, unit").eq("user_id", owner_id).execute()
+                .select("id, name, unit").eq("user_id", owner_id).execute()
             for p in (prod.data or []):
+                pid = (p.get("id") or "").strip()
                 name = (p.get("name") or "").strip().lower()
                 u = (p.get("unit") or "").strip().lower()
-                if name and u:
-                    product_unit_map[name] = u
+                if not u:
+                    continue
+                if pid:
+                    product_unit_by_id[pid] = u
+                if name:
+                    product_unit_by_name[name] = u
         except Exception as e:
             print(f"[accountants] product unit map load failed: {e}")
 
@@ -895,19 +900,22 @@ def _invoice_derived_hours(owner_id: str, y_start: str, y_end: str) -> tuple[flo
         for line in (ln.data or []):
             raw_unit = (line.get("unit") or "fixed").lower()
             description = line.get("description", "") or ""
-            unit = raw_unit
-            if unit not in ("day", "hour") and product_unit_map:
+            product_id = line.get("product_id")
+
+            unit = None
+            if product_id and product_id in product_unit_by_id:
+                unit = product_unit_by_id[product_id]
+            if unit is None and product_unit_by_name:
                 desc_lower = description.lower().strip()
-                if desc_lower in product_unit_map:
-                    unit = product_unit_map[desc_lower]
+                if desc_lower in product_unit_by_name:
+                    unit = product_unit_by_name[desc_lower]
                 else:
-                    # Substring fallback so "Dayfee — May 2026" matches a
-                    # product named "dayfee". Longest first so generic
-                    # names don't shadow specific ones.
-                    for name in sorted(product_unit_map.keys(), key=len, reverse=True):
+                    for name in sorted(product_unit_by_name.keys(), key=len, reverse=True):
                         if name and name in desc_lower:
-                            unit = product_unit_map[name]
+                            unit = product_unit_by_name[name]
                             break
+            if unit is None:
+                unit = raw_unit
             qty = float(line.get("quantity") or 0)
             if unit == "day":
                 hrs = qty * _HOURS_PER_DAY

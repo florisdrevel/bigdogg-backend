@@ -32,6 +32,10 @@ class QuoteLine(BaseModel):
     unit_price_ex_btw: float
     btw_rate: int = 21
     unit: str = "fixed"
+    # When the user picks a product from the dropdown, the frontend
+    # sends its id. Carried through to invoice on conversion so the
+    # hours calculation can resolve the unit reliably.
+    product_id: Optional[str] = None
 
 
 class QuoteCreate(BaseModel):
@@ -182,16 +186,21 @@ async def create_quote(quote: QuoteCreate, request: Request):
             p["name"].lower(): p["unit"] for p in (products_result.data or [])
         }
 
-        lines_data = [{
-            "quote_id": quote_id,
-            "description": l.description,
-            "quantity": l.quantity,
-            "unit_price_ex_btw": l.unit_price_ex_btw,
-            "btw_rate": l.btw_rate,
-            "line_total_ex_btw": round(l.quantity * l.unit_price_ex_btw, 2),
-            "unit": l.unit if l.unit not in ("fixed", None, "") else
-                product_unit_map.get(l.description.lower(), "fixed"),
-        } for l in quote.lines]
+        lines_data = []
+        for l in quote.lines:
+            row = {
+                "quote_id": quote_id,
+                "description": l.description,
+                "quantity": l.quantity,
+                "unit_price_ex_btw": l.unit_price_ex_btw,
+                "btw_rate": l.btw_rate,
+                "line_total_ex_btw": round(l.quantity * l.unit_price_ex_btw, 2),
+                "unit": l.unit if l.unit not in ("fixed", None, "") else
+                    product_unit_map.get(l.description.lower(), "fixed"),
+            }
+            if l.product_id:
+                row["product_id"] = l.product_id
+            lines_data.append(row)
         supabase.table("quote_lines").insert(lines_data).execute()
 
         return {"quote": quote_response.data[0], "quote_number": quote_number}
@@ -252,16 +261,21 @@ async def update_quote(quote_id: str, body: QuoteUpdate, request: Request):
         product_unit_map = {
             p["name"].lower(): p["unit"] for p in (products_result.data or [])
         }
-        lines_data = [{
-            "quote_id": quote_id,
-            "description": l.description,
-            "quantity": l.quantity,
-            "unit_price_ex_btw": l.unit_price_ex_btw,
-            "btw_rate": l.btw_rate,
-            "line_total_ex_btw": round(l.quantity * l.unit_price_ex_btw, 2),
-            "unit": l.unit if l.unit not in ("fixed", None, "") else
-                product_unit_map.get(l.description.lower(), "fixed"),
-        } for l in body.lines]
+        lines_data = []
+        for l in body.lines:
+            row = {
+                "quote_id": quote_id,
+                "description": l.description,
+                "quantity": l.quantity,
+                "unit_price_ex_btw": l.unit_price_ex_btw,
+                "btw_rate": l.btw_rate,
+                "line_total_ex_btw": round(l.quantity * l.unit_price_ex_btw, 2),
+                "unit": l.unit if l.unit not in ("fixed", None, "") else
+                    product_unit_map.get(l.description.lower(), "fixed"),
+            }
+            if l.product_id:
+                row["product_id"] = l.product_id
+            lines_data.append(row)
         supabase.table("quote_lines").insert(lines_data).execute()
 
     if update:
@@ -341,15 +355,20 @@ async def convert_quote(quote_id: str, request: Request):
     invoice_id = invoice_response.data[0]["id"]
 
     if lines:
-        invoice_lines = [{
-            "invoice_id": invoice_id,
-            "description": l.get("description"),
-            "quantity": l.get("quantity"),
-            "unit_price_ex_btw": l.get("unit_price_ex_btw"),
-            "btw_rate": l.get("btw_rate"),
-            "line_total_ex_btw": l.get("line_total_ex_btw"),
-            "unit": l.get("unit") or "fixed",
-        } for l in lines]
+        invoice_lines = []
+        for l in lines:
+            row = {
+                "invoice_id": invoice_id,
+                "description": l.get("description"),
+                "quantity": l.get("quantity"),
+                "unit_price_ex_btw": l.get("unit_price_ex_btw"),
+                "btw_rate": l.get("btw_rate"),
+                "line_total_ex_btw": l.get("line_total_ex_btw"),
+                "unit": l.get("unit") or "fixed",
+            }
+            if l.get("product_id"):
+                row["product_id"] = l["product_id"]
+            invoice_lines.append(row)
         supabase.table("invoice_lines").insert(invoice_lines).execute()
 
     supabase.table("quotes").update({

@@ -23,12 +23,13 @@ def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
     """
     Calculate hours from invoice lines.
 
-    PRODUCT-FIRST RESOLUTION: try to look up the line.description against
-    the user's products and use the product's unit. Falls back to
-    line.unit only if no product match found. This matches the user's
-    expectation that the Settings → Producten unit dropdown (day/hour/
-    km/fixed/...) drives the hours calculation, regardless of what
-    invoice_lines.unit got saved as.
+    Unit resolution order:
+      1. line.product_id → products.unit (most reliable; available on
+         every new invoice created after the product_id migration)
+      2. line.description matched against the user's products by exact
+         then substring (for legacy lines without product_id)
+      3. line.unit (saved field, may be 'fixed' even when the underlying
+         product is 'day' due to historical save bugs)
 
     Scoring:
       'day'  -> quantity * 9 hours
@@ -44,10 +45,6 @@ def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
             .lte("invoice_date", year_end)\
             .execute()
         invoices = inv_result.data or []
-        print(f"[hours-debug] user={user_id[:8]}… range={year_start}..{year_end} invoices_found={len(invoices)}")
-        if invoices:
-            for _i in invoices[:5]:
-                print(f"[hours-debug]   invoice id={_i.get('id','')[:8]}… num={_i.get('invoice_number','')} status={_i.get('status','')} date={_i.get('invoice_date','')}")
         if not invoices:
             return 0.0, []
 
@@ -55,27 +52,29 @@ def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
         inv_map = {i["id"]: i for i in invoices}
 
         lines_result = supabase.table("invoice_lines")\
-            .select("invoice_id, description, quantity, unit")\
+            .select("invoice_id, description, quantity, unit, product_id")\
             .in_("invoice_id", inv_ids)\
             .execute()
         lines = lines_result.data or []
-        print(f"[hours-debug] lines_found={len(lines)}")
 
-        # Build a lowercased name → unit map of the user's products. We
-        # use it as the FIRST resolution step (product is the source of
-        # truth for billing semantics), then fall back to line.unit.
-        product_unit_map: dict[str, str] = {}
+        # Build both lookup maps in one round trip.
+        product_unit_by_id: dict[str, str] = {}
+        product_unit_by_name: dict[str, str] = {}
         try:
             prod_result = supabase.table("products")\
-                .select("name, unit").eq("user_id", user_id).execute()
+                .select("id, name, unit").eq("user_id", user_id).execute()
             for p in (prod_result.data or []):
+                pid = (p.get("id") or "").strip()
                 name = (p.get("name") or "").strip().lower()
                 unit = (p.get("unit") or "").strip().lower()
-                if name and unit:
-                    product_unit_map[name] = unit
+                if not unit:
+                    continue
+                if pid:
+                    product_unit_by_id[pid] = unit
+                if name:
+                    product_unit_by_name[name] = unit
         except Exception as e:
-            print(f"[hours-debug] product load failed: {e}")
-        print(f"[hours-debug] product_unit_map={product_unit_map}")
+            print(f"[hours] product load failed: {e}")
 
         total = 0.0
         breakdown = []
@@ -84,33 +83,34 @@ def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
             description = line.get("description", "") or ""
             qty = float(line.get("quantity", 0) or 0)
             inv = inv_map.get(line["invoice_id"], {})
+            product_id = line.get("product_id")
 
-            # Product-first resolution. Exact match → substring fallback.
-            # Longest product name first so a generic 'fee' doesn't shadow
-            # a specific 'dayfee'.
-            unit = raw_unit
-            resolved_from = "line.unit"
-            if product_unit_map:
+            # 1) product_id wins outright (the link is unambiguous)
+            unit = None
+            if product_id and product_id in product_unit_by_id:
+                unit = product_unit_by_id[product_id]
+            # 2) description match for legacy lines without product_id
+            if unit is None and product_unit_by_name:
                 desc_lower = description.lower().strip()
-                hit_name = None
-                if desc_lower in product_unit_map:
-                    hit_name = desc_lower
+                if desc_lower in product_unit_by_name:
+                    unit = product_unit_by_name[desc_lower]
                 else:
-                    for name in sorted(product_unit_map.keys(), key=len, reverse=True):
+                    # Longest first so a 'fee' product doesn't shadow 'dayfee'
+                    for name in sorted(product_unit_by_name.keys(), key=len, reverse=True):
                         if name and name in desc_lower:
-                            hit_name = name
+                            unit = product_unit_by_name[name]
                             break
-                if hit_name:
-                    unit = product_unit_map[hit_name]
-                    resolved_from = f"product[{hit_name}]"
+            # 3) fall back to whatever line.unit says
+            if unit is None:
+                unit = raw_unit
 
             if unit == "day":
                 hrs = qty * HOURS_PER_DAY
             elif unit == "hour":
                 hrs = qty
             else:
-                hrs = 0.0
-            print(f"[hours-debug]   line desc='{description[:30]}' raw_unit={raw_unit} qty={qty} resolved={unit} via={resolved_from} hrs={hrs}")
+                continue
+
             if hrs <= 0:
                 continue
 
@@ -126,10 +126,9 @@ def _calc_invoice_hours(user_id: str, year_start: str, year_end: str) -> tuple:
                 "hours": hrs,
                 "date": inv.get("invoice_date", ""),
             })
-        print(f"[hours-debug] total={total}")
         return round(total, 2), breakdown
     except Exception as e:
-        print(f"[hours-debug] _calc_invoice_hours error: {e}")
+        print(f"Error calculating invoice hours: {e}")
         return 0.0, []
 
 

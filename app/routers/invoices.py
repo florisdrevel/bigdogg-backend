@@ -17,6 +17,9 @@ class InvoiceLine(BaseModel):
     unit_price_ex_btw: float
     btw_rate: int = 21
     unit: str = "fixed"
+    # When the user picks a product from the dropdown, the frontend
+    # sends its id. Hours calculation prefers this over name matching.
+    product_id: Optional[str] = None
 
 
 class InvoiceCreate(BaseModel):
@@ -130,15 +133,22 @@ async def create_invoice(invoice: InvoiceCreate, request: Request):
         products_result = supabase.table("products").select("name, unit").eq("user_id", user_id).execute()
         product_unit_map = {p["name"].lower(): p["unit"] for p in (products_result.data or [])}
 
-        lines_data = [{
-            "invoice_id": invoice_id,
-            "description": l.description,
-            "quantity": l.quantity,
-            "unit_price_ex_btw": l.unit_price_ex_btw,
-            "btw_rate": l.btw_rate,
-            "line_total_ex_btw": round(l.quantity * l.unit_price_ex_btw, 2),
-            "unit": l.unit if l.unit not in ("fixed", None, "") else product_unit_map.get(l.description.lower(), "fixed"),
-        } for l in invoice.lines]
+        # Resolve unit per line: trust frontend's value if explicit,
+        # otherwise fall back to product map by description.
+        lines_data = []
+        for l in invoice.lines:
+            row = {
+                "invoice_id": invoice_id,
+                "description": l.description,
+                "quantity": l.quantity,
+                "unit_price_ex_btw": l.unit_price_ex_btw,
+                "btw_rate": l.btw_rate,
+                "line_total_ex_btw": round(l.quantity * l.unit_price_ex_btw, 2),
+                "unit": l.unit if l.unit not in ("fixed", None, "") else product_unit_map.get(l.description.lower(), "fixed"),
+            }
+            if l.product_id:
+                row["product_id"] = l.product_id
+            lines_data.append(row)
         supabase.table("invoice_lines").insert(lines_data).execute()
 
         # Auto-generate payment link if Stripe is connected
