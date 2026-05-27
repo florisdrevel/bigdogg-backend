@@ -870,18 +870,24 @@ def _invoice_derived_hours(owner_id: str, y_start: str, y_end: str) -> tuple[flo
         if not invoices:
             return 0.0, []
         inv_map = {i["id"]: i for i in invoices}
-        ln = supabase.table("invoice_lines")\
-            .select("invoice_id, description, quantity, unit, product_id")\
-            .in_("invoice_id", [i["id"] for i in invoices]).execute()
+        try:
+            ln_data = (supabase.table("invoice_lines")
+                       .select("invoice_id, description, quantity, unit, unit_price_ex_btw, product_id")
+                       .in_("invoice_id", [i["id"] for i in invoices]).execute().data) or []
+        except Exception:
+            ln_data = (supabase.table("invoice_lines")
+                       .select("invoice_id, description, quantity, unit, unit_price_ex_btw")
+                       .in_("invoice_id", [i["id"] for i in invoices]).execute().data) or []
 
-        # Lookup maps: product_id → unit (firmest), name → unit (legacy
-        # fallback for lines without product_id). Same resolution order
+        # Lookup maps: product_id → unit (firmest), name → unit, and
+        # unit_price → unit (unique day/hour only). Same resolution order
         # as /api/v1/hours so the accountant sees identical numbers.
         product_unit_by_id: dict[str, str] = {}
         product_unit_by_name: dict[str, str] = {}
+        price_units: dict[float, set] = {}
         try:
             prod = supabase.table("products")\
-                .select("id, name, unit").eq("user_id", owner_id).execute()
+                .select("id, name, unit, unit_price").eq("user_id", owner_id).execute()
             for p in (prod.data or []):
                 pid = (p.get("id") or "").strip()
                 name = (p.get("name") or "").strip().lower()
@@ -892,12 +898,24 @@ def _invoice_derived_hours(owner_id: str, y_start: str, y_end: str) -> tuple[flo
                     product_unit_by_id[pid] = u
                 if name:
                     product_unit_by_name[name] = u
+                try:
+                    pr = round(float(p.get("unit_price") or 0), 2)
+                except (TypeError, ValueError):
+                    pr = 0.0
+                if pr > 0:
+                    price_units.setdefault(pr, set()).add(u)
         except Exception as e:
             print(f"[accountants] product unit map load failed: {e}")
+        product_unit_by_price: dict[float, str] = {}
+        for pr, units in price_units.items():
+            if len(units) == 1:
+                u = next(iter(units))
+                if u in ("day", "hour"):
+                    product_unit_by_price[pr] = u
 
         total = 0.0
         breakdown: list[dict] = []
-        for line in (ln.data or []):
+        for line in ln_data:
             raw_unit = (line.get("unit") or "fixed").lower()
             description = line.get("description", "") or ""
             product_id = line.get("product_id")
@@ -914,6 +932,13 @@ def _invoice_derived_hours(owner_id: str, y_start: str, y_end: str) -> tuple[flo
                         if name and name in desc_lower:
                             unit = product_unit_by_name[name]
                             break
+            if unit is None and product_unit_by_price:
+                try:
+                    lp = round(float(line.get("unit_price_ex_btw") or 0), 2)
+                except (TypeError, ValueError):
+                    lp = 0.0
+                if lp in product_unit_by_price:
+                    unit = product_unit_by_price[lp]
             if unit is None:
                 unit = raw_unit
             qty = float(line.get("quantity") or 0)

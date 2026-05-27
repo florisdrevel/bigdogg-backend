@@ -105,17 +105,23 @@ def get_year_data(user_id: str, year: int):
     inv_ids = [i["id"] for i in (inv_ids_result.data or [])]
     invoice_hours = 0.0
     if inv_ids:
-        lines = supabase.table("invoice_lines")\
-            .select("quantity, unit, description, product_id")\
-            .in_("invoice_id", inv_ids).execute()
+        try:
+            line_rows = (supabase.table("invoice_lines")
+                         .select("quantity, unit, description, unit_price_ex_btw, product_id")
+                         .in_("invoice_id", inv_ids).execute().data) or []
+        except Exception:
+            line_rows = (supabase.table("invoice_lines")
+                         .select("quantity, unit, description, unit_price_ex_btw")
+                         .in_("invoice_id", inv_ids).execute().data) or []
 
         # Resolve unit per line in the same order as /api/v1/hours:
-        # product_id (firm link) → description match → line.unit.
+        # product_id → description → unit_price (unique day/hour) → line.unit.
         product_unit_by_id: dict = {}
         product_unit_by_name: dict = {}
+        price_units: dict = {}
         try:
             prod = supabase.table("products")\
-                .select("id, name, unit").eq("user_id", user_id).execute()
+                .select("id, name, unit, unit_price").eq("user_id", user_id).execute()
             for p in (prod.data or []):
                 pid = (p.get("id") or "").strip()
                 name = (p.get("name") or "").strip().lower()
@@ -126,10 +132,22 @@ def get_year_data(user_id: str, year: int):
                     product_unit_by_id[pid] = u
                 if name:
                     product_unit_by_name[name] = u
+                try:
+                    pr = round(float(p.get("unit_price") or 0), 2)
+                except (TypeError, ValueError):
+                    pr = 0.0
+                if pr > 0:
+                    price_units.setdefault(pr, set()).add(u)
         except Exception as e:
             print(f"[annual_report] product unit map load failed: {e}")
+        product_unit_by_price: dict = {}
+        for pr, units in price_units.items():
+            if len(units) == 1:
+                u = next(iter(units))
+                if u in ("day", "hour"):
+                    product_unit_by_price[pr] = u
 
-        for line in (lines.data or []):
+        for line in line_rows:
             qty = float(line.get("quantity", 0) or 0)
             description = (line.get("description") or "")
             product_id = line.get("product_id")
@@ -145,6 +163,13 @@ def get_year_data(user_id: str, year: int):
                         if name and name in desc_lower:
                             unit = product_unit_by_name[name]
                             break
+            if unit is None and product_unit_by_price:
+                try:
+                    lp = round(float(line.get("unit_price_ex_btw") or 0), 2)
+                except (TypeError, ValueError):
+                    lp = 0.0
+                if lp in product_unit_by_price:
+                    unit = product_unit_by_price[lp]
             if unit is None:
                 unit = (line.get("unit") or "fixed").lower()
             if unit == "day":
