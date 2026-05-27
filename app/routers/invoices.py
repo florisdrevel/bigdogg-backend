@@ -351,7 +351,7 @@ async def update_invoice(invoice_id: str, request: Request):
     user_id = get_user_id(request)
     try:
         body = await request.json()
-        allowed = ["project_id", "notes", "status"]
+        allowed = ["project_id", "notes", "status", "payment_link_enabled"]
         update = {k: v for k, v in body.items() if k in allowed}
         if not update:
             raise HTTPException(status_code=400, detail="No valid fields to update")

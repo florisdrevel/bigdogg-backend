@@ -184,7 +184,12 @@ async def send_invoice_email(invoice_id: str, request: Request):
             or (profile.get('full_name') or '').strip()
             or sender_name
         )
-        payment_link = invoice.get('payment_link') if include_payment_link else None
+        # The link is sent only when BOTH the per-send flag is on AND the
+        # invoice's own payment_link_enabled toggle is on (the toggle on
+        # the invoice detail screen). Either being off suppresses it.
+        link_enabled = invoice.get('payment_link_enabled', True) is not False
+        payment_link = (invoice.get('payment_link')
+                        if (include_payment_link and link_enabled) else None)
 
         subject = f"Factuur {invoice_number} — {sender_name}"
 
