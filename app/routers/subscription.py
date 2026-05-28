@@ -218,7 +218,7 @@ def enforce_report_access(
                     "quantity": 1,
                 }],
                 mode="payment",
-                success_url=f"{APP_URL}/#/dashboard?report=ready",
+                success_url=f"{APP_URL}/#/payment-success?kind=report",
                 cancel_url=f"{APP_URL}/#/dashboard",
                 metadata={
                     "user_id": user_id,
@@ -581,7 +581,7 @@ async def create_checkout(request: Request, data: CheckoutRequest = None):
                 "quantity": 1,
             }],
             "mode": "subscription",
-            "success_url": f"{APP_URL}/#/dashboard?payment=success",
+            "success_url": f"{APP_URL}/#/payment-success?kind=subscription",
             "cancel_url": f"{APP_URL}/#/pricing",
             "metadata": {"user_id": user_id, "plan": plan},
         }
@@ -596,6 +596,45 @@ async def create_checkout(request: Request, data: CheckoutRequest = None):
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/portal")
+async def create_portal_session(request: Request):
+    """Stripe Billing Portal handoff for monthly/yearly subscribers who
+    want to update card, cancel, or view invoices. Returns a one-shot
+    URL that the web /subscription route redirects to.
+
+    PAYG users have no Stripe customer record (their signup is free), so
+    they get a 400 — the web layer surfaces them their own status page
+    instead of trying to open a portal.
+    """
+    user_id = get_user_id(request)
+    result = supabase.table("subscriptions")\
+        .select("stripe_customer_id, plan, status")\
+        .eq("user_id", user_id)\
+        .execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="No subscription found")
+    row = result.data[0]
+    customer_id = row.get("stripe_customer_id")
+    if not customer_id:
+        # PAYG users + legacy active rows without a Stripe customer.
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": "no_stripe_customer",
+                "plan": row.get("plan"),
+                "status": row.get("status"),
+            },
+        )
+    try:
+        portal = stripe.billing_portal.Session.create(
+            customer=customer_id,
+            return_url=f"{APP_URL}/#/dashboard",
+        )
+        return {"url": portal.url}
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=500, detail=f"Stripe error: {e}")
 
 
 @router.post("/check-report-access")
@@ -681,7 +720,7 @@ async def check_report_access(request: Request, data: ReportCheckoutRequest):
                     "quantity": 1,
                 }],
                 mode="payment",
-                success_url=f"{APP_URL}/#/dashboard?report=ready",
+                success_url=f"{APP_URL}/#/payment-success?kind=report",
                 cancel_url=f"{APP_URL}/#/dashboard",
                 metadata={
                     "user_id": user_id,
@@ -744,7 +783,7 @@ async def create_report_checkout(
                 "quantity": 1,
             }],
             mode="payment",
-            success_url=f"{APP_URL}/#/dashboard?report=ready",
+            success_url=f"{APP_URL}/#/payment-success?kind=report",
             cancel_url=f"{APP_URL}/#/dashboard",
             metadata={
                 "user_id": user_id,
@@ -956,7 +995,7 @@ async def send_trial_expiry_notifications(request: Request):
                         "quantity": 1,
                     }],
                     mode="subscription",
-                    success_url=f"{APP_URL}/#/dashboard?payment=success",
+                    success_url=f"{APP_URL}/#/payment-success?kind=subscription",
                     cancel_url=f"{APP_URL}/#/dashboard",
                     metadata={"user_id": user_id},
                 )
