@@ -430,32 +430,11 @@ async def main_webhook(request: Request):
             metadata = data.get("metadata") or {}
             user_id = metadata.get("user_id")
             invoice_id = metadata.get("invoice_id")
-            purchase_kind = metadata.get("purchase_kind", "")
 
             if invoice_id:
                 payment_status = data.get("payment_status")
                 if payment_status == "paid":
                     _mark_invoice_paid(invoice_id)
-            elif purchase_kind == "report" and user_id:
-                # PAYG one-shot report purchase. Drop a credit row that
-                # the PDF endpoint consumes on the next download attempt.
-                try:
-                    report_type = metadata.get("report_type")
-                    year_str = metadata.get("year") or ""
-                    quarter_str = metadata.get("quarter") or ""
-                    if report_type in ("annual_report", "vat_report") and year_str.isdigit():
-                        row = {
-                            "user_id": user_id,
-                            "type": report_type,
-                            "year": int(year_str),
-                            "stripe_session_id": data.get("id"),
-                            "paid_at": datetime.now(timezone.utc).isoformat(),
-                        }
-                        if quarter_str.isdigit():
-                            row["quarter"] = int(quarter_str)
-                        supabase.table("report_download_credits").insert(row).execute()
-                except Exception as cred_err:
-                    print(f"Report credit insert error (main webhook): {cred_err}")
             elif user_id:
                 # Subscription purchase. Window length tracks the plan
                 # so yearly users don't get their access expired after a

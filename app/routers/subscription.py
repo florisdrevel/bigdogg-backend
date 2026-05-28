@@ -16,43 +16,31 @@ APP_URL = "https://bigdogg.nl"
 PRICE_CURRENCY = "eur"
 
 # Subscription tiers (cents).
-PRICE_MONTHLY = 999    # €9.99 / month
-PRICE_YEARLY = 9999    # €99.99 / year
-
-# Pay-as-you-go report unit prices (cents).
-PRICE_ANNUAL_REPORT = 500  # €5.00 per annual PDF
-PRICE_VAT_REPORT = 100     # €1.00 per BTW PDF
+PRICE_MONTHLY = 1199   # €11.99 / month
+PRICE_YEARLY = 11988   # €119.88 / year — exactly 12 × €9.99 so marketing
+                       # can keep "from €9,99/maand" on the yearly plan.
 
 # Legacy alias — older code paths still reference PRICE_AMOUNT for the
 # monthly recurring price (e.g. referral-bonus Stripe credits).
 PRICE_AMOUNT = PRICE_MONTHLY
 
-# BigDogg subscription expense (€9.99 incl. 21% BTW)
-BIGDOGG_AMOUNT_EX_BTW = 8.26
-BIGDOGG_BTW_AMOUNT = 1.73
+# BigDogg subscription expense (€11.99 incl. 21% BTW)
+BIGDOGG_AMOUNT_EX_BTW = 9.91
+BIGDOGG_BTW_AMOUNT = 2.08
 BIGDOGG_BTW_RATE = 21
 
-# BigDogg yearly subscription expense (€99.99 incl. 21% BTW)
-BIGDOGG_YEAR_AMOUNT_EX_BTW = 82.64
-BIGDOGG_YEAR_BTW_AMOUNT = 17.35
+# BigDogg yearly subscription expense (€119.88 incl. 21% BTW)
+BIGDOGG_YEAR_AMOUNT_EX_BTW = 99.07
+BIGDOGG_YEAR_BTW_AMOUNT = 20.81
 
-ALLOWED_PLANS = {"monthly", "yearly", "payg"}
-ALLOWED_REPORT_TYPES = {"annual_report", "vat_report"}
+ALLOWED_PLANS = {"monthly", "yearly"}
 
 
 class CheckoutRequest(BaseModel):
-    # 'monthly' | 'yearly' | 'payg'. Defaults to monthly so legacy clients
-    # that don't pass a plan keep working unchanged.
+    # 'monthly' | 'yearly'. Defaults to monthly so legacy clients that
+    # don't pass a plan keep working unchanged.
     plan: Optional[str] = "monthly"
     email: Optional[str] = None
-
-
-class ReportCheckoutRequest(BaseModel):
-    # 'annual_report' or 'vat_report'.
-    type: str
-    year: int
-    # Required for vat_report (Q1–Q4); ignored for annual_report.
-    quarter: Optional[int] = None
 
 
 def get_user_id(request: Request) -> str:
@@ -70,9 +58,8 @@ def get_user_id(request: Request) -> str:
 def require_active_paid(user_id: str):
     """Raises 403 if the user has no usable subscription.
 
-    "Active" here covers all three tiers — monthly, yearly, and PAYG —
-    plus the referral-bonus grace period. Per-report PAYG charging is
-    enforced separately by the report endpoints (see consume_report_credit).
+    "Active" covers monthly and yearly subscribers plus the
+    referral-bonus grace period.
     """
     result = supabase.table("subscriptions")\
         .select("status, bonus_active_until")\
@@ -96,44 +83,9 @@ def require_active_paid(user_id: str):
     raise HTTPException(status_code=403, detail="paid_tier_required")
 
 
-def consume_report_credit(
-    user_id: str, report_type: str, year: int, quarter: Optional[int] = None
-) -> bool:
-    """Find and atomically consume one unused PAYG credit. Returns True
-    on success, False when no credit exists (caller should return 402).
-    Only relevant for plan='payg' users — monthly/yearly subscribers
-    bypass this check entirely.
-    """
-    if report_type not in ALLOWED_REPORT_TYPES:
-        return False
-    q = supabase.table("report_download_credits")\
-        .select("id")\
-        .eq("user_id", user_id)\
-        .eq("type", report_type)\
-        .eq("year", year)\
-        .is_("used_at", "null")
-    if quarter is not None:
-        q = q.eq("quarter", quarter)
-    else:
-        q = q.is_("quarter", "null")
-    result = q.limit(1).execute()
-    if not result.data:
-        return False
-    credit_id = result.data[0]["id"]
-    # Race-safe consume: only mark used_at if it's still null. If two
-    # PDF requests race for the same credit, the second update affects
-    # zero rows and we return False.
-    consumed = supabase.table("report_download_credits")\
-        .update({"used_at": datetime.now(timezone.utc).isoformat()})\
-        .eq("id", credit_id)\
-        .is_("used_at", "null")\
-        .execute()
-    return bool(consumed.data)
-
-
 def get_user_plan(user_id: str) -> Optional[str]:
-    """Returns the current plan slug ('monthly' | 'yearly' | 'payg') or
-    None if the user has no subscription row."""
+    """Returns the current plan slug ('monthly' | 'yearly') or None if
+    the user has no subscription row."""
     result = supabase.table("subscriptions")\
         .select("plan")\
         .eq("user_id", user_id)\
@@ -143,108 +95,6 @@ def get_user_plan(user_id: str) -> Optional[str]:
     return result.data[0].get("plan")
 
 
-def enforce_report_access(
-    user_id: str,
-    report_type: str,
-    year: int,
-    quarter: Optional[int] = None,
-) -> None:
-    """Gate for annual / BTW PDF downloads.
-
-    - Monthly / yearly subscribers + referral-bonus grace → pass through.
-    - Legacy active rows with plan IS NULL → treated as monthly.
-    - PAYG (plan='payg', status='active') → consume one unused credit.
-      No credit available → 402 with a fresh checkout URL so the app
-      can open it in the in-app web view and retry the download after
-      the webhook lands.
-    - Trial / expired → 403 paid_tier_required (caller surfaces the
-      normal subscribe-paywall modal).
-    """
-    if report_type not in ALLOWED_REPORT_TYPES:
-        raise HTTPException(status_code=400, detail="Unknown report type")
-
-    result = supabase.table("subscriptions")\
-        .select("status, plan, bonus_active_until")\
-        .eq("user_id", user_id)\
-        .execute()
-    if not result.data:
-        raise HTTPException(status_code=403, detail="paid_tier_required")
-    row = result.data[0]
-    plan = row.get("plan")
-    status = row.get("status")
-
-    on_bonus = False
-    bonus_until = row.get("bonus_active_until")
-    if bonus_until:
-        try:
-            until = datetime.fromisoformat(
-                bonus_until.replace("Z", "+00:00")
-            )
-            on_bonus = until > datetime.now(timezone.utc)
-        except Exception:
-            pass
-
-    if (status == "active" and plan in ("monthly", "yearly", None)) or on_bonus:
-        return
-
-    if status == "active" and plan == "payg":
-        if consume_report_credit(user_id, report_type, year, quarter):
-            return
-        # Need to pay — mint a fresh one-time checkout session for this
-        # exact report+period. The webhook will drop a credit row, and
-        # the app's retry of the same PDF endpoint will then consume it.
-        if report_type == "annual_report":
-            unit_amount = PRICE_ANNUAL_REPORT
-            product_name = f"BigDogg jaarrapport {year}"
-            period_label = str(year)
-        else:
-            unit_amount = PRICE_VAT_REPORT
-            product_name = f"BigDogg BTW-aangifte Q{quarter} {year}"
-            period_label = f"Q{quarter} {year}"
-        try:
-            session = stripe.checkout.Session.create(
-                line_items=[{
-                    "price_data": {
-                        "currency": PRICE_CURRENCY,
-                        "product_data": {
-                            "name": product_name,
-                            "description": (
-                                f"Eenmalige aankoop — {period_label}. "
-                                "Download direct na betaling."
-                            ),
-                        },
-                        "unit_amount": unit_amount,
-                    },
-                    "quantity": 1,
-                }],
-                mode="payment",
-                success_url=f"{APP_URL}/#/payment-success?kind=report",
-                cancel_url=f"{APP_URL}/#/dashboard",
-                metadata={
-                    "user_id": user_id,
-                    "purchase_kind": "report",
-                    "report_type": report_type,
-                    "year": str(year),
-                    "quarter": str(quarter) if quarter else "",
-                },
-            )
-            checkout_url = session.url
-        except stripe.error.StripeError as e:
-            raise HTTPException(status_code=500, detail=f"Stripe error: {e}")
-
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "reason": "report_payment_required",
-                "type": report_type,
-                "year": year,
-                "quarter": quarter,
-                "amount_cents": unit_amount,
-                "checkout_url": checkout_url,
-            },
-        )
-
-    raise HTTPException(status_code=403, detail="paid_tier_required")
 
 
 # ─── Referral bonus granting ──────────────────────────────
@@ -498,57 +348,17 @@ async def check_activation(user_id: str):
 
 @router.post("/checkout")
 async def create_checkout(request: Request, data: CheckoutRequest = None):
-    """Create a Stripe Checkout session OR activate PAYG.
+    """Create a Stripe Checkout session for the chosen recurring plan.
 
     Plan branches:
-      - monthly: €9.99/month recurring
-      - yearly:  €99.99/year recurring
-      - payg:    no Stripe session; user is marked active immediately
-                 with plan='payg'. Per-report fees are charged later via
-                 /subscription/report-checkout.
+      - monthly: €11.99/month recurring
+      - yearly:  €119.99/year recurring (~2 months free vs monthly)
     """
     user_id = get_user_id(request)
     plan = (data.plan if data and data.plan else "monthly").lower()
     if plan not in ALLOWED_PLANS:
         raise HTTPException(status_code=400, detail="Unknown plan")
 
-    if plan == "payg":
-        # Free signup: flip the user to active with plan='payg'. Skip
-        # Stripe entirely — they'll pay only when generating reports.
-        try:
-            existing = supabase.table("subscriptions")\
-                .select("id")\
-                .eq("user_id", user_id)\
-                .execute()
-            now_iso = datetime.now(timezone.utc).isoformat()
-            if existing.data:
-                supabase.table("subscriptions")\
-                    .update({
-                        "status": "active",
-                        "plan": "payg",
-                        "subscription_ends_at": None,
-                    })\
-                    .eq("user_id", user_id)\
-                    .execute()
-            else:
-                supabase.table("subscriptions").insert({
-                    "user_id": user_id,
-                    "status": "active",
-                    "plan": "payg",
-                    "trial_ends_at": None,
-                    "subscription_ends_at": None,
-                    "created_at": now_iso,
-                }).execute()
-            return {
-                "plan": "payg",
-                "activated": True,
-                "checkout_url": None,
-                "session_id": None,
-            }
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-    # Recurring plans — monthly or yearly.
     if plan == "monthly":
         unit_amount = PRICE_MONTHLY
         interval = "month"
@@ -600,13 +410,18 @@ async def create_checkout(request: Request, data: CheckoutRequest = None):
 
 @router.post("/portal")
 async def create_portal_session(request: Request):
-    """Stripe Billing Portal handoff for monthly/yearly subscribers who
-    want to update card, cancel, or view invoices. Returns a one-shot
-    URL that the web /subscription route redirects to.
+    """Stripe Billing Portal handoff for monthly/yearly subscribers.
 
-    PAYG users have no Stripe customer record (their signup is free), so
-    they get a 400 — the web layer surfaces them their own status page
-    instead of trying to open a portal.
+    Returns one of:
+      - {"url": "<stripe portal URL>"}          → web redirects to Stripe
+      - {"url": null, "status": "legacy_active",
+         "plan": "monthly"|"yearly"|None}       → user is active but has
+        no Stripe customer record (e.g. admin-flipped row or pre-Stripe
+        signup). Web surfaces a "subscription active, contact support
+        to manage billing" status page rather than steering them to
+        upgrade — they're already paid up.
+
+    404 when there's no subscription row at all.
     """
     user_id = get_user_id(request)
     result = supabase.table("subscriptions")\
@@ -617,185 +432,27 @@ async def create_portal_session(request: Request):
         raise HTTPException(status_code=404, detail="No subscription found")
     row = result.data[0]
     customer_id = row.get("stripe_customer_id")
+    status = row.get("status")
+    plan = row.get("plan")
+
     if not customer_id:
-        # PAYG users + legacy active rows without a Stripe customer.
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "reason": "no_stripe_customer",
-                "plan": row.get("plan"),
-                "status": row.get("status"),
-            },
-        )
+        # Legacy / admin-activated row. Don't 400 — just tell the web
+        # layer the user is active without a Stripe customer so it can
+        # render the right status page.
+        return {
+            "url": None,
+            "status": "legacy_active" if status == "active" else (status or "unknown"),
+            "plan": plan,
+        }
     try:
         portal = stripe.billing_portal.Session.create(
             customer=customer_id,
             return_url=f"{APP_URL}/#/dashboard",
         )
-        return {"url": portal.url}
+        return {"url": portal.url, "status": status, "plan": plan}
     except stripe.error.StripeError as e:
         raise HTTPException(status_code=500, detail=f"Stripe error: {e}")
 
-
-@router.post("/check-report-access")
-async def check_report_access(request: Request, data: ReportCheckoutRequest):
-    """Non-consuming gate probe used by the app before it `launchUrl`s
-    the PDF endpoint. Returns one of:
-
-    - {"access": "allowed"} — go ahead, fetch the PDF.
-    - {"access": "payment_required", "checkout_url": "...", "amount_cents": …}
-      — open the URL in the in-app web view; after it closes, retry.
-    - {"access": "subscribe_required"} — show the subscribe paywall.
-
-    No credit is consumed here; the actual PDF endpoint does that when
-    it serves the bytes.
-    """
-    user_id = get_user_id(request)
-    if data.type not in ALLOWED_REPORT_TYPES:
-        raise HTTPException(status_code=400, detail="Unknown report type")
-    if data.type == "vat_report" and data.quarter not in (1, 2, 3, 4):
-        raise HTTPException(status_code=400, detail="quarter must be 1–4")
-
-    result = supabase.table("subscriptions")\
-        .select("status, plan, bonus_active_until")\
-        .eq("user_id", user_id)\
-        .execute()
-    if not result.data:
-        return {"access": "subscribe_required"}
-    row = result.data[0]
-    plan = row.get("plan")
-    status = row.get("status")
-
-    on_bonus = False
-    bonus_until = row.get("bonus_active_until")
-    if bonus_until:
-        try:
-            until = datetime.fromisoformat(
-                bonus_until.replace("Z", "+00:00")
-            )
-            on_bonus = until > datetime.now(timezone.utc)
-        except Exception:
-            pass
-
-    if (status == "active" and plan in ("monthly", "yearly", None)) or on_bonus:
-        return {"access": "allowed"}
-
-    if status == "active" and plan == "payg":
-        # Look for an unused credit without consuming it.
-        q = supabase.table("report_download_credits")\
-            .select("id")\
-            .eq("user_id", user_id)\
-            .eq("type", data.type)\
-            .eq("year", data.year)\
-            .is_("used_at", "null")
-        if data.quarter is not None:
-            q = q.eq("quarter", data.quarter)
-        else:
-            q = q.is_("quarter", "null")
-        if q.limit(1).execute().data:
-            return {"access": "allowed"}
-
-        if data.type == "annual_report":
-            unit_amount = PRICE_ANNUAL_REPORT
-            product_name = f"BigDogg jaarrapport {data.year}"
-            period_label = str(data.year)
-        else:
-            unit_amount = PRICE_VAT_REPORT
-            product_name = f"BigDogg BTW-aangifte Q{data.quarter} {data.year}"
-            period_label = f"Q{data.quarter} {data.year}"
-        try:
-            session = stripe.checkout.Session.create(
-                line_items=[{
-                    "price_data": {
-                        "currency": PRICE_CURRENCY,
-                        "product_data": {
-                            "name": product_name,
-                            "description": (
-                                f"Eenmalige aankoop — {period_label}. "
-                                "Download direct na betaling."
-                            ),
-                        },
-                        "unit_amount": unit_amount,
-                    },
-                    "quantity": 1,
-                }],
-                mode="payment",
-                success_url=f"{APP_URL}/#/payment-success?kind=report",
-                cancel_url=f"{APP_URL}/#/dashboard",
-                metadata={
-                    "user_id": user_id,
-                    "purchase_kind": "report",
-                    "report_type": data.type,
-                    "year": str(data.year),
-                    "quarter": str(data.quarter) if data.quarter else "",
-                },
-            )
-            return {
-                "access": "payment_required",
-                "type": data.type,
-                "year": data.year,
-                "quarter": data.quarter,
-                "amount_cents": unit_amount,
-                "checkout_url": session.url,
-            }
-        except stripe.error.StripeError as e:
-            raise HTTPException(status_code=500, detail=f"Stripe error: {e}")
-
-    return {"access": "subscribe_required"}
-
-
-@router.post("/report-checkout")
-async def create_report_checkout(
-    request: Request, data: ReportCheckoutRequest
-):
-    """One-time Stripe Checkout for a PAYG report download. Returns a
-    URL the app opens in the in-app web view. The matching credit is
-    inserted by the checkout.session.completed webhook handler."""
-    user_id = get_user_id(request)
-    if data.type not in ALLOWED_REPORT_TYPES:
-        raise HTTPException(status_code=400, detail="Unknown report type")
-    if data.type == "vat_report" and data.quarter not in (1, 2, 3, 4):
-        raise HTTPException(status_code=400, detail="quarter must be 1–4")
-
-    if data.type == "annual_report":
-        unit_amount = PRICE_ANNUAL_REPORT
-        product_name = f"BigDogg jaarrapport {data.year}"
-        period_label = str(data.year)
-    else:
-        unit_amount = PRICE_VAT_REPORT
-        product_name = f"BigDogg BTW-aangifte Q{data.quarter} {data.year}"
-        period_label = f"Q{data.quarter} {data.year}"
-
-    try:
-        session = stripe.checkout.Session.create(
-            line_items=[{
-                "price_data": {
-                    "currency": PRICE_CURRENCY,
-                    "product_data": {
-                        "name": product_name,
-                        "description": (
-                            f"Eenmalige aankoop — {period_label}. "
-                            "Download direct na betaling."
-                        ),
-                    },
-                    "unit_amount": unit_amount,
-                },
-                "quantity": 1,
-            }],
-            mode="payment",
-            success_url=f"{APP_URL}/#/payment-success?kind=report",
-            cancel_url=f"{APP_URL}/#/dashboard",
-            metadata={
-                "user_id": user_id,
-                "purchase_kind": "report",
-                "report_type": data.type,
-                "year": str(data.year),
-                "quarter": str(data.quarter) if data.quarter else "",
-            },
-        )
-        return {"checkout_url": session.url, "session_id": session.id}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
 
 def _insert_bigdogg_expense(user_id: str, label: str, plan: str = "monthly") -> None:
@@ -1284,31 +941,8 @@ async def stripe_webhook(request: Request):
 
             metadata = session.get("metadata") or {}
             user_id = metadata.get("user_id")
-            purchase_kind = metadata.get("purchase_kind", "subscription")
 
-            # One-time PAYG report purchase. Drop a credit row that the
-            # PDF endpoint will consume on the next download attempt.
-            if purchase_kind == "report" and user_id:
-                try:
-                    report_type = metadata.get("report_type")
-                    year_str = metadata.get("year") or ""
-                    quarter_str = metadata.get("quarter") or ""
-                    if report_type in ALLOWED_REPORT_TYPES and year_str.isdigit():
-                        row = {
-                            "user_id": user_id,
-                            "type": report_type,
-                            "year": int(year_str),
-                            "stripe_session_id": session.get("id"),
-                            "paid_at": datetime.now(timezone.utc).isoformat(),
-                        }
-                        if quarter_str.isdigit():
-                            row["quarter"] = int(quarter_str)
-                        supabase.table("report_download_credits").insert(row).execute()
-                except Exception as cred_err:
-                    print(f"Report credit insert error: {cred_err}")
-                # Done — report purchases don't touch the subscription row.
-
-            elif user_id:
+            if user_id:
                 # Subscription purchase (monthly or yearly). Plan comes
                 # from session metadata; default to 'monthly' for legacy
                 # sessions that pre-date the column.

@@ -3,7 +3,7 @@ from fastapi.responses import Response
 from app.database import supabase
 from app.config import settings
 from app.routers.pdf import TEAL, GOLD, LIGHT_GREY, MID_GREY, TEXT_SECONDARY
-from app.routers.subscription import require_active_paid, enforce_report_access
+from app.routers.subscription import require_active_paid
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
@@ -648,12 +648,10 @@ async def download_annual_report(
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
+    require_active_paid(user_id)
+
     if not year:
         year = datetime.now().year - 1
-
-    # PAYG users get a 402 with a checkout URL here; monthly/yearly
-    # subscribers and bonus users pass through unchanged.
-    enforce_report_access(user_id, "annual_report", year)
 
     profile_result = supabase.table("user_profiles").select("*").eq("id", user_id).execute()
     profile = profile_result.data[0] if profile_result.data else {}
