@@ -267,6 +267,45 @@ async def get_subscription_status(request: Request):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get("/activated")
+async def check_activation(user_id: str):
+    """Lightweight, no-auth status probe used by the mobile app after the
+    in-app web view closes. The native client polls this once webhook
+    processing has had a moment to land so it can auto-dismiss the
+    paywall and grant full access without an app restart.
+
+    Returns:
+        {"active": true|false, "plan": "monthly"|None}
+    """
+    if not user_id or not user_id.strip():
+        raise HTTPException(status_code=400, detail="user_id is required")
+    try:
+        result = supabase.table("subscriptions")\
+            .select("status, bonus_active_until")\
+            .eq("user_id", user_id)\
+            .execute()
+        if not result.data:
+            return {"active": False, "plan": None}
+        row = result.data[0]
+        if row.get("status") == "active":
+            return {"active": True, "plan": "monthly"}
+        # A referral bonus counts as active for entitlement purposes —
+        # match the rule used by require_active_paid().
+        bonus_until = row.get("bonus_active_until")
+        if bonus_until:
+            try:
+                until = datetime.fromisoformat(
+                    bonus_until.replace("Z", "+00:00")
+                )
+                if until > datetime.now(timezone.utc):
+                    return {"active": True, "plan": "monthly"}
+            except Exception:
+                pass
+        return {"active": False, "plan": None}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/checkout")
 async def create_checkout(request: Request, data: CheckoutRequest = None):
     user_id = get_user_id(request)
