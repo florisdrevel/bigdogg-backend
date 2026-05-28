@@ -43,6 +43,51 @@ class CheckoutRequest(BaseModel):
     email: Optional[str] = None
 
 
+ALLOWED_CANCEL_REASONS = {
+    "too_expensive",
+    "not_using",
+    "missing_feature",
+    "found_alternative",
+    "stopped_freelancing",
+    "other",
+}
+# Reasons that get a retention save offer. Skipped for users who stopped
+# freelancing (no point retaining a non-customer) and for missing-feature
+# (their signal is the feature request itself, not a discount).
+REASONS_WITH_OFFER = {
+    "too_expensive",
+    "not_using",
+    "found_alternative",
+    "other",
+}
+RETENTION_OFFER_MONTHS = 3
+RETENTION_COOLDOWN_DAYS = 365  # 1 offer per user per year
+
+
+class CancelRequest(BaseModel):
+    reason: str
+    comment: Optional[str] = None
+    accept_offer: bool = False
+
+
+def _user_has_recent_offer(user_id: str) -> bool:
+    """Has this user accepted a retention offer in the last
+    RETENTION_COOLDOWN_DAYS? If yes, the next cancel attempt skips the
+    offer step — prevents farming free months in a loop.
+    """
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=RETENTION_COOLDOWN_DAYS)
+    ).isoformat()
+    result = supabase.table("subscription_cancellation_events")\
+        .select("id")\
+        .eq("user_id", user_id)\
+        .eq("outcome", "offer_accepted")\
+        .gte("happened_at", cutoff)\
+        .limit(1)\
+        .execute()
+    return bool(result.data)
+
+
 def get_user_id(request: Request) -> str:
     auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
     if not auth_header:
@@ -453,6 +498,285 @@ async def create_portal_session(request: Request):
     except stripe.error.StripeError as e:
         raise HTTPException(status_code=500, detail=f"Stripe error: {e}")
 
+
+@router.get("/usage-summary")
+async def get_usage_summary(request: Request):
+    """Stats shown on step 1 of the cancel flow ("don't go yet"). Keeps
+    the payload small — just enough to remind the user what they've
+    built in BigDogg before they give it up.
+    """
+    user_id = get_user_id(request)
+    try:
+        invoices = supabase.table("invoices")\
+            .select("id, total_incl_btw, status, invoice_date", count="exact")\
+            .eq("user_id", user_id)\
+            .neq("status", "draft")\
+            .execute()
+        invoice_rows = invoices.data or []
+        invoices_count = invoices.count if invoices.count is not None else len(invoice_rows)
+        revenue_tracked = sum(
+            float(row.get("total_incl_btw") or 0) for row in invoice_rows
+        )
+
+        clients = supabase.table("clients")\
+            .select("id", count="exact")\
+            .eq("user_id", user_id)\
+            .execute()
+        clients_count = clients.count if clients.count is not None else len(
+            clients.data or []
+        )
+
+        expenses = supabase.table("expenses")\
+            .select("id", count="exact")\
+            .eq("user_id", user_id)\
+            .execute()
+        expenses_count = expenses.count if expenses.count is not None else len(
+            expenses.data or []
+        )
+
+        # Member-since date: earliest of subscription created_at and the
+        # user's first invoice. We don't expose the auth user object here
+        # so we approximate.
+        sub = supabase.table("subscriptions")\
+            .select("created_at")\
+            .eq("user_id", user_id)\
+            .execute()
+        member_since = (
+            sub.data[0].get("created_at") if sub.data else None
+        )
+
+        return {
+            "invoices_count": invoices_count,
+            "clients_count": clients_count,
+            "expenses_count": expenses_count,
+            "revenue_tracked": round(revenue_tracked, 2),
+            "member_since": member_since,
+            "offer_available": not _user_has_recent_offer(user_id),
+            "offer_months": RETENTION_OFFER_MONTHS,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/cancel")
+async def cancel_subscription(request: Request, data: CancelRequest):
+    """Cancel the user's subscription OR apply the retention save offer
+    (3 months free) depending on `accept_offer`. Idempotent for offer
+    acceptance — the cooldown check prevents double-granting.
+
+    Outcomes:
+      - accept_offer=True with offer available
+          • monthly: a 3 × €11.99 Stripe customer-balance credit (eaten
+            by the next three invoices)
+          • yearly: subscription_ends_at extended by 90 days
+        Returns {"outcome": "offer_accepted", ...}.
+      - accept_offer=True with offer not available (cooldown active)
+          Falls through to full cancellation — the UI is supposed to
+          skip the offer step in that case, but we never gift a second
+          one even if a client misbehaves.
+      - accept_offer=False
+          Stripe: cancel_at_period_end=True so the user keeps access
+          until the end of the current billing cycle. Legacy active
+          (no stripe customer): flips status='expired' immediately.
+        Returns {"outcome": "cancelled", "access_until": ...}.
+    """
+    user_id = get_user_id(request)
+    reason = (data.reason or "").strip().lower()
+    if reason not in ALLOWED_CANCEL_REASONS:
+        raise HTTPException(status_code=400, detail="Unknown reason")
+
+    sub_result = supabase.table("subscriptions")\
+        .select(
+            "id, status, plan, stripe_subscription_id, stripe_customer_id, "
+            "subscription_ends_at, bonus_active_until"
+        )\
+        .eq("user_id", user_id)\
+        .execute()
+    if not sub_result.data:
+        raise HTTPException(status_code=404, detail="No subscription found")
+    sub = sub_result.data[0]
+    plan = sub.get("plan")
+    stripe_sub_id = sub.get("stripe_subscription_id")
+    stripe_cust_id = sub.get("stripe_customer_id")
+
+    now = datetime.now(timezone.utc)
+
+    # ── Save-offer path ──
+    if (
+        data.accept_offer
+        and reason in REASONS_WITH_OFFER
+        and not _user_has_recent_offer(user_id)
+    ):
+        stripe_reference = None
+        new_ends_at = None
+        try:
+            if plan == "yearly":
+                # Extend access by 90 days. Use subscription_ends_at as
+                # the truth, falling back to now() if it's null.
+                cur_raw = sub.get("subscription_ends_at")
+                base = now
+                if cur_raw:
+                    try:
+                        cur = datetime.fromisoformat(
+                            cur_raw.replace("Z", "+00:00")
+                        )
+                        if cur > base:
+                            base = cur
+                    except Exception:
+                        pass
+                new_ends_at = base + timedelta(days=30 * RETENTION_OFFER_MONTHS)
+                supabase.table("subscriptions")\
+                    .update({
+                        "subscription_ends_at": new_ends_at.isoformat(),
+                    })\
+                    .eq("user_id", user_id)\
+                    .execute()
+                stripe_reference = f"yearly_extension_{new_ends_at.date()}"
+            else:
+                # Monthly (or legacy active treated as monthly). Drop a
+                # negative customer-balance txn so the next three monthly
+                # invoices are eaten by it. If there's no Stripe customer
+                # (legacy active row), fall back to a 90-day bonus window
+                # extension so the user still sees the value.
+                credit_cents = PRICE_MONTHLY * RETENTION_OFFER_MONTHS
+                if stripe_cust_id:
+                    try:
+                        txn = stripe.Customer.create_balance_transaction(
+                            stripe_cust_id,
+                            amount=-credit_cents,
+                            currency=PRICE_CURRENCY,
+                            description=(
+                                f"BigDogg retention offer — "
+                                f"{RETENTION_OFFER_MONTHS} maanden gratis"
+                            ),
+                        )
+                        stripe_reference = getattr(txn, "id", None) or "credit_applied"
+                    except stripe.error.StripeError as e:
+                        # Fall back to bonus_active_until extension if
+                        # Stripe rejects the credit (rare — mismatched
+                        # mode, deleted customer, etc.).
+                        print(f"Retention credit failed, extending bonus instead: {e}")
+                        stripe_reference = None
+                if not stripe_reference:
+                    cur_raw = sub.get("bonus_active_until")
+                    base = now
+                    if cur_raw:
+                        try:
+                            cur = datetime.fromisoformat(
+                                cur_raw.replace("Z", "+00:00")
+                            )
+                            if cur > base:
+                                base = cur
+                        except Exception:
+                            pass
+                    new_until = base + timedelta(
+                        days=30 * RETENTION_OFFER_MONTHS
+                    )
+                    supabase.table("subscriptions")\
+                        .update({"bonus_active_until": new_until.isoformat()})\
+                        .eq("user_id", user_id)\
+                        .execute()
+                    stripe_reference = (
+                        f"bonus_extension_{new_until.date()}"
+                    )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+        supabase.table("subscription_cancellation_events").insert({
+            "user_id": user_id,
+            "reason": reason,
+            "comment": data.comment,
+            "outcome": "offer_accepted",
+            "stripe_reference": stripe_reference,
+            "plan_at_event": plan,
+        }).execute()
+
+        return {
+            "outcome": "offer_accepted",
+            "months_free": RETENTION_OFFER_MONTHS,
+            "plan": plan,
+            "extended_until": new_ends_at.isoformat() if new_ends_at else None,
+        }
+
+    # ── Full cancel path ──
+    access_until_iso = None
+    if stripe_sub_id:
+        try:
+            updated = stripe.Subscription.modify(
+                stripe_sub_id, cancel_at_period_end=True
+            )
+            # Stripe returns the period end as a unix timestamp.
+            ts = getattr(updated, "current_period_end", None)
+            if ts:
+                access_until_iso = datetime.fromtimestamp(
+                    ts, tz=timezone.utc
+                ).isoformat()
+                supabase.table("subscriptions")\
+                    .update({"subscription_ends_at": access_until_iso})\
+                    .eq("user_id", user_id)\
+                    .execute()
+        except stripe.error.StripeError as e:
+            raise HTTPException(status_code=500, detail=f"Stripe error: {e}")
+    else:
+        # Legacy active or PAYG-from-removed-flow: no Stripe sub to
+        # cancel. Flip status straight to expired so the user enters
+        # read-only mode on next session refresh.
+        supabase.table("subscriptions")\
+            .update({"status": "expired"})\
+            .eq("user_id", user_id)\
+            .execute()
+        access_until_iso = now.isoformat()
+
+    supabase.table("subscription_cancellation_events").insert({
+        "user_id": user_id,
+        "reason": reason,
+        "comment": data.comment,
+        "outcome": "cancelled",
+        "stripe_reference": stripe_sub_id,
+        "plan_at_event": plan,
+    }).execute()
+
+    return {
+        "outcome": "cancelled",
+        "access_until": access_until_iso,
+        "plan": plan,
+    }
+
+
+@router.post("/reactivate")
+async def reactivate_subscription(request: Request):
+    """Undo a pending cancellation. Useful if the user changes their
+    mind on the cancellation-confirmation screen.
+    """
+    user_id = get_user_id(request)
+    sub_result = supabase.table("subscriptions")\
+        .select("plan, stripe_subscription_id, status")\
+        .eq("user_id", user_id)\
+        .execute()
+    if not sub_result.data:
+        raise HTTPException(status_code=404, detail="No subscription found")
+    sub = sub_result.data[0]
+    stripe_sub_id = sub.get("stripe_subscription_id")
+    if not stripe_sub_id:
+        raise HTTPException(
+            status_code=400,
+            detail="No Stripe subscription to reactivate",
+        )
+    try:
+        stripe.Subscription.modify(stripe_sub_id, cancel_at_period_end=False)
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=500, detail=f"Stripe error: {e}")
+
+    supabase.table("subscription_cancellation_events").insert({
+        "user_id": user_id,
+        "reason": "other",
+        "comment": "reactivated via portal",
+        "outcome": "reactivated",
+        "stripe_reference": stripe_sub_id,
+        "plan_at_event": sub.get("plan"),
+    }).execute()
+
+    return {"outcome": "reactivated"}
 
 
 def _insert_bigdogg_expense(user_id: str, label: str, plan: str = "monthly") -> None:
