@@ -430,13 +430,41 @@ async def main_webhook(request: Request):
             metadata = data.get("metadata") or {}
             user_id = metadata.get("user_id")
             invoice_id = metadata.get("invoice_id")
+            purchase_kind = metadata.get("purchase_kind", "")
 
             if invoice_id:
                 payment_status = data.get("payment_status")
                 if payment_status == "paid":
                     _mark_invoice_paid(invoice_id)
+            elif purchase_kind == "report" and user_id:
+                # PAYG one-shot report purchase. Drop a credit row that
+                # the PDF endpoint consumes on the next download attempt.
+                try:
+                    report_type = metadata.get("report_type")
+                    year_str = metadata.get("year") or ""
+                    quarter_str = metadata.get("quarter") or ""
+                    if report_type in ("annual_report", "vat_report") and year_str.isdigit():
+                        row = {
+                            "user_id": user_id,
+                            "type": report_type,
+                            "year": int(year_str),
+                            "stripe_session_id": data.get("id"),
+                            "paid_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        if quarter_str.isdigit():
+                            row["quarter"] = int(quarter_str)
+                        supabase.table("report_download_credits").insert(row).execute()
+                except Exception as cred_err:
+                    print(f"Report credit insert error (main webhook): {cred_err}")
             elif user_id:
-                ends_at = datetime.now(timezone.utc) + timedelta(days=30)
+                # Subscription purchase. Window length tracks the plan
+                # so yearly users don't get their access expired after a
+                # month.
+                plan = metadata.get("plan", "monthly")
+                if plan not in ("monthly", "yearly"):
+                    plan = "monthly"
+                days = 365 if plan == "yearly" else 30
+                ends_at = datetime.now(timezone.utc) + timedelta(days=days)
                 existing = supabase.table("subscriptions")\
                     .select("id")\
                     .eq("user_id", user_id)\
@@ -445,6 +473,7 @@ async def main_webhook(request: Request):
                     supabase.table("subscriptions")\
                         .update({
                             "status": "active",
+                            "plan": plan,
                             "stripe_customer_id": data.get("customer"),
                             "stripe_subscription_id": data.get("subscription"),
                             "subscription_ends_at": ends_at.isoformat(),
@@ -455,6 +484,7 @@ async def main_webhook(request: Request):
                     supabase.table("subscriptions").insert({
                         "user_id": user_id,
                         "status": "active",
+                        "plan": plan,
                         "stripe_customer_id": data.get("customer"),
                         "stripe_subscription_id": data.get("subscription"),
                         "subscription_ends_at": ends_at.isoformat(),
@@ -463,7 +493,14 @@ async def main_webhook(request: Request):
         elif event_type == "invoice.payment_succeeded":
             customer_id = data.get("customer")
             if customer_id:
-                ends_at = datetime.now(timezone.utc) + timedelta(days=30)
+                # Window length tracks plan (yearly = 365 days).
+                sub_row = supabase.table("subscriptions")\
+                    .select("plan")\
+                    .eq("stripe_customer_id", customer_id)\
+                    .execute()
+                plan = (sub_row.data[0].get("plan") if sub_row.data else None) or "monthly"
+                days = 365 if plan == "yearly" else 30
+                ends_at = datetime.now(timezone.utc) + timedelta(days=days)
                 supabase.table("subscriptions")\
                     .update({
                         "status": "active",

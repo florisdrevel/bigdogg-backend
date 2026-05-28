@@ -247,6 +247,10 @@ async def download_btw_report(
     if quarter is None:
         quarter = (today.month - 1) // 3 + 1
 
+    # Gate: PAYG users get a 402 + checkout URL, others pass through.
+    from app.routers.subscription import enforce_report_access
+    enforce_report_access(user_id, "vat_report", year, quarter)
+
     start_date, end_date = get_quarter_dates(year, quarter)
     financials = compute_financials(user_id, start_date, end_date)
     profile = get_profile(user_id)
