@@ -4,6 +4,7 @@ from typing import Optional, List
 from app.database import supabase
 from app.config import settings
 from app.routers.banking import schedule_reconcile
+from app.routers.subscription import require_active_paid
 from datetime import date, timedelta
 import resend
 
@@ -94,6 +95,7 @@ async def get_invoice(invoice_id: str, request: Request):
 @router.post("/")
 async def create_invoice(invoice: InvoiceCreate, request: Request):
     user_id = get_user_id(request)
+    require_active_paid(user_id)
     # Diagnostic: show what the frontend actually sent for each line so
     # we can verify product_id is making the round-trip. Strip after the
     # hours-resolution issue is resolved.
@@ -227,6 +229,7 @@ async def create_invoice(invoice: InvoiceCreate, request: Request):
 @router.patch("/{invoice_id}/status")
 async def update_status(invoice_id: str, request: Request):
     user_id = get_user_id(request)
+    require_active_paid(user_id)
     try:
         body = await request.json()
         status = body.get("status")
@@ -243,6 +246,7 @@ async def update_status(invoice_id: str, request: Request):
 @router.post("/{invoice_id}/reminder")
 async def send_reminder(invoice_id: str, request: Request):
     user_id = get_user_id(request)
+    require_active_paid(user_id)
     try:
         invoice_result = supabase.table("invoices")\
             .select("*, clients(*)")\
@@ -329,6 +333,7 @@ Dit bericht is verzonden via BigDogg · bigdogg.nl
 @router.delete("/{invoice_id}")
 async def delete_invoice(invoice_id: str, request: Request):
     user_id = get_user_id(request)
+    require_active_paid(user_id)
     try:
         invoice = supabase.table("invoices")\
             .select("status")\
@@ -349,6 +354,7 @@ async def delete_invoice(invoice_id: str, request: Request):
 @router.patch("/{invoice_id}")
 async def update_invoice(invoice_id: str, request: Request):
     user_id = get_user_id(request)
+    require_active_paid(user_id)
     try:
         body = await request.json()
         allowed = ["project_id", "notes", "status", "payment_link_enabled"]

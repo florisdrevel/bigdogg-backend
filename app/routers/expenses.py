@@ -51,6 +51,8 @@ async def get_expenses(request: Request):
 @router.post("/")
 async def create_expense(expense: ExpenseCreate, request: Request):
     user_id = get_user_id(request)
+    from app.routers.subscription import require_active_paid
+    require_active_paid(user_id)
     try:
         btw_amount = round(expense.amount_ex_btw * expense.btw_rate / 100, 2)
         expense_date = expense.expense_date or str(date.today())

@@ -420,6 +420,32 @@ async def create_checkout(request: Request, data: CheckoutRequest = None):
             "(2 maanden korting t.o.v. maandelijks)"
         )
 
+    # If this user already has an active Stripe subscription, cancel it
+    # immediately before creating the new one. Otherwise switching plans
+    # (monthly → yearly or vice versa) creates a *second* subscription
+    # while the old one keeps billing — the user thinks they're on
+    # yearly but Stripe is still charging them monthly. Pro-rate so they
+    # get refunded for unused time on the old plan.
+    existing = supabase.table("subscriptions")\
+        .select("stripe_subscription_id")\
+        .eq("user_id", user_id)\
+        .execute()
+    if existing.data:
+        old_sub_id = existing.data[0].get("stripe_subscription_id")
+        if old_sub_id:
+            try:
+                stripe.Subscription.delete(old_sub_id, prorate=True)
+                print(
+                    f"Cancelled existing Stripe subscription {old_sub_id} "
+                    f"for {user_id} before creating new {plan} sub"
+                )
+            except stripe.error.InvalidRequestError as e:
+                # Already cancelled / unknown id — safe to ignore.
+                print(f"Old sub cancel skipped (non-fatal): {e}")
+            except stripe.error.StripeError as e:
+                # Don't block the new sub on a Stripe hiccup, but log it.
+                print(f"Old sub cancel failed (non-fatal): {e}")
+
     try:
         email = data.email if data and data.email else None
         session_params = {
@@ -439,6 +465,12 @@ async def create_checkout(request: Request, data: CheckoutRequest = None):
             "success_url": f"{APP_URL}/#/payment-success?kind=subscription",
             "cancel_url": f"{APP_URL}/#/pricing",
             "metadata": {"user_id": user_id, "plan": plan},
+            # Also tag the resulting subscription itself (not just the
+            # session) so future invoice-renewal webhooks can read the
+            # plan without re-reading our DB.
+            "subscription_data": {
+                "metadata": {"user_id": user_id, "plan": plan},
+            },
         }
         if email:
             session_params["customer_email"] = email
@@ -776,7 +808,296 @@ async def reactivate_subscription(request: Request):
         "plan_at_event": sub.get("plan"),
     }).execute()
 
+    # Welcome-back email — fire and forget so a Resend hiccup never
+    # blocks the actual reactivation.
+    try:
+        _send_welcome_back_email(user_id, sub.get("plan"))
+    except Exception as e:
+        print(f"Welcome-back email error (non-fatal): {e}")
+
     return {"outcome": "reactivated"}
+
+
+def _send_welcome_back_email(user_id: str, plan: Optional[str]) -> None:
+    try:
+        user_data = supabase.auth.admin.get_user_by_id(user_id)
+        email = user_data.user.email if user_data.user else None
+    except Exception:
+        email = None
+    if not email:
+        return
+    profile_result = supabase.table("user_profiles")\
+        .select("full_name, business_name")\
+        .eq("id", user_id)\
+        .execute()
+    profile = profile_result.data[0] if profile_result.data else {}
+    name = (
+        profile.get("full_name")
+        or profile.get("business_name")
+        or email.split("@")[0]
+    )
+    plan_label = (
+        "jaarlijks abonnement" if plan == "yearly" else "maandelijks abonnement"
+    )
+    resend.Emails.send({
+        "from": "BigDogg <info@bigdogg.nl>",
+        "to": [email],
+        "subject": "Welkom terug bij BigDogg 🎉",
+        "html": f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#f5f3ef;font-family:Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f3ef;padding:40px 20px;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+        <tr><td style="background:#1B3A4B;padding:28px 40px;text-align:center;">
+          <div style="font-size:26px;font-weight:900;color:#C9A96E;">BigDogg.</div>
+          <div style="color:#ffffff;opacity:0.7;font-size:12px;margin-top:4px;">Slim boekhouden voor ZZP'ers</div>
+        </td></tr>
+        <tr><td style="background:#166534;padding:18px 40px;text-align:center;border-bottom:1px solid #E2DDD6;">
+          <div style="font-size:30px;">🎉</div>
+          <div style="color:#ffffff;font-size:17px;font-weight:bold;margin-top:6px;">Welkom terug!</div>
+        </td></tr>
+        <tr><td style="padding:36px 40px;">
+          <p style="color:#1B3A4B;font-size:16px;margin:0 0 12px 0;">Hoi {name},</p>
+          <p style="color:#4A6572;font-size:15px;line-height:1.6;margin:0 0 20px 0;">
+            Goed je terug te zien. Je <strong>{plan_label}</strong> is heractiveerd — al je toegang werkt weer normaal: facturen versturen, BTW-aangiftes, jaarrapporten, alles.
+          </p>
+          <p style="color:#4A6572;font-size:14px;line-height:1.6;margin:0 0 24px 0;">
+            Heb je nog feedback over wat we kunnen verbeteren? Antwoord gewoon op deze mail — ik lees alles persoonlijk.
+          </p>
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr><td align="center">
+              <a href="https://bigdogg.nl" style="display:inline-block;background:#1B3A4B;color:#ffffff;text-decoration:none;padding:14px 36px;border-radius:10px;font-weight:bold;font-size:15px;">Open BigDogg</a>
+            </td></tr>
+          </table>
+        </td></tr>
+        <tr><td style="background:#f5f3ef;padding:20px 40px;text-align:center;border-top:1px solid #E2DDD6;">
+          <div style="color:#4A6572;font-size:12px;">BigDogg · <a href="https://bigdogg.nl" style="color:#1B3A4B;">bigdogg.nl</a></div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>""",
+    })
+
+
+@router.post("/cron/cancellation-reminders")
+async def send_cancellation_reminders(request: Request):
+    """Daily cron — emails users 7 days before their cancelled
+    subscription's access window ends. Targets users whose latest
+    cancellation_event has outcome='cancelled' (filtering out the
+    normal-renewal-cycle false positives) and whose subscription_ends_at
+    is exactly 7 days from now.
+
+    Header: x-cron-secret. Suggested: daily at 09:00 Europe/Amsterdam.
+    """
+    auth = request.headers.get("x-cron-secret", "")
+    if auth != settings.cron_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    now = datetime.now(timezone.utc)
+    sent = 0
+    errors = 0
+
+    try:
+        # Cancelled-but-still-in-grace subs have status='active' with a
+        # fixed subscription_ends_at (no renewal will push it forward).
+        active = supabase.table("subscriptions")\
+            .select("user_id, plan, subscription_ends_at, stripe_subscription_id")\
+            .eq("status", "active")\
+            .not_.is_("subscription_ends_at", "null")\
+            .execute()
+        for row in (active.data or []):
+            try:
+                ends_raw = row.get("subscription_ends_at")
+                if not ends_raw:
+                    continue
+                ends_at = datetime.fromisoformat(
+                    ends_raw.replace("Z", "+00:00")
+                )
+                days_left = (ends_at - now).days
+                if days_left != 7:
+                    continue
+                # Confirm this is really a cancellation, not a normal
+                # renewal cycle ending: the latest event for this user
+                # must be 'cancelled'.
+                user_id = row["user_id"]
+                events = supabase.table("subscription_cancellation_events")\
+                    .select("outcome")\
+                    .eq("user_id", user_id)\
+                    .order("happened_at", desc=True)\
+                    .limit(1)\
+                    .execute()
+                if not events.data:
+                    continue
+                if events.data[0].get("outcome") != "cancelled":
+                    continue
+
+                user_data = supabase.auth.admin.get_user_by_id(user_id)
+                email = user_data.user.email if user_data.user else None
+                if not email:
+                    continue
+                profile_result = supabase.table("user_profiles")\
+                    .select("full_name, business_name")\
+                    .eq("id", user_id)\
+                    .execute()
+                profile = profile_result.data[0] if profile_result.data else {}
+                name = (
+                    profile.get("full_name")
+                    or profile.get("business_name")
+                    or email.split("@")[0]
+                )
+                end_date_label = ends_at.strftime("%d-%m-%Y")
+                _send_cancellation_reminder_email(email, name, end_date_label)
+                sent += 1
+            except Exception as e:
+                errors += 1
+                print(f"Cancellation reminder error for {row.get('user_id')}: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"sent": sent, "errors": errors}
+
+
+def _send_cancellation_reminder_email(email: str, name: str, end_date_label: str) -> None:
+    resend.Emails.send({
+        "from": "BigDogg <info@bigdogg.nl>",
+        "to": [email],
+        "subject": f"Je BigDogg toegang loopt af op {end_date_label}",
+        "html": f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#f5f3ef;font-family:Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f3ef;padding:40px 20px;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+        <tr><td style="background:#1B3A4B;padding:28px 40px;text-align:center;">
+          <div style="font-size:26px;font-weight:900;color:#C9A96E;">BigDogg.</div>
+          <div style="color:#ffffff;opacity:0.7;font-size:12px;margin-top:4px;">Slim boekhouden voor ZZP'ers</div>
+        </td></tr>
+        <tr><td style="background:#FEF3C7;padding:16px 40px;text-align:center;border-bottom:1px solid #E2DDD6;">
+          <div style="font-size:28px;">⏰</div>
+          <div style="color:#92400E;font-size:17px;font-weight:bold;margin-top:6px;">Toegang eindigt op {end_date_label}</div>
+        </td></tr>
+        <tr><td style="padding:36px 40px;">
+          <p style="color:#1B3A4B;font-size:16px;margin:0 0 12px 0;">Hoi {name},</p>
+          <p style="color:#4A6572;font-size:15px;line-height:1.6;margin:0 0 20px 0;">
+            Over <strong>7 dagen</strong> verloopt je BigDogg toegang. Je gegevens blijven bewaard — je kunt ze altijd inkijken — maar nieuwe facturen, BTW-aangiftes en jaarrapporten zijn dan niet meer mogelijk.
+          </p>
+          <p style="color:#4A6572;font-size:15px;line-height:1.6;margin:0 0 24px 0;">
+            Bedacht je je nog? Eén klik en je gaat gewoon door — geen nieuw plan, geen nieuwe creditcard, gewoon weer aan.
+          </p>
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr><td align="center">
+              <a href="https://bigdogg.nl/#/subscription" style="display:inline-block;background:#1B3A4B;color:#ffffff;text-decoration:none;padding:14px 36px;border-radius:10px;font-weight:bold;font-size:15px;">Heractiveer met één klik</a>
+            </td></tr>
+          </table>
+          <p style="color:#8FA8B4;font-size:12px;line-height:1.6;margin:24px 0 0 0;text-align:center;font-style:italic;">
+            Geen actie nodig als je het zo wilt laten. Je toegang stopt vanzelf op {end_date_label}.
+          </p>
+        </td></tr>
+        <tr><td style="background:#f5f3ef;padding:20px 40px;text-align:center;border-top:1px solid #E2DDD6;">
+          <div style="color:#4A6572;font-size:12px;">BigDogg · <a href="https://bigdogg.nl" style="color:#1B3A4B;">bigdogg.nl</a></div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>""",
+    })
+
+
+@router.get("/admin/churn-stats")
+async def admin_churn_stats(request: Request, since: Optional[str] = None):
+    """Solo-founder churn dashboard data. Protected by x-cron-secret so
+    no extra env var is needed. Returns:
+
+      - reason_breakdown: {reason → {cancelled, offer_accepted, reactivated}}
+      - monthly: list of {month, cancelled, offer_accepted, reactivated}
+      - recent_comments: latest 20 entries with non-empty comments
+      - totals: aggregate counts
+
+    Pass ?since=YYYY-MM-DD to bound the window (defaults to 90 days).
+    """
+    auth = request.headers.get("x-cron-secret", "")
+    if auth != settings.cron_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since).replace(tzinfo=timezone.utc)
+        except Exception:
+            raise HTTPException(
+                status_code=400, detail="since must be YYYY-MM-DD"
+            )
+    else:
+        since_dt = datetime.now(timezone.utc) - timedelta(days=90)
+
+    try:
+        events = supabase.table("subscription_cancellation_events")\
+            .select("reason, comment, outcome, happened_at, plan_at_event")\
+            .gte("happened_at", since_dt.isoformat())\
+            .order("happened_at", desc=True)\
+            .execute()
+        rows = events.data or []
+
+        reason_breakdown: dict = {}
+        monthly_map: dict = {}
+        totals = {"cancelled": 0, "offer_accepted": 0, "reactivated": 0}
+        recent_comments = []
+
+        for r in rows:
+            reason = r.get("reason") or "other"
+            outcome = r.get("outcome") or ""
+            if outcome in totals:
+                totals[outcome] += 1
+            rb = reason_breakdown.setdefault(
+                reason,
+                {"cancelled": 0, "offer_accepted": 0, "reactivated": 0},
+            )
+            if outcome in rb:
+                rb[outcome] += 1
+            try:
+                hd = datetime.fromisoformat(
+                    r["happened_at"].replace("Z", "+00:00")
+                )
+                month_key = f"{hd.year:04d}-{hd.month:02d}"
+            except Exception:
+                month_key = "unknown"
+            mm = monthly_map.setdefault(
+                month_key,
+                {
+                    "month": month_key,
+                    "cancelled": 0,
+                    "offer_accepted": 0,
+                    "reactivated": 0,
+                },
+            )
+            if outcome in mm:
+                mm[outcome] += 1
+            if (r.get("comment") or "").strip() and len(recent_comments) < 20:
+                recent_comments.append({
+                    "happened_at": r.get("happened_at"),
+                    "reason": reason,
+                    "outcome": outcome,
+                    "plan": r.get("plan_at_event"),
+                    "comment": r.get("comment"),
+                })
+
+        monthly_list = sorted(monthly_map.values(), key=lambda m: m["month"])
+        # Save-rate = offer_accepted / (offer_accepted + cancelled)
+        offered = totals["offer_accepted"] + totals["cancelled"]
+        save_rate = (
+            round(100 * totals["offer_accepted"] / offered, 1) if offered else 0.0
+        )
+        return {
+            "since": since_dt.date().isoformat(),
+            "totals": totals,
+            "save_rate_pct": save_rate,
+            "reason_breakdown": reason_breakdown,
+            "monthly": monthly_list,
+            "recent_comments": recent_comments,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 def _insert_bigdogg_expense(user_id: str, label: str, plan: str = "monthly") -> None:
@@ -803,22 +1124,53 @@ def _insert_bigdogg_expense(user_id: str, label: str, plan: str = "monthly") -> 
     print(f"BigDogg expense inserted for user {user_id} ({label}, {plan})")
 
 
-def _send_trial_expiry_email(email: str, name: str, days_left: int, checkout_url: str) -> None:
-    """Send a trial expiry warning email in Dutch."""
+REFERRAL_LINK = "https://www.bigdogg.nl/#/subscription"
+SUBSCRIBE_LINK = "https://www.bigdogg.nl/#/pricing"
+
+
+def _send_trial_expiry_email(email: str, name: str, days_left: int) -> None:
+    """Trial expiry warning — referral CTA first, subscribe second.
+
+    Thresholds: 7-day (friendly nudge, yellow banner) and 3-day (urgent,
+    red banner with "access will be limited" framing).
+    """
     if days_left == 7:
-        subject = "Je gratis proefperiode verloopt over 7 dagen"
+        subject = "Nog 7 dagen gratis — jouw BigDogg proefperiode loopt bijna af"
+        subject_en = "7 days left — your BigDogg trial is ending soon"
         urgency_color = "#92400E"
         urgency_bg = "#FEF3C7"
         urgency_icon = "⏰"
-        urgency_text = "Nog 7 dagen gratis"
-        body_line = "Je gratis proefperiode van 30 dagen verloopt over <strong>7 dagen</strong>. Na afloop verlies je toegang tot al je facturen, klanten en financiële overzichten."
-    else:  # 1 day
-        subject = "Laatste dag — je proefperiode verloopt morgen"
+        urgency_text = "Nog 7 dagen!"
+        heading = "Nog 7 dagen!"
+        intro = (
+            "Je gratis proefperiode van BigDogg loopt over 7 dagen af. "
+            "Tot die tijd heb je volledige toegang tot alle functies."
+        )
+        urgency_close = ""
+    else:  # 3 days
+        subject = "Nog 3 dagen! Blokkering nadert — verleng nu of verwijs vrienden"
+        subject_en = "3 days left! Access ending soon — subscribe or refer friends"
         urgency_color = "#991B1B"
         urgency_bg = "#FEE2E2"
         urgency_icon = "🚨"
-        urgency_text = "Nog 1 dag"
-        body_line = "Je gratis proefperiode verloopt <strong>morgen</strong>. Abonneer je nu om toegang te behouden tot al je gegevens en BigDogg te blijven gebruiken."
+        urgency_text = "Nog 3 dagen!"
+        heading = "Nog maar 3 dagen!"
+        intro = (
+            "Over 3 dagen verloopt je proefperiode. Daarna kun je nog "
+            "steeds inloggen en je gegevens bekijken, maar nieuwe "
+            "facturen maken en andere functies worden geblokkeerd."
+        )
+        urgency_close = (
+            '<p style="color:#4A6572;font-size:13px;line-height:1.6;'
+            'margin:20px 0 0 0;text-align:center;font-style:italic;">'
+            "Jouw gegevens blijven altijd veilig bewaard — ook na de "
+            "proefperiode.</p>"
+        )
+
+    # Subject is the NL line per existing pattern; EN clients usually
+    # render the NL one fine. (Existing emails on the system also send
+    # NL-only; we keep that convention.)
+    _ = subject_en  # kept for future i18n if we go bilingual
 
     resend.Emails.send({
         "from": "BigDogg <info@bigdogg.nl>",
@@ -847,56 +1199,38 @@ def _send_trial_expiry_email(email: str, name: str, days_left: int, checkout_url
         <!-- Body -->
         <tr><td style="padding:36px 40px;">
           <p style="color:#1B3A4B;font-size:16px;margin:0 0 12px 0;">Hoi {name},</p>
-          <p style="color:#4A6572;font-size:15px;line-height:1.6;margin:0 0 20px 0;">
-            {body_line}
+          <h2 style="color:#1B3A4B;font-size:22px;font-weight:800;margin:0 0 12px 0;letter-spacing:-0.3px;">{heading}</h2>
+          <p style="color:#4A6572;font-size:15px;line-height:1.6;margin:0 0 24px 0;">{intro}</p>
+
+          <!-- Referral CTA (primary) -->
+          <h3 style="color:#1B3A4B;font-size:17px;font-weight:700;margin:0 0 8px 0;">Wil je gratis verder?</h3>
+          <p style="color:#4A6572;font-size:14.5px;line-height:1.6;margin:0 0 16px 0;">
+            Verwijs 2 vrienden naar BigDogg en je krijgt een gratis maand cadeau — tot maximaal 3 gratis maanden.
           </p>
-
-          <!-- What you keep -->
-          <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f3ef;border-radius:12px;margin-bottom:24px;">
-            <tr><td style="background:#1B3A4B;padding:12px 20px;border-radius:12px 12px 0 0;">
-              <span style="color:#C9A96E;font-weight:bold;font-size:13px;">WAT JE BEHOUDT MET BIGDOGG PRO</span>
-            </td></tr>
-            <tr><td style="padding:16px 20px;">
-              <table width="100%" cellpadding="0" cellspacing="0">
-                <tr><td style="padding:4px 0;color:#4A6572;font-size:14px;">✓&nbsp;&nbsp;Al je facturen en klantgegevens</td></tr>
-                <tr><td style="padding:4px 0;color:#4A6572;font-size:14px;">✓&nbsp;&nbsp;Kwartaal BTW-overzicht en aangifte PDF</td></tr>
-                <tr><td style="padding:4px 0;color:#4A6572;font-size:14px;">✓&nbsp;&nbsp;Jaarrapport met AI belastingtips</td></tr>
-                <tr><td style="padding:4px 0;color:#4A6572;font-size:14px;">✓&nbsp;&nbsp;Historische factuur- en kostenimport</td></tr>
-                <tr><td style="padding:4px 0;color:#4A6572;font-size:14px;">✓&nbsp;&nbsp;Betaallinks via Stripe op je facturen</td></tr>
-              </table>
-            </td></tr>
-          </table>
-
-          <!-- Price -->
-          <table width="100%" cellpadding="0" cellspacing="0" style="background:#1B3A4B;border-radius:10px;margin-bottom:24px;">
-            <tr><td style="padding:16px 24px;">
-              <table width="100%" cellpadding="0" cellspacing="0">
-                <tr>
-                  <td style="color:#ffffff;font-size:15px;">BigDogg Pro</td>
-                  <td style="text-align:right;">
-                    <span style="color:#C9A96E;font-size:22px;font-weight:bold;">€9,99</span>
-                    <span style="color:#ffffff;opacity:0.6;font-size:13px;">/maand</span>
-                  </td>
-                </tr>
-                <tr>
-                  <td colspan="2" style="color:#ffffff;opacity:0.6;font-size:12px;padding-top:4px;">Altijd opzegbaar · iDEAL en creditcard</td>
-                </tr>
-              </table>
-            </td></tr>
-          </table>
-
-          <!-- CTA -->
-          <table width="100%" cellpadding="0" cellspacing="0">
+          <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
             <tr><td align="center">
-              <a href="{checkout_url}" style="display:inline-block;background:#C9A96E;color:#ffffff;text-decoration:none;padding:16px 40px;border-radius:10px;font-weight:bold;font-size:16px;letter-spacing:0.3px;">
-                Abonneer nu — €9,99/maand
+              <a href="{REFERRAL_LINK}" style="display:inline-block;background:#C9A96E;color:#ffffff;text-decoration:none;padding:14px 32px;border-radius:10px;font-weight:bold;font-size:15px;">
+                Vrienden uitnodigen
               </a>
             </td></tr>
           </table>
 
-          <p style="color:#4A6572;font-size:13px;line-height:1.6;margin:20px 0 0 0;text-align:center;">
-            Of open de BigDogg app en ga naar <strong>Instellingen → Abonnement</strong>
+          <hr style="border:none;border-top:1px solid #E2DDD6;margin:8px 0 20px 0;">
+
+          <!-- Subscribe CTA (secondary) -->
+          <h3 style="color:#1B3A4B;font-size:17px;font-weight:700;margin:0 0 8px 0;">Of start direct je abonnement</h3>
+          <p style="color:#4A6572;font-size:14.5px;line-height:1.6;margin:0 0 16px 0;">
+            Vanaf €9,99 per maand (jaarlijks) of €11,99 per maand. Alles inbegrepen. Geen verrassingen.
           </p>
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr><td align="center">
+              <a href="{SUBSCRIBE_LINK}" style="display:inline-block;background:#1B3A4B;color:#ffffff;text-decoration:none;padding:14px 32px;border-radius:10px;font-weight:bold;font-size:15px;">
+                Abonnement starten
+              </a>
+            </td></tr>
+          </table>
+
+          {urgency_close}
         </td></tr>
 
         <!-- Footer -->
@@ -914,10 +1248,12 @@ def _send_trial_expiry_email(email: str, name: str, days_left: int, checkout_url
 
 @router.post("/cron/trial-expiry")
 async def send_trial_expiry_notifications(request: Request):
-    """
-    Daily cron job — sends trial expiry emails to users with 7 or 1 days left.
-    Call with header: x-cron-secret: <your_cron_secret>
-    Suggested schedule: daily at 09:00 Europe/Amsterdam
+    """Daily cron — emails trial users at 7 days and 3 days remaining.
+
+    Dedupe via the `trial_warning_emails` table: one row per
+    (user_id, threshold_days), so a retry of the same day is a no-op.
+
+    Header: x-cron-secret. Schedule: daily at 09:00 Europe/Amsterdam.
     """
     auth = request.headers.get("x-cron-secret", "")
     if auth != settings.cron_secret:
@@ -925,11 +1261,11 @@ async def send_trial_expiry_notifications(request: Request):
 
     now = datetime.now(timezone.utc)
     sent_7 = 0
-    sent_1 = 0
+    sent_3 = 0
     errors = 0
+    skipped_already_sent = 0
 
     try:
-        # Get all trial subscriptions
         result = supabase.table("subscriptions")\
             .select("user_id, trial_ends_at")\
             .eq("status", "trial")\
@@ -941,52 +1277,61 @@ async def send_trial_expiry_notifications(request: Request):
         for sub in trial_subs:
             try:
                 user_id = sub["user_id"]
+                if not sub.get("trial_ends_at"):
+                    continue
                 trial_ends = datetime.fromisoformat(
                     sub["trial_ends_at"].replace("Z", "+00:00")
                 )
                 days_left = (trial_ends - now).days
 
-                # Only notify at exactly 7 or 1 days left
-                if days_left not in (7, 1):
+                if days_left not in (7, 3):
                     continue
 
-                # Get user email
+                # Dedupe: skip if we've already emailed this threshold.
+                already = supabase.table("trial_warning_emails")\
+                    .select("user_id")\
+                    .eq("user_id", user_id)\
+                    .eq("threshold_days", days_left)\
+                    .limit(1)\
+                    .execute()
+                if already.data:
+                    skipped_already_sent += 1
+                    continue
+
                 user_data = supabase.auth.admin.get_user_by_id(user_id)
                 email = user_data.user.email if user_data.user else None
                 if not email:
                     continue
 
-                # Get user name
                 profile_result = supabase.table("user_profiles")\
                     .select("full_name, business_name")\
                     .eq("id", user_id)\
                     .execute()
                 profile = profile_result.data[0] if profile_result.data else {}
-                name = profile.get("full_name") or profile.get("business_name") or email.split("@")[0]
-
-                # Generate a fresh checkout URL for this user
-                session = stripe.checkout.Session.create(
-                    line_items=[{
-                        "price_data": {
-                            "currency": PRICE_CURRENCY,
-                            "product_data": {"name": "Bigdogg Pro"},
-                            "unit_amount": PRICE_AMOUNT,
-                            "recurring": {"interval": "month"},
-                        },
-                        "quantity": 1,
-                    }],
-                    mode="subscription",
-                    success_url=f"{APP_URL}/#/payment-success?kind=subscription",
-                    cancel_url=f"{APP_URL}/#/dashboard",
-                    metadata={"user_id": user_id},
+                name = (
+                    profile.get("full_name")
+                    or profile.get("business_name")
+                    or email.split("@")[0]
                 )
 
-                _send_trial_expiry_email(email, name, days_left, session.url)
+                _send_trial_expiry_email(email, name, days_left)
+
+                # Record the send so we don't double-fire on rerun.
+                try:
+                    supabase.table("trial_warning_emails").insert({
+                        "user_id": user_id,
+                        "threshold_days": days_left,
+                    }).execute()
+                except Exception as dedupe_err:
+                    # Don't fail the run if dedupe insert fails — worst
+                    # case the next rerun re-sends, which is rare since
+                    # the day-of detection narrows the window already.
+                    print(f"trial_warning_emails insert error: {dedupe_err}")
 
                 if days_left == 7:
                     sent_7 += 1
                 else:
-                    sent_1 += 1
+                    sent_3 += 1
 
                 print(f"Trial expiry email sent to {email} ({days_left} days left)")
 
@@ -999,8 +1344,9 @@ async def send_trial_expiry_notifications(request: Request):
 
     return {
         "sent_7_day": sent_7,
-        "sent_1_day": sent_1,
+        "sent_3_day": sent_3,
         "errors": errors,
+        "skipped_already_sent": skipped_already_sent,
         "checked": len(trial_subs),
     }
 

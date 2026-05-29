@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from anthropic import Anthropic
 from app.database import supabase
 from app.config import settings
+from app.routers.subscription import require_active_paid
 import json
 
 router = APIRouter()
@@ -28,6 +29,7 @@ def get_user_id(request: Request) -> str:
 @router.post("/parse-invoice")
 async def parse_invoice_prompt(data: PromptRequest, request: Request):
     user_id = get_user_id(request)
+    require_active_paid(user_id)
 
     products = supabase.table("products")\
         .select("*")\
@@ -112,8 +114,11 @@ async def parse_quote_prompt(data: PromptRequest, request: Request):
     Same prompt → structured-data flow as /parse-invoice, but framed as a
     quote (offerte). Returns {client_id, client_name, lines[…], confidence,
     notes} ready to feed into POST /api/v1/quotes/.
+    Gated by `require_active_paid` so trial-expired users hit a 403 here
+    too rather than burning Anthropic tokens.
     """
     user_id = get_user_id(request)
+    require_active_paid(user_id)
 
     products = supabase.table("products")\
         .select("*")\

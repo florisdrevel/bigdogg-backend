@@ -241,6 +241,9 @@ async def download_btw_report(
     year: int = Query(None),
 ):
     user_id = validate_token(token)
+    # BTW report is a paid feature — block trial-expired users.
+    from app.routers.subscription import require_active_paid
+    require_active_paid(user_id)
     today = date.today()
     if year is None:
         year = today.year
