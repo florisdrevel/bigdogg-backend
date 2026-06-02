@@ -142,7 +142,7 @@ def _log_portal_access(request: Request, token: str, owner_id: str) -> None:
         print(f"[accountants/audit] log failed: {e}")
 
 
-def _resolve_portal_token(token: str, request: Request) -> dict:
+def _resolve_portal_token(token: str, request: Request | None = None) -> dict:
     """Validate an accountant portal token and return its row. Raises:
 
       404 — token does not exist
