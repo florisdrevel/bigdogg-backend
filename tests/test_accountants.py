@@ -104,7 +104,7 @@ async def test_portal_overview_yearly_totals(monkeypatch):
         "expenses":           expenses,
     })
 
-    result = await acc.portal_overview("tok", year=2026)
+    result = await acc.portal_overview("tok", None, year=2026)
     assert result["year"] == 2026
     assert result["revenue_ex"]    == 1500.0
     assert result["btw_collected"] == 315.0
@@ -132,7 +132,7 @@ async def test_portal_overview_revoked(monkeypatch):
     row["used"] = True
     _patch_supabase(monkeypatch, {"accountant_invites": [row]})
     with pytest.raises(HTTPException) as exc:
-        await acc.portal_overview("tok")
+        await acc.portal_overview("tok", None)
     assert exc.value.status_code == 403
 
 
@@ -153,7 +153,7 @@ async def test_portal_invoices_includes_line_items(monkeypatch):
         "invoices":           invoices,
         "invoice_lines":      invoice_lines,
     })
-    result = await acc.portal_invoices("tok", year=2026)
+    result = await acc.portal_invoices("tok", None, year=2026)
     assert len(result["invoices"]) == 1
     assert result["invoices"][0]["lines"][0]["description"] == "Hours"
 
@@ -163,7 +163,7 @@ async def test_portal_invoices_expired(monkeypatch):
     row["expires_at"] = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     _patch_supabase(monkeypatch, {"accountant_invites": [row]})
     with pytest.raises(HTTPException) as exc:
-        await acc.portal_invoices("tok")
+        await acc.portal_invoices("tok", None)
     assert exc.value.status_code == 410
 
 
@@ -178,7 +178,7 @@ async def test_portal_expenses_amount_incl_synthesized(monkeypatch):
         "accountant_invites": [_active_invite_row()],
         "expenses":           expenses,
     })
-    result = await acc.portal_expenses("tok", year=2026)
+    result = await acc.portal_expenses("tok", None, year=2026)
     assert result["expenses"][0]["amount_incl_btw"] == 12.1
 
 
@@ -194,7 +194,7 @@ async def test_portal_investments_depreciation_for_year(monkeypatch):
         "investments":        investments,
     })
     # In 2026 (year 3 of 5), this year's depreciation = 200, cumulative = 600.
-    result = await acc.portal_investments("tok", year=2026)
+    result = await acc.portal_investments("tok", None, year=2026)
     item = result["investments"][0]
     assert item["annual_depreciation"]     == 200.0
     assert item["this_year_depreciation"]  == 200.0
@@ -215,7 +215,7 @@ async def test_portal_hours_per_project(monkeypatch):
         "hours":              hours,
         "projects":           projects,
     })
-    result = await acc.portal_hours("tok", year=2026)
+    result = await acc.portal_hours("tok", None, year=2026)
     assert result["total_hours"] == 9.0
     assert result["manual_hours"] == 9.0
     assert result["invoice_hours"] == 0.0
@@ -260,7 +260,7 @@ async def test_portal_hours_includes_invoice_derived(monkeypatch):
         "invoice_lines":      invoice_lines_rows,
         "projects":           projects,
     })
-    result = await acc.portal_hours("tok", year=2026)
+    result = await acc.portal_hours("tok", None, year=2026)
     # 10 manual + 27 + 5 + 4 = 46. The fixed line yields 0.
     assert result["manual_hours"]  == 10.0
     assert result["invoice_hours"] == 36.0
@@ -291,7 +291,7 @@ async def test_portal_years_distinct(monkeypatch):
         "invoices":           invoices,
         "expenses":           expenses,
     })
-    result = await acc.portal_years("tok")
+    result = await acc.portal_years("tok", None)
     # Always includes the current year + distinct years from data
     assert 2024 in result["years"]
     assert 2025 in result["years"]
@@ -322,7 +322,7 @@ async def test_portal_btw_breakdown_per_rate(monkeypatch):
         "invoice_lines":      lines,
         "expenses":           expenses,
     })
-    result = await acc.portal_btw_breakdown("tok", year=2026)
+    result = await acc.portal_btw_breakdown("tok", None, year=2026)
     q1 = result["quarters"]["1"]
     q2 = result["quarters"]["2"]
     assert q1["rate_21"]["ex"] == 100.0
@@ -363,7 +363,7 @@ async def test_portal_aging_buckets(monkeypatch):
         "accountant_invites": [_active_invite_row()],
         "invoices":           inv,
     })
-    result = await acc.portal_aging("tok")
+    result = await acc.portal_aging("tok", None)
     assert result["buckets"]["0-30"]["count"] == 1
     assert result["buckets"]["0-30"]["total"] == 121.0
     assert result["buckets"]["31-60"]["count"] == 1
@@ -408,7 +408,7 @@ async def test_portal_export_csv_contains_invoice_and_expense_rows(monkeypatch):
         "invoice_lines":      lines,
         "expenses":           expenses,
     })
-    response = await acc.portal_export_csv("tok", year=2026)
+    response = await acc.portal_export_csv("tok", None, year=2026)
     body = response.body.decode("utf-8")
     assert "Verkoop;2026-03-01;2026-000001" in body
     assert "Inkoop;2026-03-15" in body
@@ -426,7 +426,7 @@ async def test_portal_meta_owner_name_fallback(monkeypatch):
         "user_profiles":      [profile],
     })
 
-    result = await acc.portal_meta("tok")
+    result = await acc.portal_meta("tok", None)
     assert result["owner_name"] == "Floris D"
     assert result["business_name"] == ""
     assert result["kvk_number"] == "12345678"
