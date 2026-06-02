@@ -9778,7 +9778,7 @@ if(v==null)v=0
 i=k.go
 u=A.fd(i==null?j:J.r(i,"bonus_months_max"))
 if(u==null)u=3
-t=v>=u?j:(v+1)*2
+t=v>=u?j:(C.k.bg(w,2)+1)*2
 s=g?"https://bigdogg.nl/#/register?ref="+h:j
 i=A.D(12)
 r=A.B(j,D.TI,C.h,j,j,new A.L(C.p,j,j,A.D(8),j,j,C.m),j,j,j,j,C.dZ,j,j,j)
@@ -20654,4 +20654,4 @@ w($,"bGd","blU",()=>new A.N())
 v($,"bGc","blT",()=>{var u=new B.arm()
 u.qp($.blU())
 return u})})()};
-(a=>{a["EYzBDIv+Qk93q9Te/qP4IcFWaJM="]=a.current})($__dart_deferred_initializers__);
+(a=>{a["8DjkjDYGp0I2tUDhaXmTGp4aiI0="]=a.current})($__dart_deferred_initializers__);
