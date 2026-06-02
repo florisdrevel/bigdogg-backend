@@ -228,7 +228,7 @@ async def invite_accountant(request: Request):
             )
             text_body = (
                 f"Hallo,\n\n"
-                f"{inviter} geeft je {_PORTAL_TTL_DAYS} dagen lang alleen-lezen toegang tot "
+                f"{inviter} geeft je {_PORTAL_TTL_DAYS} dagen lang read-only toegang tot "
                 f"zijn BigDogg-boekhouding — facturen, kosten en BTW-overzicht.\n\n"
                 f"Open de portal: {accept_url}\n\n"
                 f"Er is geen account nodig — open de link en je zit erin.\n\n"
@@ -274,7 +274,7 @@ def _invite_email_html(*, inviter: str, recipient_email: str, accept_url: str) -
           <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">Hallo,</p>
           <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">
             <strong style="color:#1B3A4B;">{safe_inviter}</strong> geeft je <strong>{_PORTAL_TTL_DAYS} dagen</strong>
-            alleen-lezen toegang tot zijn BigDogg-boekhouding.
+            read-only toegang tot zijn BigDogg-boekhouding.
           </p>
           <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">
             Klik op de knop om de portal te openen — geen account nodig, geen wachtwoord.
@@ -320,7 +320,7 @@ async def list_invites(request: Request):
 
 
 @router.delete("/invites/{token}")
-async def cancel_invite(token: str, request: Request):
+async def cancel_invite(token: str, request: Request | None = None):
     """Revoke a link. Hard-delete the row so it disappears from the
     owner's Settings → My accountant list. Previously we soft-revoked
     via used=true, but the accountant_invites table only has SELECT/
@@ -344,7 +344,7 @@ async def cancel_invite(token: str, request: Request):
 
 
 @router.post("/invites/{token}/extend")
-async def extend_invite(token: str, request: Request):
+async def extend_invite(token: str, request: Request | None = None):
     """Push expires_at out by another portal TTL window."""
     user_id = get_user_id(request)
     new_expiry = (
@@ -359,7 +359,7 @@ async def extend_invite(token: str, request: Request):
 
 # ─── Accountant portal — public, token-gated ─────────────────
 @router.get("/portal/{token}")
-async def portal_meta(token: str, request: Request):
+async def portal_meta(token: str, request: Request | None = None):
     """Public landing info — owner name, expiry, link status."""
     row = _resolve_portal_token(token, request)
     owner_id = row["user_id"]
@@ -439,7 +439,7 @@ def _depreciation_for_year(amount: float, purchase_date: str,
 
 
 @router.get("/portal/{token}/years")
-async def portal_years(token: str, request: Request):
+async def portal_years(token: str, request: Request | None = None):
     """Distinct years that contain any invoice or expense row, for the
     year-selector dropdown on the portal."""
     row = _resolve_portal_token(token, request)
@@ -462,7 +462,7 @@ async def portal_years(token: str, request: Request):
 
 
 @router.get("/portal/{token}/overview")
-async def portal_overview(token: str, request: Request, year: int | None = None):
+async def portal_overview(token: str, request: Request | None = None, year: int | None = None):
     row = _resolve_portal_token(token, request)
     owner_id = row["user_id"]
     y, y_start, y_end = _resolve_year(year)
@@ -542,7 +542,7 @@ async def portal_overview(token: str, request: Request, year: int | None = None)
 
 
 @router.get("/portal/{token}/invoices")
-async def portal_invoices(token: str, request: Request, year: int | None = None):
+async def portal_invoices(token: str, request: Request | None = None, year: int | None = None):
     row = _resolve_portal_token(token, request)
     owner_id = row["user_id"]
     y, y_start, y_end = _resolve_year(year)
@@ -596,7 +596,7 @@ def _signed_receipt_url(receipt_value):
 
 
 @router.get("/portal/{token}/expenses")
-async def portal_expenses(token: str, request: Request, year: int | None = None):
+async def portal_expenses(token: str, request: Request | None = None, year: int | None = None):
     row = _resolve_portal_token(token, request)
     owner_id = row["user_id"]
     y, y_start, y_end = _resolve_year(year)
@@ -726,7 +726,7 @@ def _btw_breakdown_for_year(owner_id: str, year: int) -> dict:
 
 
 @router.get("/portal/{token}/btw-breakdown")
-async def portal_btw_breakdown(token: str, request: Request, year: int | None = None):
+async def portal_btw_breakdown(token: str, request: Request | None = None, year: int | None = None):
     row = _resolve_portal_token(token, request)
     owner_id = row["user_id"]
     y, _, _ = _resolve_year(year)
@@ -735,7 +735,7 @@ async def portal_btw_breakdown(token: str, request: Request, year: int | None = 
 
 # ── Debiteuren aging ────────────────────────────────────────
 @router.get("/portal/{token}/aging")
-async def portal_aging(token: str, request: Request):
+async def portal_aging(token: str, request: Request | None = None):
     """Aging buckets of outstanding (non-paid) invoices, based on due_date
     relative to today. Returns 4 buckets + a totals/items rollup."""
     row = _resolve_portal_token(token, request)
@@ -838,7 +838,7 @@ def _depreciation_schedule(amount: float, purchase_date: str,
 
 
 @router.get("/portal/{token}/investments")
-async def portal_investments(token: str, request: Request, year: int | None = None):
+async def portal_investments(token: str, request: Request | None = None, year: int | None = None):
     row = _resolve_portal_token(token, request)
     owner_id = row["user_id"]
     y, _, _ = _resolve_year(year)
@@ -894,7 +894,7 @@ _LEDGER_EXPENSES = {
 
 
 @router.get("/portal/{token}/export.csv")
-async def portal_export_csv(token: str, request: Request, year: int | None = None):
+async def portal_export_csv(token: str, request: Request | None = None, year: int | None = None):
     """CSV dump combining invoice lines + expenses for the year. Columns
     match what accountants typically import into Exact/AFAS/Twinfield."""
     row = _resolve_portal_token(token, request)
@@ -1106,7 +1106,7 @@ def _invoice_derived_hours(owner_id: str, y_start: str, y_end: str) -> tuple[flo
 
 
 @router.get("/portal/{token}/hours")
-async def portal_hours(token: str, request: Request, year: int | None = None):
+async def portal_hours(token: str, request: Request | None = None, year: int | None = None):
     """Total hours for the year — matches the user's own /api/v1/hours
     screen exactly (manual entries + invoice-derived: day*9, hour*1).
     Also returns a per-month breakdown for the table the portal renders."""
@@ -1297,7 +1297,7 @@ async def portal_annual_report_pdf(
 
 
 @router.get("/portal/{token}/invoices/{invoice_id}/pdf")
-async def portal_invoice_pdf(token: str, invoice_id: str, request: Request):
+async def portal_invoice_pdf(token: str, invoice_id: str, request: Request | None = None):
     """Generate the invoice PDF on demand, scoped to the link's owner."""
     row = _resolve_portal_token(token, request)
     owner_id = row["user_id"]
