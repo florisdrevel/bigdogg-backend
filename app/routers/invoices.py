@@ -115,9 +115,12 @@ async def create_invoice(invoice: InvoiceCreate, request: Request):
         client_result = supabase.table("clients")\
             .select("contact_name, email, company_name")\
             .eq("id", invoice.client_id)\
+            .eq("user_id", user_id)\
             .single()\
             .execute()
-        client_data = client_result.data or {}
+        if not client_result.data:
+            raise HTTPException(status_code=404, detail="Client not found")
+        client_data = client_result.data
 
         invoice_response = supabase.table("invoices").insert({
             "user_id": user_id,

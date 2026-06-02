@@ -156,9 +156,12 @@ async def create_quote(quote: QuoteCreate, request: Request):
         client_result = supabase.table("clients")\
             .select("contact_name, email, company_name")\
             .eq("id", quote.client_id)\
+            .eq("user_id", user_id)\
             .single()\
             .execute()
-        client_data = client_result.data or {}
+        if not client_result.data:
+            raise HTTPException(status_code=404, detail="Client not found")
+        client_data = client_result.data
 
         quote_response = supabase.table("quotes").insert({
             "user_id": user_id,
@@ -224,16 +227,18 @@ async def update_quote(quote_id: str, body: QuoteUpdate, request: Request):
 
     update: dict = {}
     if body.client_id is not None:
-        update["client_id"] = body.client_id
         client_result = supabase.table("clients")\
             .select("contact_name, email, company_name")\
             .eq("id", body.client_id)\
+            .eq("user_id", user_id)\
             .single()\
             .execute()
-        if client_result.data:
-            update["client_name"] = client_result.data.get("contact_name", "")
-            update["client_email"] = client_result.data.get("email", "")
-            update["client_company"] = client_result.data.get("company_name", "")
+        if not client_result.data:
+            raise HTTPException(status_code=404, detail="Client not found")
+        update["client_id"] = body.client_id
+        update["client_name"] = client_result.data.get("contact_name", "")
+        update["client_email"] = client_result.data.get("email", "")
+        update["client_company"] = client_result.data.get("company_name", "")
     if body.quote_date is not None:
         update["quote_date"] = body.quote_date
     if body.valid_until is not None:

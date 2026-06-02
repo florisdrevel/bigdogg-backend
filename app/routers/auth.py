@@ -212,6 +212,35 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class DeleteAccountRequest(BaseModel):
+    current_password: str
+
+
+def _verify_current_password(email: str, current_password: str) -> None:
+    """Re-prove possession of the current password before destructive
+    actions (change password, delete account). A valid access token by
+    itself is not enough — a stolen token would otherwise be able to
+    lock the user out or wipe the account.
+
+    Uses sign_in_with_password as a verifier; the resulting session is
+    discarded. Raises 401 with a generic message on any mismatch.
+    """
+    if not current_password:
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    try:
+        supabase.auth.sign_in_with_password({
+            "email": email,
+            "password": current_password,
+        })
+    except Exception:
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+
+
 @router.post("/register")
 async def register(data: RegisterRequest):
     try:
@@ -364,7 +393,7 @@ async def reset_password(data: ResetPasswordRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/change-password")
-async def change_password(request: Request):
+async def change_password(data: ChangePasswordRequest, request: Request):
     auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
     if not auth_header:
         raise HTTPException(status_code=401, detail="Authorization header missing")
@@ -372,17 +401,21 @@ async def change_password(request: Request):
         token = auth_header.replace("Bearer ", "")
         user = supabase.auth.get_user(token)
         user_id = user.user.id
+        user_email = user.user.email
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    if not data.new_password or len(data.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    # Re-prove the current password — a stolen JWT alone must not be
+    # able to change the password and lock the user out.
+    _verify_current_password(user_email, data.current_password)
+
     try:
-        body = await request.json()
-        new_password = body.get("new_password")
-        if not new_password or len(new_password) < 8:
-            raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
-        supabase.auth.admin.update_user_by_id(user_id, {"password": new_password})
+        supabase.auth.admin.update_user_by_id(user_id, {"password": data.new_password})
         try:
-            user_data = supabase.auth.get_user(token)
-            email = user_data.user.email if user_data.user else None
+            email = user_email
             if email:
                 resend.Emails.send({
                     "from": "BigDogg <info@bigdogg.nl>",
@@ -432,7 +465,7 @@ async def change_password(request: Request):
 
 
 @router.delete("/delete-account")
-async def delete_account(request: Request):
+async def delete_account(data: DeleteAccountRequest, request: Request):
     auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
     if not auth_header:
         raise HTTPException(status_code=401, detail="Authorization header missing")
@@ -449,6 +482,12 @@ async def delete_account(request: Request):
         user_email = user.user.email
     except Exception:
         pass
+
+    # Re-prove the current password — a stolen JWT alone must not be
+    # able to wipe the account.
+    if not user_email:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    _verify_current_password(user_email, data.current_password)
 
     try:
         # 1. Cancel Stripe subscription if active (non-fatal)

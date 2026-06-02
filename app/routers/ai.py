@@ -4,6 +4,7 @@ from anthropic import Anthropic
 from app.database import supabase
 from app.config import settings
 from app.routers.subscription import require_active_paid
+from app.services.ai_quota import require_ai_quota, record_ai_usage
 import json
 
 router = APIRouter()
@@ -30,6 +31,7 @@ def get_user_id(request: Request) -> str:
 async def parse_invoice_prompt(data: PromptRequest, request: Request):
     user_id = get_user_id(request)
     require_active_paid(user_id)
+    require_ai_quota(user_id, "parse-invoice")
 
     products = supabase.table("products")\
         .select("*")\
@@ -88,6 +90,7 @@ Use this exact format:
             ],
             system=system_prompt
         )
+        record_ai_usage(user_id, "parse-invoice", message)
         response_text = message.content[0].text.strip()
 
         if response_text.startswith("```"):
@@ -119,6 +122,7 @@ async def parse_quote_prompt(data: PromptRequest, request: Request):
     """
     user_id = get_user_id(request)
     require_active_paid(user_id)
+    require_ai_quota(user_id, "parse-quote")
 
     products = supabase.table("products")\
         .select("*")\
@@ -178,6 +182,7 @@ Use this exact format:
             ],
             system=system_prompt
         )
+        record_ai_usage(user_id, "parse-quote", message)
         response_text = message.content[0].text.strip()
 
         if response_text.startswith("```"):

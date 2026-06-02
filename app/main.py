@@ -25,12 +25,20 @@ app = FastAPI(
     redirect_slashes=False
 )
 
+# CORS — only the production web origins + localhost for dev. Native
+# (Android / iOS) apps and Stripe webhooks don't send an Origin header
+# so CORS rules never apply to them. Bearer tokens travel in
+# Authorization headers, not cookies, so allow_credentials is left off.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[
+        "https://bigdogg.nl",
+        "https://www.bigdogg.nl",
+        "https://bigdogg-production.up.railway.app",
+    ],
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])

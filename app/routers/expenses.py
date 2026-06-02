@@ -5,6 +5,7 @@ from datetime import date
 from app.database import supabase
 from app.config import settings
 from app.routers.banking import schedule_reconcile
+from app.services.ai_quota import require_ai_quota, record_ai_usage
 import anthropic
 import base64
 import json
@@ -34,6 +35,36 @@ def get_user_id(request: Request) -> str:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 
+_SIGNED_URL_TTL = 3600  # 1 hour — long enough for the app to render the
+                       # image, short enough to keep blast radius small.
+
+
+def _signed_receipt_url(receipt_value):
+    """Mint a short-lived signed URL for a stored receipt. Accepts both
+    the new path format ("<user_id>/<expense_id>.<ext>") and legacy
+    public URLs (extracts the path after "/receipts/"). Returns None on
+    any failure — callers fall back to whatever was stored.
+    """
+    if not receipt_value:
+        return None
+    if receipt_value.startswith("http"):
+        marker = "/receipts/"
+        idx = receipt_value.find(marker)
+        if idx == -1:
+            return None
+        path = receipt_value[idx + len(marker):]
+    else:
+        path = receipt_value
+    try:
+        result = supabase.storage.from_("receipts").create_signed_url(
+            path, _SIGNED_URL_TTL,
+        )
+        return result.get("signedURL") or result.get("signedUrl") or None
+    except Exception as e:
+        print(f"[receipts] signed URL failed for {path}: {e}")
+        return None
+
+
 @router.get("/")
 async def get_expenses(request: Request):
     user_id = get_user_id(request)
@@ -43,7 +74,13 @@ async def get_expenses(request: Request):
             .eq("user_id", user_id)\
             .order("expense_date", desc=True)\
             .execute()
-        return {"expenses": response.data}
+        rows = response.data or []
+        for exp in rows:
+            if exp.get("receipt_url"):
+                signed = _signed_receipt_url(exp["receipt_url"])
+                if signed:
+                    exp["receipt_url"] = signed
+        return {"expenses": rows}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -87,7 +124,8 @@ def _extract_json(text: str) -> dict:
 
 @router.post("/parse-receipt")
 async def parse_receipt(request: Request, file: UploadFile = File(...)):
-    get_user_id(request)
+    user_id = get_user_id(request)
+    require_ai_quota(user_id, "parse-receipt")
     try:
         content = await file.read()
 
@@ -197,6 +235,7 @@ Rules:
                 }],
             )
 
+        record_ai_usage(user_id, "parse-receipt", message)
         raw = message.content[0].text.strip()
         parsed = _extract_json(raw)
 
@@ -221,6 +260,15 @@ Rules:
 @router.post("/upload-receipt/{expense_id}")
 async def upload_receipt(expense_id: str, request: Request, file: UploadFile = File(...)):
     user_id = get_user_id(request)
+
+    # Verify the expense belongs to the caller BEFORE writing to storage,
+    # so we never burn quota on files that can't be linked to a row.
+    owner_check = supabase.table("expenses")\
+        .select("id").eq("id", expense_id).eq("user_id", user_id)\
+        .single().execute()
+    if not owner_check.data:
+        raise HTTPException(status_code=404, detail="Expense not found")
+
     try:
         content = await file.read()
         filename = file.filename or "receipt.jpg"
@@ -255,15 +303,18 @@ async def upload_receipt(expense_id: str, request: Request, file: UploadFile = F
                 {"content-type": content_type}
             )
 
-        public_url = supabase.storage.from_("receipts").get_public_url(file_path)
-
+        # Store the path, not the URL — the bucket is private now, and we
+        # mint signed URLs at read time so each rendering call gets a
+        # fresh, time-limited token.
         supabase.table("expenses")\
-            .update({"receipt_url": public_url})\
+            .update({"receipt_url": file_path})\
             .eq("id", expense_id)\
             .eq("user_id", user_id)\
             .execute()
 
-        return {"receipt_url": public_url}
+        return {"receipt_url": _signed_receipt_url(file_path)}
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"UPLOAD RECEIPT ERROR: {type(e).__name__}: {e}")
         raise HTTPException(status_code=400, detail=str(e))

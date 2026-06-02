@@ -173,6 +173,38 @@ def _mark_invoice_paid(invoice_id: str):
         print(f"Error marking invoice paid: {e}")
 
 
+def _claim_event(event_id: str, event_type: str) -> bool:
+    """Race-safe idempotency claim for Stripe webhook events.
+
+    Returns True if this delivery should process the event, False if a
+    previous delivery already claimed it (or if the claim insert errored
+    transiently — we prefer Stripe-retry over double-processing).
+
+    Backed by the stripe_processed_events table whose primary key is
+    event_id, so concurrent deliveries race on the insert and the loser
+    sees a unique-violation.
+    """
+    if not event_id:
+        print("[stripe] event has no id; dropping")
+        return False
+    try:
+        supabase.table("stripe_processed_events").insert({
+            "event_id": event_id,
+            "event_type": event_type or "unknown",
+        }).execute()
+        return True
+    except Exception as e:
+        msg = str(e)
+        if "23505" in msg or "duplicate key" in msg.lower():
+            print(f"[stripe] event {event_id} already processed; deduping")
+        else:
+            # Transient DB issue — be conservative and skip processing
+            # rather than risk a duplicate "you got paid!" email. Stripe
+            # will retry next time if it really was a first delivery.
+            print(f"[stripe] claim insert failed for {event_id}: {e}")
+        return False
+
+
 @router.post("/connect")
 async def create_connect_link(request: Request):
     user_id = get_user_id(request)
@@ -351,18 +383,24 @@ async def connect_webhook(request: Request):
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
 
+    secret = settings.stripe_connect_webhook_secret or settings.stripe_webhook_secret
+    if not secret:
+        # Misconfig — return 5xx so Stripe retries while we fix env vars,
+        # instead of silently accepting unsigned payloads.
+        print("Connect webhook secret is not configured")
+        raise HTTPException(status_code=500, detail="webhook_secret_missing")
+
     try:
-        secret = settings.stripe_connect_webhook_secret or settings.stripe_webhook_secret
-        if secret:
-            event = stripe.Webhook.construct_event(payload, sig_header, secret)
-        else:
-            event = json.loads(payload)
+        event = stripe.Webhook.construct_event(payload, sig_header, secret)
     except stripe.error.SignatureVerificationError as e:
         print(f"Connect webhook signature error: {e}")
-        return {"status": "ok"}
+        raise HTTPException(status_code=400, detail="invalid_signature")
     except Exception as e:
         print(f"Connect webhook parse error: {e}")
-        return {"status": "ok"}
+        raise HTTPException(status_code=400, detail="invalid_payload")
+
+    if not _claim_event(event["id"], event["type"]):
+        return {"status": "ok", "deduplicated": True}
 
     try:
         event_type = event["type"]
@@ -404,17 +442,23 @@ async def main_webhook(request: Request):
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
 
+    if not settings.stripe_webhook_secret:
+        print("Main webhook secret is not configured")
+        raise HTTPException(status_code=500, detail="webhook_secret_missing")
+
     try:
-        if settings.stripe_webhook_secret:
-            event = stripe.Webhook.construct_event(payload, sig_header, settings.stripe_webhook_secret)
-        else:
-            event = json.loads(payload)
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, settings.stripe_webhook_secret,
+        )
     except stripe.error.SignatureVerificationError as e:
         print(f"Main webhook signature error: {e}")
-        return {"status": "ok"}
+        raise HTTPException(status_code=400, detail="invalid_signature")
     except Exception as e:
         print(f"Main webhook parse error: {e}")
-        return {"status": "ok"}
+        raise HTTPException(status_code=400, detail="invalid_payload")
+
+    if not _claim_event(event["id"], event["type"]):
+        return {"status": "ok", "deduplicated": True}
 
     try:
         event_type = event["type"]

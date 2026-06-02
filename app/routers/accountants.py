@@ -48,12 +48,111 @@ def get_user_id(request: Request) -> str:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 
-def _resolve_portal_token(token: str) -> dict:
+# Accountant portal TTL — short enough that a leaked link expires
+# quickly, long enough to cover a normal accountant work cycle.
+_PORTAL_TTL_DAYS = 7
+
+
+def _client_ip(request: Request) -> str:
+    fwd = (request.headers.get("x-forwarded-for") or "").strip()
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _send_first_access_email(owner_id: str, ip: str) -> None:
+    """Notify the owner the FIRST time a portal token is opened so a
+    leaked link surfaces immediately.
+    """
+    if not settings.resend_api_key:
+        return
+    try:
+        user_data = supabase.auth.admin.get_user_by_id(owner_id)
+        email = user_data.user.email if user_data.user else None
+    except Exception:
+        email = None
+    if not email:
+        return
+    when = datetime.now(timezone.utc).strftime("%d-%m-%Y %H:%M UTC")
+    try:
+        resend.Emails.send({
+            "from": "BigDogg <info@bigdogg.nl>",
+            "to": [email],
+            "subject": "Je accountantsportaal is geopend",
+            "text": (
+                f"Hoi,\n\n"
+                f"Je accountantsportaal-link is zojuist voor het eerst "
+                f"geopend vanaf IP {ip} op {when}.\n\n"
+                f"Was dit niet jouw accountant? Trek de link direct in via "
+                f"Instellingen > Mijn accountant.\n\n"
+                f"BigDogg · bigdogg.nl\n"
+            ),
+            "html": f"""<!DOCTYPE html>
+<html><body style="margin:0;padding:0;background:#f5f3ef;font-family:Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f3ef;padding:40px 20px;">
+<tr><td align="center">
+<table width="520" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #E2DDD6;">
+<tr><td style="background:#1B3A4B;padding:24px 32px;text-align:center;">
+<div style="font-size:24px;font-weight:900;color:#C9A96E;">BigDogg.</div>
+</td></tr>
+<tr><td style="padding:28px 32px;">
+<h1 style="margin:0 0 12px 0;font-size:18px;color:#1B3A4B;">Je accountantsportaal is geopend</h1>
+<p style="margin:0 0 12px 0;font-size:14px;line-height:1.6;color:#4A6572;">
+Je accountantsportaal-link is zojuist voor het eerst geopend vanaf <strong>{ip}</strong> op {when}.
+</p>
+<p style="margin:0 0 0 0;font-size:13px;line-height:1.6;color:#4A6572;">
+Was dit niet jouw accountant? Trek de link direct in via Instellingen → Mijn accountant.
+</p>
+</td></tr>
+<tr><td style="background:#f5f3ef;padding:14px 32px;text-align:center;border-top:1px solid #E2DDD6;">
+<div style="color:#4A6572;font-size:11px;">BigDogg · <a href="https://bigdogg.nl" style="color:#1B3A4B;">bigdogg.nl</a></div>
+</td></tr>
+</table>
+</td></tr>
+</table>
+</body></html>""",
+        })
+    except Exception as e:
+        print(f"[accountants/audit] first-access email failed: {e}")
+
+
+def _log_portal_access(request: Request, token: str, owner_id: str) -> None:
+    """Insert a row into accountant_portal_access_log and, if this is
+    the first observed access for this token, fire the notification
+    email to the owner. Best-effort — never raises.
+    """
+    ip = _client_ip(request)
+    ua = (request.headers.get("user-agent") or "")[:300]
+    path = str(request.url.path)
+    try:
+        # Check first-access BEFORE inserting so the just-logged row
+        # isn't itself counted as "prior".
+        prior = supabase.table("accountant_portal_access_log")\
+            .select("id").eq("token", token).limit(1).execute()
+        is_first = not prior.data
+        supabase.table("accountant_portal_access_log").insert({
+            "token":      token,
+            "ip_address": ip,
+            "user_agent": ua,
+            "path":       path,
+        }).execute()
+        if is_first and owner_id:
+            _send_first_access_email(owner_id, ip)
+    except Exception as e:
+        print(f"[accountants/audit] log failed: {e}")
+
+
+def _resolve_portal_token(token: str, request: Request | None = None) -> dict:
     """Validate an accountant portal token and return its row. Raises:
 
       404 — token does not exist
       410 — token expired (Gone)
       403 — token revoked
+
+    When `request` is provided, the access is logged to
+    accountant_portal_access_log and a first-access email is fired to
+    the owner — best-effort, failures here never block the legitimate
+    request.
     """
     result = supabase.table("accountant_invites")\
         .select("token, user_id, email, used, expires_at, created_at")\
@@ -76,6 +175,9 @@ def _resolve_portal_token(token: str) -> dict:
             raise
         except Exception:
             pass
+
+    if request is not None:
+        _log_portal_access(request, token, row.get("user_id"))
     return row
 
 
@@ -88,10 +190,14 @@ async def invite_accountant(request: Request):
     if not email or "@" not in email:
         raise HTTPException(status_code=400, detail="invalid_email")
 
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(days=_PORTAL_TTL_DAYS)
+    ).isoformat()
     insert = supabase.table("accountant_invites").insert({
-        "user_id": user_id,
-        "email":   email,
-        "used":    False,
+        "user_id":    user_id,
+        "email":      email,
+        "used":       False,
+        "expires_at": expires_at,
     }).execute()
     if not insert.data:
         raise HTTPException(status_code=400, detail="invite_failed")
@@ -122,7 +228,7 @@ async def invite_accountant(request: Request):
             )
             text_body = (
                 f"Hallo,\n\n"
-                f"{inviter} geeft je 14 dagen lang alleen-lezen toegang tot "
+                f"{inviter} geeft je {_PORTAL_TTL_DAYS} dagen lang alleen-lezen toegang tot "
                 f"zijn BigDogg-boekhouding — facturen, kosten en BTW-overzicht.\n\n"
                 f"Open de portal: {accept_url}\n\n"
                 f"Er is geen account nodig — open de link en je zit erin.\n\n"
@@ -167,7 +273,7 @@ def _invite_email_html(*, inviter: str, recipient_email: str, accept_url: str) -
         <tr><td style="padding:28px 28px 8px 28px;">
           <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">Hallo,</p>
           <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">
-            <strong style="color:#1B3A4B;">{safe_inviter}</strong> geeft je <strong>14 dagen</strong>
+            <strong style="color:#1B3A4B;">{safe_inviter}</strong> geeft je <strong>{_PORTAL_TTL_DAYS} dagen</strong>
             alleen-lezen toegang tot zijn BigDogg-boekhouding.
           </p>
           <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">
@@ -188,7 +294,7 @@ def _invite_email_html(*, inviter: str, recipient_email: str, accept_url: str) -
           <p style="margin:16px 0 6px 0;font-size:13px;line-height:1.6;color:#4A6572;">
             <strong>Hoe werkt het?</strong><br>
             Open de link op je telefoon of desktop. De portal toont een leesbaar
-            overzicht en je kunt PDF's van facturen downloaden. De link is 14
+            overzicht en je kunt PDF's van facturen downloaden. De link is {_PORTAL_TTL_DAYS}
             dagen geldig en kan op elk moment door {safe_inviter} worden ingetrokken.
           </p>
           <p style="margin:16px 0 0 0;font-size:12px;line-height:1.6;color:#4A6572;">
@@ -239,9 +345,11 @@ async def cancel_invite(token: str, request: Request):
 
 @router.post("/invites/{token}/extend")
 async def extend_invite(token: str, request: Request):
-    """Push expires_at out by another 14 days."""
+    """Push expires_at out by another portal TTL window."""
     user_id = get_user_id(request)
-    new_expiry = (datetime.now(timezone.utc) + timedelta(days=14)).isoformat()
+    new_expiry = (
+        datetime.now(timezone.utc) + timedelta(days=_PORTAL_TTL_DAYS)
+    ).isoformat()
     supabase.table("accountant_invites").update({
         "expires_at": new_expiry,
         "used": False,
@@ -251,9 +359,9 @@ async def extend_invite(token: str, request: Request):
 
 # ─── Accountant portal — public, token-gated ─────────────────
 @router.get("/portal/{token}")
-async def portal_meta(token: str):
+async def portal_meta(token: str, request: Request):
     """Public landing info — owner name, expiry, link status."""
-    row = _resolve_portal_token(token)
+    row = _resolve_portal_token(token, request)
     owner_id = row["user_id"]
     inviter_name = ""
     business_name = ""
@@ -331,10 +439,10 @@ def _depreciation_for_year(amount: float, purchase_date: str,
 
 
 @router.get("/portal/{token}/years")
-async def portal_years(token: str):
+async def portal_years(token: str, request: Request):
     """Distinct years that contain any invoice or expense row, for the
     year-selector dropdown on the portal."""
-    row = _resolve_portal_token(token)
+    row = _resolve_portal_token(token, request)
     owner_id = row["user_id"]
     inv = supabase.table("invoices")\
         .select("invoice_date").eq("user_id", owner_id).execute()
@@ -354,8 +462,8 @@ async def portal_years(token: str):
 
 
 @router.get("/portal/{token}/overview")
-async def portal_overview(token: str, year: int | None = None):
-    row = _resolve_portal_token(token)
+async def portal_overview(token: str, request: Request, year: int | None = None):
+    row = _resolve_portal_token(token, request)
     owner_id = row["user_id"]
     y, y_start, y_end = _resolve_year(year)
 
@@ -434,8 +542,8 @@ async def portal_overview(token: str, year: int | None = None):
 
 
 @router.get("/portal/{token}/invoices")
-async def portal_invoices(token: str, year: int | None = None):
-    row = _resolve_portal_token(token)
+async def portal_invoices(token: str, request: Request, year: int | None = None):
+    row = _resolve_portal_token(token, request)
     owner_id = row["user_id"]
     y, y_start, y_end = _resolve_year(year)
 
@@ -463,9 +571,33 @@ async def portal_invoices(token: str, year: int | None = None):
     return {"year": y, "invoices": invoices}
 
 
+def _signed_receipt_url(receipt_value):
+    """Mint a short-lived signed URL for a stored receipt. Handles both
+    new path format and legacy public URLs. Returns None on failure.
+    Mirror of the same helper in expenses.py — duplicated to avoid
+    cross-router imports.
+    """
+    if not receipt_value:
+        return None
+    if receipt_value.startswith("http"):
+        marker = "/receipts/"
+        idx = receipt_value.find(marker)
+        if idx == -1:
+            return None
+        path = receipt_value[idx + len(marker):]
+    else:
+        path = receipt_value
+    try:
+        result = supabase.storage.from_("receipts").create_signed_url(path, 3600)
+        return result.get("signedURL") or result.get("signedUrl") or None
+    except Exception as e:
+        print(f"[accountants/receipts] signed URL failed for {path}: {e}")
+        return None
+
+
 @router.get("/portal/{token}/expenses")
-async def portal_expenses(token: str, year: int | None = None):
-    row = _resolve_portal_token(token)
+async def portal_expenses(token: str, request: Request, year: int | None = None):
+    row = _resolve_portal_token(token, request)
     owner_id = row["user_id"]
     y, y_start, y_end = _resolve_year(year)
     # NOTE: do not select payment_method — column does not exist on the
@@ -480,6 +612,10 @@ async def portal_expenses(token: str, year: int | None = None):
     for r in (rows.data or []):
         ex = float(r.get("amount_ex_btw") or 0)
         btw = float(r.get("btw_amount") or 0)
+        if r.get("receipt_url"):
+            signed = _signed_receipt_url(r["receipt_url"])
+            if signed:
+                r["receipt_url"] = signed
         out.append({**r, "amount_incl_btw": round(ex + btw, 2)})
     return {"year": y, "expenses": out}
 
@@ -590,8 +726,8 @@ def _btw_breakdown_for_year(owner_id: str, year: int) -> dict:
 
 
 @router.get("/portal/{token}/btw-breakdown")
-async def portal_btw_breakdown(token: str, year: int | None = None):
-    row = _resolve_portal_token(token)
+async def portal_btw_breakdown(token: str, request: Request, year: int | None = None):
+    row = _resolve_portal_token(token, request)
     owner_id = row["user_id"]
     y, _, _ = _resolve_year(year)
     return {"year": y, **_btw_breakdown_for_year(owner_id, y)}
@@ -599,10 +735,10 @@ async def portal_btw_breakdown(token: str, year: int | None = None):
 
 # ── Debiteuren aging ────────────────────────────────────────
 @router.get("/portal/{token}/aging")
-async def portal_aging(token: str):
+async def portal_aging(token: str, request: Request):
     """Aging buckets of outstanding (non-paid) invoices, based on due_date
     relative to today. Returns 4 buckets + a totals/items rollup."""
-    row = _resolve_portal_token(token)
+    row = _resolve_portal_token(token, request)
     owner_id = row["user_id"]
 
     inv = supabase.table("invoices")\
@@ -702,8 +838,8 @@ def _depreciation_schedule(amount: float, purchase_date: str,
 
 
 @router.get("/portal/{token}/investments")
-async def portal_investments(token: str, year: int | None = None):
-    row = _resolve_portal_token(token)
+async def portal_investments(token: str, request: Request, year: int | None = None):
+    row = _resolve_portal_token(token, request)
     owner_id = row["user_id"]
     y, _, _ = _resolve_year(year)
 
@@ -758,10 +894,10 @@ _LEDGER_EXPENSES = {
 
 
 @router.get("/portal/{token}/export.csv")
-async def portal_export_csv(token: str, year: int | None = None):
+async def portal_export_csv(token: str, request: Request, year: int | None = None):
     """CSV dump combining invoice lines + expenses for the year. Columns
     match what accountants typically import into Exact/AFAS/Twinfield."""
-    row = _resolve_portal_token(token)
+    row = _resolve_portal_token(token, request)
     owner_id = row["user_id"]
     y, y_start, y_end = _resolve_year(year)
 
@@ -970,11 +1106,11 @@ def _invoice_derived_hours(owner_id: str, y_start: str, y_end: str) -> tuple[flo
 
 
 @router.get("/portal/{token}/hours")
-async def portal_hours(token: str, year: int | None = None):
+async def portal_hours(token: str, request: Request, year: int | None = None):
     """Total hours for the year — matches the user's own /api/v1/hours
     screen exactly (manual entries + invoice-derived: day*9, hour*1).
     Also returns a per-month breakdown for the table the portal renders."""
-    row = _resolve_portal_token(token)
+    row = _resolve_portal_token(token, request)
     owner_id = row["user_id"]
     y, y_start, y_end = _resolve_year(year)
 
@@ -1080,6 +1216,7 @@ async def portal_hours(token: str, year: int | None = None):
 @router.get("/portal/{token}/annual-report.pdf")
 async def portal_annual_report_pdf(
     token: str,
+    request: Request,
     year: int | None = None,
     lang: str = "nl",
 ):
@@ -1090,7 +1227,7 @@ async def portal_annual_report_pdf(
     `require_active_paid` is enforced identically to the user-facing
     endpoint so free-tier owners can't grant their accountant the PDF
     either."""
-    row = _resolve_portal_token(token)
+    row = _resolve_portal_token(token, request)
     owner_id = row["user_id"]
 
     # Import lazily to avoid a circular import at module load time.
@@ -1129,7 +1266,7 @@ async def portal_annual_report_pdf(
     import asyncio
     try:
         tax_tips = await asyncio.wait_for(
-            get_ai_tax_tips(data_current, data_prev, profile, lang),
+            get_ai_tax_tips(data_current, data_prev, profile, lang, owner_id),
             timeout=25.0,
         )
     except Exception:
@@ -1160,9 +1297,9 @@ async def portal_annual_report_pdf(
 
 
 @router.get("/portal/{token}/invoices/{invoice_id}/pdf")
-async def portal_invoice_pdf(token: str, invoice_id: str):
+async def portal_invoice_pdf(token: str, invoice_id: str, request: Request):
     """Generate the invoice PDF on demand, scoped to the link's owner."""
-    row = _resolve_portal_token(token)
+    row = _resolve_portal_token(token, request)
     owner_id = row["user_id"]
 
     invoice_result = supabase.table("invoices")\

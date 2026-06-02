@@ -4,6 +4,7 @@ from datetime import date, timedelta
 from app.database import supabase
 from app.config import settings
 from app.routers.subscription import require_active_paid
+from app.services.ai_quota import require_ai_quota, record_ai_usage
 import anthropic
 import base64
 import json
@@ -34,7 +35,17 @@ def _extract_json(text: str) -> dict:
     return json.loads(text)
 
 
-async def _parse_invoice_file(content: bytes, filename: str, content_type: str) -> dict:
+async def _parse_invoice_file(
+    content: bytes,
+    filename: str,
+    content_type: str,
+    user_id: str,
+    endpoint: str,
+) -> dict:
+    # Quota check is INSIDE the per-file helper so a 100-file import
+    # halts the moment a user blows their daily cap, instead of running
+    # all 100 Claude calls before the outer route checks.
+    require_ai_quota(user_id, endpoint)
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     base64_data = base64.standard_b64encode(content).decode("utf-8")
 
@@ -118,6 +129,7 @@ Rules:
             ],
         }],
     )
+    record_ai_usage(user_id, endpoint, message)
 
     raw = message.content[0].text.strip()
     return _extract_json(raw)
@@ -141,7 +153,9 @@ async def import_invoices(
             content = await file.read()
             content_type = file.content_type or "application/pdf"
 
-            parsed = await _parse_invoice_file(content, filename, content_type)
+            parsed = await _parse_invoice_file(
+                content, filename, content_type, user_id, "import-invoices",
+            )
 
             invoice_date = parsed.get("invoice_date") or str(date.today())
             subtotal = float(parsed.get("subtotal_ex_btw") or 0)
@@ -276,7 +290,9 @@ async def import_expenses(
             content = await file.read()
             content_type = file.content_type or "application/pdf"
 
-            parsed = await _parse_invoice_file(content, filename, content_type)
+            parsed = await _parse_invoice_file(
+                content, filename, content_type, user_id, "import-expenses",
+            )
 
             expense_date = parsed.get("invoice_date") or str(date.today())
             total = float(parsed.get("total_incl_btw") or 0)

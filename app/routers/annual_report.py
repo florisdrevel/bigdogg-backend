@@ -4,6 +4,7 @@ from app.database import supabase
 from app.config import settings
 from app.routers.pdf import TEAL, GOLD, LIGHT_GREY, MID_GREY, TEXT_SECONDARY
 from app.routers.subscription import require_active_paid
+from app.services.ai_quota import require_ai_quota, record_ai_usage
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
@@ -213,7 +214,11 @@ def get_year_data(user_id: str, year: int):
         "depreciation_items": depreciation_items,
     }
 
-async def get_ai_tax_tips(data_current, data_prev, profile, lang='nl'):
+async def get_ai_tax_tips(data_current, data_prev, profile, lang='nl', user_id: str = ""):
+    # Quota check runs first so a stolen token can't hammer the
+    # annual-report endpoint into Anthropic-billed oblivion.
+    if user_id:
+        require_ai_quota(user_id, "annual-report-tax-tips")
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
     if lang == 'en':
@@ -281,6 +286,8 @@ Geef de tips als een genummerde lijst (1. 2. 3. etc.), elk op een nieuwe regel. 
         max_tokens=1000,
         messages=[{"role": "user", "content": prompt}]
     )
+    if user_id:
+        record_ai_usage(user_id, "annual-report-tax-tips", message)
     return message.content[0].text
 
 def _t(nl, en, lang):
@@ -664,7 +671,10 @@ async def download_annual_report(
     else:
         fallback_tips = "1. Controleer of je in aanmerking komt voor de zelfstandigenaftrek.\n2. Pas de MKB-winstvrijstelling van 14% toe op je winst.\n3. Bekijk alle zakelijke kosten op aftrekbaarheid.\n4. Overweeg een fiscale oudedagsreserve (FOR) om belastbare winst te verlagen.\n5. Zorg dat alle facturen in je administratie zitten."
     try:
-        tax_tips = await asyncio.wait_for(get_ai_tax_tips(data_current, data_prev, profile, lang), timeout=25.0)
+        tax_tips = await asyncio.wait_for(
+            get_ai_tax_tips(data_current, data_prev, profile, lang, user_id),
+            timeout=25.0,
+        )
     except Exception:
         tax_tips = fallback_tips
     pdf_bytes = _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang)
@@ -700,7 +710,9 @@ async def send_annual_reports(request: Request):
 
             data_current = get_year_data(user_id, year)
             data_prev = get_year_data(user_id, year - 1)
-            tax_tips = await get_ai_tax_tips(data_current, data_prev, profile, 'nl')
+            tax_tips = await get_ai_tax_tips(
+                data_current, data_prev, profile, 'nl', user_id,
+            )
             pdf_bytes = _generate_annual_pdf(data_current, data_prev, profile, tax_tips, 'nl')
             pdf_b64 = base64.b64encode(pdf_bytes).decode('utf-8')
 

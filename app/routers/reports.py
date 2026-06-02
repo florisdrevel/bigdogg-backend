@@ -16,6 +16,30 @@ import io
 router = APIRouter()
 
 
+def _signed_receipt_url(receipt_value):
+    """Mint a short-lived signed URL for a stored receipt. Handles both
+    new path format and legacy public URLs. Returns None on failure.
+    Mirror of the same helper in expenses.py — duplicated to avoid
+    cross-router imports.
+    """
+    if not receipt_value:
+        return None
+    if receipt_value.startswith("http"):
+        marker = "/receipts/"
+        idx = receipt_value.find(marker)
+        if idx == -1:
+            return None
+        path = receipt_value[idx + len(marker):]
+    else:
+        path = receipt_value
+    try:
+        result = supabase.storage.from_("receipts").create_signed_url(path, 3600)
+        return result.get("signedURL") or result.get("signedUrl") or None
+    except Exception as e:
+        print(f"[reports/receipts] signed URL failed for {path}: {e}")
+        return None
+
+
 def compute_financials(user_id: str, start_date: str, end_date: str) -> dict:
     invoices = supabase.table("invoices").select("subtotal_ex_btw, btw_amount, btw_rate, total_incl_btw, status").eq("user_id", user_id).gte("invoice_date", start_date).lte("invoice_date", end_date).neq("status", "draft").execute()
     expenses = supabase.table("expenses").select("amount_ex_btw, btw_amount").eq("user_id", user_id).gte("expense_date", start_date).lte("expense_date", end_date).execute()
@@ -308,6 +332,10 @@ async def get_quarter_detail(
         rate = float(exp.get("btw_rate") or 0)
         exp["total_incl_btw"] = round(amount_ex * (1 + rate / 100), 2)
         exp["amount"] = round(amount_ex, 2)
+        if exp.get("receipt_url"):
+            signed = _signed_receipt_url(exp["receipt_url"])
+            if signed:
+                exp["receipt_url"] = signed
 
     return {"invoices": invoices, "expenses": expenses}
 

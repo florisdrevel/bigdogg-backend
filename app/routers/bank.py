@@ -18,6 +18,7 @@ imported as expenses via POST /expenses/.
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 from app.database import supabase
 from app.config import settings
+from app.services.ai_quota import require_ai_quota, record_ai_usage
 import anthropic
 import base64
 import json
@@ -84,7 +85,8 @@ def _strip_fences(text: str) -> str:
 
 @router.post("/parse-statement")
 async def parse_statement(request: Request, file: UploadFile = File(...)):
-    get_user_id(request)
+    user_id = get_user_id(request)
+    require_ai_quota(user_id, "parse-statement")
 
     raw = await file.read()
     if not raw:
@@ -129,6 +131,7 @@ async def parse_statement(request: Request, file: UploadFile = File(...)):
         print(f"[bank] Claude call failed: {e}")
         raise HTTPException(status_code=502, detail="ai_request_failed")
 
+    record_ai_usage(user_id, "parse-statement", message)
     raw_text = _strip_fences(message.content[0].text)
 
     try:
