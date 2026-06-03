@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 from app.database import supabase
+from app.services.tenant_db import require_owned_id
 
 router = APIRouter()
 
@@ -111,11 +112,18 @@ async def update_client(client_id: str, client: ClientUpdate, request: Request):
 @router.delete("/{client_id}")
 async def delete_client(client_id: str, request: Request):
     user_id = get_user_id(request)
+    # Verify the client belongs to the caller UPFRONT — 404 otherwise.
+    # Without this the subsequent invoice queries scoped only by
+    # client_id could probe / mutate another tenant's invoices.
+    require_owned_id("clients", client_id, user_id)
     try:
-        # Block deletion if client has unpaid invoices
+        # Block deletion if THIS user has any unpaid invoices for the
+        # client. Both client_id and user_id eq required so we only ever
+        # see the caller's own invoices.
         unpaid = supabase.table("invoices")\
             .select("id, status")\
             .eq("client_id", client_id)\
+            .eq("user_id", user_id)\
             .in_("status", ["draft", "sent", "overdue"])\
             .execute()
 
@@ -125,10 +133,12 @@ async def delete_client(client_id: str, request: Request):
                 detail=f"Deze klant heeft {len(unpaid.data)} onbetaalde factuur/facturen. Markeer ze als betaald voor je de klant verwijdert."
             )
 
-        # Set client_id to null on paid invoices to preserve history
+        # Set client_id to null on the caller's own paid invoices to
+        # preserve history; other tenants' invoices are NEVER touched.
         supabase.table("invoices")\
             .update({"client_id": None})\
             .eq("client_id", client_id)\
+            .eq("user_id", user_id)\
             .execute()
 
         # Delete client
