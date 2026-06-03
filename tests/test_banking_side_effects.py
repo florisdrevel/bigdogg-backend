@@ -68,7 +68,7 @@ class _Recorder:
         monkeypatch.setattr(banking, "_persist_link",
                             lambda *a, **kw: self.persist_calls.append((a, kw)))
         monkeypatch.setattr(banking, "_mark_invoice_paid",
-                            lambda iid: self.mark_paid_calls.append(iid))
+                            lambda iid, uid: self.mark_paid_calls.append(iid))
         monkeypatch.setattr(banking, "_notify_match",
                             lambda *a, **kw: self.notify_calls.append((a, kw)))
 
