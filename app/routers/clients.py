@@ -3,6 +3,7 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional
 from app.database import supabase
 from app.services.tenant_db import require_owned_id
+from app.services.tokens import expiry_in_days, is_expired, CLIENT_INVITE_TTL_DAYS
 
 router = APIRouter()
 
@@ -170,6 +171,9 @@ async def get_onboarding_info(token: str):
             .execute()
         if not result.data:
             return {"valid": False, "message": "Invalid or expired invite link"}
+        # Finding #9: reject expired onboarding links.
+        if is_expired(result.data[0].get("expires_at")):
+            return {"valid": False, "message": "Invalid or expired invite link"}
         return {"valid": True, "token": token}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -186,6 +190,9 @@ async def complete_onboarding(token: str, client: ClientOnboarding):
 
         if not stub.data:
             raise HTTPException(status_code=404, detail="Invalid or expired invite link")
+        # Finding #9: reject expired onboarding links before creating the client.
+        if is_expired(stub.data[0].get("expires_at")):
+            raise HTTPException(status_code=410, detail="Invalid or expired invite link")
 
         user_id = stub.data[0]['user_id']
 
@@ -222,6 +229,8 @@ async def complete_onboarding(token: str, client: ClientOnboarding):
         )
 
         return {"message": "Client added successfully", "client": result.data[0]}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -232,6 +241,8 @@ async def create_invite(request: Request):
     try:
         response = supabase.table("client_invites").insert({
             "user_id": user_id,
+            # Finding #9: onboarding links expire after 14 days.
+            "expires_at": expiry_in_days(CLIENT_INVITE_TTL_DAYS),
         }).execute()
         token = response.data[0]['token']
         # Use the share-link short URL so WhatsApp/Slack/Facebook show

@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from app.database import supabase
 from app.config import settings
+from app.services.tokens import is_expired
 from datetime import date, timedelta, datetime, timezone
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
@@ -694,7 +695,14 @@ def _lookup_quote_by_token(token: str) -> dict:
         .select("*").eq("share_token", token).limit(1).execute()
     if not quote_result.data:
         raise HTTPException(status_code=404, detail="Quote not found")
-    return quote_result.data[0]
+    quote = quote_result.data[0]
+    # Finding #9: a share link is only valid within its expiry window.
+    if is_expired(quote.get("share_token_expires_at")):
+        raise HTTPException(
+            status_code=410,
+            detail="Deze offertelink is verlopen. Vraag de afzender om een nieuwe link.",
+        )
+    return quote
 
 
 def _esc_html(value) -> str:
