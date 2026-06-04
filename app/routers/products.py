@@ -95,6 +95,8 @@ async def update_product(product_id: str, product: ProductUpdate, request: Reque
         if not response.data:
             raise HTTPException(status_code=404, detail="Product not found")
         return {"product": response.data[0]}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -103,11 +105,17 @@ async def update_product(product_id: str, product: ProductUpdate, request: Reque
 async def delete_product(product_id: str, request: Request):
     user_id = get_user_id(request)
     try:
-        supabase.table("products")\
+        # Finding #10: soft-delete (is_active=False) scoped to the caller;
+        # 404 if the id isn't theirs instead of a silent 200.
+        response = supabase.table("products")\
             .update({"is_active": False})\
             .eq("id", product_id)\
             .eq("user_id", user_id)\
             .execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Product not found")
         return {"message": "Product deleted"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

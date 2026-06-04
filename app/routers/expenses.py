@@ -6,6 +6,7 @@ from app.database import supabase
 from app.config import settings
 from app.routers.banking import schedule_reconcile
 from app.services.ai_quota import require_ai_quota, record_ai_usage
+from app.services.tenant_db import require_owned_id, delete_owned
 import anthropic
 import base64
 import json
@@ -93,6 +94,9 @@ async def create_expense(expense: ExpenseCreate, request: Request):
     try:
         btw_amount = round(expense.amount_ex_btw * expense.btw_rate / 100, 2)
         expense_date = expense.expense_date or str(date.today())
+        # Finding #8: verify the project belongs to the caller before linking.
+        if expense.project_id:
+            require_owned_id("projects", expense.project_id, user_id)
         response = supabase.table("expenses").insert({
             "user_id": user_id,
             "description": expense.description,
@@ -108,6 +112,8 @@ async def create_expense(expense: ExpenseCreate, request: Request):
         # an instant notification + auto-link.
         schedule_reconcile(user_id)
         return {"expense": response.data[0]}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -324,11 +330,10 @@ async def upload_receipt(expense_id: str, request: Request, file: UploadFile = F
 async def delete_expense(expense_id: str, request: Request):
     user_id = get_user_id(request)
     try:
-        supabase.table("expenses")\
-            .delete()\
-            .eq("id", expense_id)\
-            .eq("user_id", user_id)\
-            .execute()
+        # Finding #10: 404 on a foreign/missing id instead of silent 200.
+        delete_owned("expenses", expense_id, user_id)
         return {"message": "Expense deleted"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

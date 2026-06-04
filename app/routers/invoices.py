@@ -5,6 +5,7 @@ from app.database import supabase
 from app.config import settings
 from app.routers.banking import schedule_reconcile
 from app.routers.subscription import require_active_paid
+from app.services.tenant_db import require_owned_id
 from datetime import date, timedelta
 import resend
 
@@ -122,6 +123,11 @@ async def create_invoice(invoice: InvoiceCreate, request: Request):
             raise HTTPException(status_code=404, detail="Client not found")
         client_data = client_result.data
 
+        # Finding #8: a project_id from the body must belong to the caller,
+        # otherwise an attacker could link their invoice to a foreign project.
+        if invoice.project_id:
+            require_owned_id("projects", invoice.project_id, user_id)
+
         invoice_response = supabase.table("invoices").insert({
             "user_id": user_id,
             "client_id": invoice.client_id,
@@ -225,6 +231,8 @@ async def create_invoice(invoice: InvoiceCreate, request: Request):
             "invoice_number": invoice_number,
             "payment_link": payment_link_url,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -365,6 +373,9 @@ async def update_invoice(invoice_id: str, request: Request):
         update = {k: v for k, v in body.items() if k in allowed}
         if not update:
             raise HTTPException(status_code=400, detail="No valid fields to update")
+        # Finding #8: re-assigning a project must point at the caller's own project.
+        if update.get("project_id"):
+            require_owned_id("projects", update["project_id"], user_id)
         supabase.table("invoices").update(update).eq("id", invoice_id).eq("user_id", user_id).execute()
         return {"success": True}
     except HTTPException:

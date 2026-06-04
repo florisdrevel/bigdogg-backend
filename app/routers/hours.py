@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Request
 from app.database import supabase
+from app.services.tenant_db import require_owned_id, delete_owned
 from datetime import date
 
 router = APIRouter()
@@ -242,6 +243,8 @@ async def add_hours(request: Request):
             "description": body.get("description", ""),
         }
         if body.get("project_id"):
+            # Finding #8: verify the project belongs to the caller before linking.
+            require_owned_id("projects", body["project_id"], user_id)
             data["project_id"] = body["project_id"]
         result = supabase.table("hours").insert(data).execute()
         return {"success": True, "entry": result.data[0] if result.data else {}}
@@ -255,7 +258,11 @@ async def add_hours(request: Request):
 async def delete_hours(entry_id: str, request: Request):
     user_id = get_user_id(request)
     try:
-        supabase.table("hours").delete().eq("id", entry_id).eq("user_id", user_id).execute()
+        # Finding #10: delete_owned raises 404 if the row isn't the caller's,
+        # instead of silently returning 200 and leaking row existence.
+        delete_owned("hours", entry_id, user_id)
         return {"success": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
