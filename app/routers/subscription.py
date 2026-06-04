@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Request
+from app.services.cron_auth import require_cron_secret
 from pydantic import BaseModel
 from typing import Optional
 from app.database import supabase
@@ -353,17 +354,21 @@ async def get_subscription_status(request: Request):
 
 
 @router.get("/activated")
-async def check_activation(user_id: str):
-    """Lightweight, no-auth status probe used by the mobile app after the
-    in-app web view closes. The native client polls this once webhook
-    processing has had a moment to land so it can auto-dismiss the
-    paywall and grant full access without an app restart.
+async def check_activation(request: Request):
+    """Lightweight subscription-status probe used by the mobile app
+    after the in-app web view closes. The native client polls this once
+    webhook processing has had a moment to land so it can auto-dismiss
+    the paywall and grant full access without an app restart.
 
     Returns:
         {"active": true|false, "plan": "monthly"|None}
+
+    Authenticated only — user_id is derived from the verified JWT, not
+    from a query parameter. The pre-fix version accepted ?user_id=…
+    with no auth, which let anyone enumerate paying customers by walking
+    UUIDs.
     """
-    if not user_id or not user_id.strip():
-        raise HTTPException(status_code=400, detail="user_id is required")
+    user_id = get_user_id(request)
     try:
         result = supabase.table("subscriptions")\
             .select("status, bonus_active_until")\
@@ -891,9 +896,7 @@ async def send_cancellation_reminders(request: Request):
 
     Header: x-cron-secret. Suggested: daily at 09:00 Europe/Amsterdam.
     """
-    auth = request.headers.get("x-cron-secret", "")
-    if auth != settings.cron_secret:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    require_cron_secret(request)
 
     now = datetime.now(timezone.utc)
     sent = 0
@@ -1017,9 +1020,7 @@ async def admin_churn_stats(request: Request, since: Optional[str] = None):
 
     Pass ?since=YYYY-MM-DD to bound the window (defaults to 90 days).
     """
-    auth = request.headers.get("x-cron-secret", "")
-    if auth != settings.cron_secret:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    require_cron_secret(request)
 
     if since:
         try:
@@ -1255,9 +1256,7 @@ async def send_trial_expiry_notifications(request: Request):
 
     Header: x-cron-secret. Schedule: daily at 09:00 Europe/Amsterdam.
     """
-    auth = request.headers.get("x-cron-secret", "")
-    if auth != settings.cron_secret:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    require_cron_secret(request)
 
     now = datetime.now(timezone.utc)
     sent_7 = 0
@@ -1498,9 +1497,7 @@ async def send_btw_reminders(request: Request):
     Header: x-cron-secret: <your_cron_secret>
     Schedule: daily at 09:00 Europe/Amsterdam (cron-job.org)
     """
-    auth = request.headers.get("x-cron-secret", "")
-    if auth != settings.cron_secret:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    require_cron_secret(request)
 
     today = datetime.now(timezone.utc).date()
 
@@ -1587,16 +1584,30 @@ async def stripe_webhook(request: Request):
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
 
+    # Fail-closed: never process an unsigned event. If the secret is
+    # missing or still set to the placeholder, return 500 so Stripe
+    # retries while we fix env — DO NOT fall back to json.loads(payload)
+    # which would let an attacker POST a forged event with
+    # metadata.user_id=<victim> and silently flip them to status='active'.
+    if (
+        not settings.stripe_webhook_secret
+        or settings.stripe_webhook_secret == "whsec_placeholder"
+    ):
+        print("Stripe webhook secret missing/placeholder — refusing to process")
+        raise HTTPException(
+            status_code=500, detail="webhook_secret_missing",
+        )
+
     try:
-        if settings.stripe_webhook_secret and settings.stripe_webhook_secret != "whsec_placeholder":
-            event = stripe.Webhook.construct_event(
-                payload, sig_header, settings.stripe_webhook_secret
-            )
-        else:
-            event = json.loads(payload)
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, settings.stripe_webhook_secret,
+        )
+    except stripe.error.SignatureVerificationError as e:
+        print(f"Webhook signature error: {str(e)}")
+        raise HTTPException(status_code=400, detail="invalid_signature")
     except Exception as e:
-        print(f"Webhook error: {str(e)}")
-        return {"status": "ok"}
+        print(f"Webhook parse error: {str(e)}")
+        raise HTTPException(status_code=400, detail="invalid_payload")
 
     try:
         event_type = event["type"]

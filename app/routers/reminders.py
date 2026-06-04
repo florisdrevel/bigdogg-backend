@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request
 from app.database import supabase
 from app.config import settings
+from app.services.cron_auth import require_cron_secret
 from datetime import datetime, timezone, timedelta
 import resend
 
@@ -189,9 +190,7 @@ async def payment_reminders_cron(request: Request):
     Header: x-cron-secret: <your_cron_secret>
     Schedule: daily at 09:00 Europe/Amsterdam.
     """
-    auth = request.headers.get("x-cron-secret", "")
-    if auth != settings.cron_secret:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    require_cron_secret(request)
 
     today = datetime.now(timezone.utc).date()
     cutoff_14 = (today - timedelta(days=14)).isoformat()

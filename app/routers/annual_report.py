@@ -5,6 +5,7 @@ from app.config import settings
 from app.routers.pdf import TEAL, GOLD, LIGHT_GREY, MID_GREY, TEXT_SECONDARY
 from app.routers.subscription import require_active_paid
 from app.services.ai_quota import require_ai_quota, record_ai_usage
+from app.services.cron_auth import require_cron_secret
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
@@ -689,9 +690,7 @@ async def download_annual_report(
 
 @router.post("/cron/annual")
 async def send_annual_reports(request: Request):
-    auth = request.headers.get("x-cron-secret", "")
-    if auth != settings.cron_secret:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    require_cron_secret(request)
 
     year = datetime.now().year - 1
     users = supabase.auth.admin.list_users()
