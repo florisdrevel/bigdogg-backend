@@ -321,6 +321,7 @@ Dit bericht is verzonden via BigDogg · bigdogg.nl
         supabase.table("invoices")\
             .update({"reminder_count": reminder_count})\
             .eq("id", invoice_id)\
+            .eq("user_id", user_id)\
             .execute()
 
         return {

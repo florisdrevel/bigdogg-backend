@@ -253,6 +253,7 @@ async def send_invoice_email(invoice_id: str, request: Request):
         supabase.table("invoices")\
             .update({"status": "sent"})\
             .eq("id", invoice_id)\
+            .eq("user_id", user_id)\
             .execute()
 
         return {"message": "Invoice sent successfully"}
