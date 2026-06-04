@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException, Body
+from fastapi import APIRouter, HTTPException, Body, Request
 from app.config import settings
+from app.services.rate_limit import SlidingWindowLimiter, client_ip
 import os
 import resend
 import html
@@ -7,6 +8,11 @@ import traceback
 
 router = APIRouter()
 resend.api_key = settings.resend_api_key
+
+# Finding #11: /support is public and sends email — cap it per IP so it
+# can't be turned into an email-bomb relay. 5 messages / 10 minutes is
+# generous for a real user, hostile to a script.
+_support_limiter = SlidingWindowLimiter(max_hits=5, window_seconds=600)
 
 # Default to info@bigdogg.nl, but let the operator override via env var.
 # Comma-separated list also supported, e.g. "info@bigdogg.nl,founder@gmail.com".
@@ -20,7 +26,9 @@ def _support_recipients() -> list[str]:
 
 
 @router.post("")
-async def submit_support(payload: dict = Body(...)):
+async def submit_support(request: Request, payload: dict = Body(...)):
+    _support_limiter.check(client_ip(request))
+
     name = (payload.get("name") or "").strip()
     email = (payload.get("email") or "").strip()
     message = (payload.get("message") or "").strip()
