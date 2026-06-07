@@ -18,7 +18,9 @@ class Settings:
     gmail_user: str = os.getenv("GMAIL_USER", "")
     gmail_app_password: str = os.getenv("GMAIL_APP_PASSWORD", "")
     resend_api_key: str = os.getenv("RESEND_API_KEY", "")
-    cron_secret: str = os.getenv("CRON_SECRET", "bigdogg-cron-2026")
+    # No default — the previous default literal leaked in git history.
+    # Fail-closed in require_cron_secret() when this is empty.
+    cron_secret: str = os.getenv("CRON_SECRET", "")
     # TrueLayer Open Banking. Sandbox is free and instant for testing;
     # live access requires KYC (uploaded business docs in the Console).
     # Flip `truelayer_use_sandbox` to "false" once live creds are issued.

@@ -2,6 +2,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 from app.database import supabase
+from app.services.tenant_db import require_owned_id
+from app.services.tokens import expiry_in_days, is_expired, CLIENT_INVITE_TTL_DAYS
 
 router = APIRouter()
 
@@ -111,11 +113,18 @@ async def update_client(client_id: str, client: ClientUpdate, request: Request):
 @router.delete("/{client_id}")
 async def delete_client(client_id: str, request: Request):
     user_id = get_user_id(request)
+    # Verify the client belongs to the caller UPFRONT — 404 otherwise.
+    # Without this the subsequent invoice queries scoped only by
+    # client_id could probe / mutate another tenant's invoices.
+    require_owned_id("clients", client_id, user_id)
     try:
-        # Block deletion if client has unpaid invoices
+        # Block deletion if THIS user has any unpaid invoices for the
+        # client. Both client_id and user_id eq required so we only ever
+        # see the caller's own invoices.
         unpaid = supabase.table("invoices")\
             .select("id, status")\
             .eq("client_id", client_id)\
+            .eq("user_id", user_id)\
             .in_("status", ["draft", "sent", "overdue"])\
             .execute()
 
@@ -125,10 +134,12 @@ async def delete_client(client_id: str, request: Request):
                 detail=f"Deze klant heeft {len(unpaid.data)} onbetaalde factuur/facturen. Markeer ze als betaald voor je de klant verwijdert."
             )
 
-        # Set client_id to null on paid invoices to preserve history
+        # Set client_id to null on the caller's own paid invoices to
+        # preserve history; other tenants' invoices are NEVER touched.
         supabase.table("invoices")\
             .update({"client_id": None})\
             .eq("client_id", client_id)\
+            .eq("user_id", user_id)\
             .execute()
 
         # Delete client
@@ -160,6 +171,9 @@ async def get_onboarding_info(token: str):
             .execute()
         if not result.data:
             return {"valid": False, "message": "Invalid or expired invite link"}
+        # Finding #9: reject expired onboarding links.
+        if is_expired(result.data[0].get("expires_at")):
+            return {"valid": False, "message": "Invalid or expired invite link"}
         return {"valid": True, "token": token}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -176,6 +190,9 @@ async def complete_onboarding(token: str, client: ClientOnboarding):
 
         if not stub.data:
             raise HTTPException(status_code=404, detail="Invalid or expired invite link")
+        # Finding #9: reject expired onboarding links before creating the client.
+        if is_expired(stub.data[0].get("expires_at")):
+            raise HTTPException(status_code=410, detail="Invalid or expired invite link")
 
         user_id = stub.data[0]['user_id']
 
@@ -212,6 +229,8 @@ async def complete_onboarding(token: str, client: ClientOnboarding):
         )
 
         return {"message": "Client added successfully", "client": result.data[0]}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -222,6 +241,8 @@ async def create_invite(request: Request):
     try:
         response = supabase.table("client_invites").insert({
             "user_id": user_id,
+            # Finding #9: onboarding links expire after 14 days.
+            "expires_at": expiry_in_days(CLIENT_INVITE_TTL_DAYS),
         }).execute()
         token = response.data[0]['token']
         # Use the share-link short URL so WhatsApp/Slack/Facebook show

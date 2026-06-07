@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request, Query
 from fastapi.responses import Response
 from app.database import supabase
+from app.services.download_token import resolve_download_identity
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
@@ -34,19 +35,10 @@ def _safe_hex(hex_str, fallback):
 
 @router.get("/{invoice_id}")
 async def generate_invoice_pdf(invoice_id: str, request: Request, token: str = Query(None)):
-    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
-    if auth_header:
-        token = auth_header.replace("Bearer ", "")
-
-    if not token:
-        raise HTTPException(status_code=401, detail="Authorization required")
-
-    try:
-        user = supabase.auth.get_user(token)
-        user_id = user.user.id
-        sender_email = user.user.email or ''
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    # Finding #7: prefer Bearer header / signed ?dt= token; the raw account
+    # JWT in ?token= is the deprecated legacy path for older app builds.
+    user_id, sender_email = resolve_download_identity(
+        request, scope=f"invoice_pdf:{invoice_id}", legacy_jwt=token)
 
     try:
         invoice_result = supabase.table("invoices")\

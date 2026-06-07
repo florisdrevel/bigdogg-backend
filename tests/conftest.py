@@ -13,6 +13,7 @@ os.environ.setdefault("STRIPE_SECRET_KEY", "sk_test_fake")
 os.environ.setdefault("RESEND_API_KEY", "fake_resend")
 os.environ.setdefault("TINK_CLIENT_ID", "fake_tink_id")
 os.environ.setdefault("TINK_CLIENT_SECRET", "fake_tink_secret")
+os.environ.setdefault("CRON_SECRET", "fake_cron_secret_for_tests")
 
 import sys
 from pathlib import Path

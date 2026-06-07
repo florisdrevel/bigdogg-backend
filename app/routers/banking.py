@@ -52,6 +52,7 @@ from app.database import supabase
 from app.config import settings
 from app.routers.notifications import create_notification
 from app.services.bank_statement_parser import parse_statement
+from app.services.tenant_db import require_owned_id, update_owned
 
 
 router = APIRouter()
@@ -596,7 +597,7 @@ def _enrich_transaction_with_link(
         score, inv = best_inv
         if inv and score >= MATCH_AUTO_SCORE:
             _persist_link(user_id, tx_id, "invoice", inv["id"], auto=True)
-            _mark_invoice_paid(inv["id"])
+            _mark_invoice_paid(inv["id"], user_id)
             inv_label = inv.get("invoice_number") or "Factuur"
             _notify_match(
                 user_id, kind="auto",
@@ -723,11 +724,16 @@ def _persist_link(user_id: str, tx_id: str, link_type: str, linked_id: Optional[
         print(f"[banking] link upsert failed (non-fatal): {e}")
 
 
-def _mark_invoice_paid(invoice_id: str) -> None:
+def _mark_invoice_paid(invoice_id: str, user_id: str) -> None:
+    """Mark an invoice paid, scoped to its owner.
+
+    IMPORTANT: `user_id` must be the authenticated caller. The owner-scoped
+    UPDATE is what prevents the prior IDOR — without it, any user could
+    pass a victim's invoice_id and silently flip its status. Failures are
+    swallowed (this is called from auto-match where a 404 is unexpected
+    but never user-visible)."""
     try:
-        supabase.table("invoices").update({
-            "status": "paid",
-        }).eq("id", invoice_id).execute()
+        update_owned("invoices", invoice_id, user_id, {"status": "paid"})
     except Exception as e:
         print(f"[banking] invoice paid-mark failed (non-fatal): {e}")
 
@@ -1107,14 +1113,19 @@ async def set_transaction_link(tx_id: str, request: Request):
     prev = prev_result.data[0] if prev_result.data else None
 
     if link_type is None:
-        # Unlink. If the previous link was an auto-marked invoice, flip it back to 'sent'.
+        # Unlink. If the previous link was an auto-marked invoice, flip it
+        # back to 'sent' — but only if the invoice still belongs to the
+        # caller. (Historical state before the IDOR fix could contain a
+        # link whose linked_id points at someone else's invoice; soft-fail
+        # in that case rather than touching a foreign row.)
         if prev and prev.get("link_type") == "invoice" and prev.get("auto") and prev.get("linked_id"):
             try:
-                supabase.table("invoices").update({
-                    "status": "sent",
-                }).eq("id", prev["linked_id"]).execute()
+                update_owned(
+                    "invoices", prev["linked_id"], user_id,
+                    {"status": "sent"},
+                )
             except Exception as e:
-                print(f"[banking] invoice paid-revert failed (non-fatal): {e}")
+                print(f"[banking] invoice paid-revert skipped (non-fatal): {e}")
         try:
             supabase.table("bank_transaction_links")\
                 .delete().eq("user_id", user_id).eq("tx_id", tx_id).execute()
@@ -1127,9 +1138,19 @@ async def set_transaction_link(tx_id: str, request: Request):
     if link_type in ("invoice", "expense", "investment") and not linked_id:
         raise HTTPException(status_code=400, detail="linked_id required for invoice/expense/investment links")
 
+    # Verify the linked resource belongs to the caller BEFORE persisting
+    # the link or applying side-effects. Without this, a user could pass
+    # any victim's invoice_id and flip its status (the original IDOR).
+    if link_type == "invoice":
+        require_owned_id("invoices", linked_id, user_id)
+    elif link_type == "expense":
+        require_owned_id("expenses", linked_id, user_id)
+    elif link_type == "investment":
+        require_owned_id("investments", linked_id, user_id)
+
     _persist_link(user_id, tx_id, link_type, linked_id, auto=False)
     if link_type == "invoice":
-        _mark_invoice_paid(linked_id)
+        _mark_invoice_paid(linked_id, user_id)
 
     return {"success": True, "link": {"type": link_type, "linked_id": linked_id, "auto": False}}
 

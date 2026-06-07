@@ -1,6 +1,7 @@
 ﻿from fastapi import APIRouter, HTTPException, Request
 from app.database import supabase
 from app.routers.banking import schedule_reconcile
+from app.services.tenant_db import delete_owned
 from datetime import date
 
 router = APIRouter()
@@ -86,7 +87,10 @@ async def add_investment(request: Request):
 async def delete_investment(investment_id: str, request: Request):
     user_id = get_user_id(request)
     try:
-        supabase.table("investments").delete().eq("id", investment_id).eq("user_id", user_id).execute()
+        # Finding #10: 404 on a foreign/missing id instead of silent 200.
+        delete_owned("investments", investment_id, user_id)
         return {"success": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

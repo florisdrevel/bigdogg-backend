@@ -5,6 +5,7 @@ from app.config import settings
 from app.routers.pdf import TEAL, GOLD, LIGHT_GREY, MID_GREY, TEXT_SECONDARY
 from app.routers.subscription import require_active_paid
 from app.services.ai_quota import require_ai_quota, record_ai_usage
+from app.services.cron_auth import require_cron_secret
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
@@ -644,21 +645,16 @@ async def download_annual_report(
     year: int = Query(None),
     lang: str = Query('nl')
 ):
-    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
-    if auth_header:
-        token = auth_header.replace("Bearer ", "")
-    if not token:
-        raise HTTPException(status_code=401, detail="Authorization required")
-    try:
-        user = supabase.auth.get_user(token)
-        user_id = user.user.id
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-    require_active_paid(user_id)
-
     if not year:
         year = datetime.now().year - 1
+
+    # Finding #7: prefer Bearer header / signed ?dt= token; ?token= JWT is
+    # the deprecated legacy path. Scope binds the token to this report year.
+    from app.services.download_token import resolve_download_identity
+    user_id, _ = resolve_download_identity(
+        request, scope=f"annual_pdf:{year}", legacy_jwt=token)
+
+    require_active_paid(user_id)
 
     profile_result = supabase.table("user_profiles").select("*").eq("id", user_id).execute()
     profile = profile_result.data[0] if profile_result.data else {}
@@ -689,9 +685,7 @@ async def download_annual_report(
 
 @router.post("/cron/annual")
 async def send_annual_reports(request: Request):
-    auth = request.headers.get("x-cron-secret", "")
-    if auth != settings.cron_secret:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    require_cron_secret(request)
 
     year = datetime.now().year - 1
     users = supabase.auth.admin.list_users()

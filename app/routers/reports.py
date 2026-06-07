@@ -260,11 +260,16 @@ def _generate_btw_pdf(profile: dict, financials: dict, year: int, quarter: int) 
 
 @router.get("/btw/pdf")
 async def download_btw_report(
-    token: str = Query(...),
+    request: Request,
+    token: str = Query(None),
     quarter: int = Query(None),
     year: int = Query(None),
 ):
-    user_id = validate_token(token)
+    # Finding #7: prefer Bearer header / signed ?dt= token; ?token= JWT is
+    # the deprecated legacy path for older app builds.
+    from app.services.download_token import resolve_download_identity
+    user_id, _ = resolve_download_identity(
+        request, scope="btw_pdf", legacy_jwt=token)
     # BTW report is a paid feature — block trial-expired users.
     from app.routers.subscription import require_active_paid
     require_active_paid(user_id)

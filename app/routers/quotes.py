@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from app.database import supabase
 from app.config import settings
+from app.services.tokens import is_expired
 from datetime import date, timedelta, datetime, timezone
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
@@ -380,7 +381,7 @@ async def convert_quote(quote_id: str, request: Request):
         "status": "converted",
         "converted_invoice_id": invoice_id,
         "updated_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", quote_id).execute()
+    }).eq("id", quote_id).eq("user_id", user_id).execute()
 
     return {
         "success": True,
@@ -395,17 +396,11 @@ async def convert_quote(quote_id: str, request: Request):
 @router.post("/{quote_id}/pdf")
 @router.get("/{quote_id}/pdf")
 async def quote_pdf(quote_id: str, request: Request, token: str = Query(None)):
-    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
-    if auth_header:
-        token = auth_header.replace("Bearer ", "")
-    if not token:
-        raise HTTPException(status_code=401, detail="Authorization required")
-    try:
-        user = supabase.auth.get_user(token)
-        user_id = user.user.id
-        sender_email = user.user.email or ""
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    # Finding #7: prefer Bearer header / signed ?dt= token; ?token= JWT is
+    # the deprecated legacy path for older app builds.
+    from app.services.download_token import resolve_download_identity
+    user_id, sender_email = resolve_download_identity(
+        request, scope=f"quote_pdf:{quote_id}", legacy_jwt=token)
 
     quote_result = supabase.table("quotes")\
         .select("*, clients(*)").eq("id", quote_id).eq("user_id", user_id)\
@@ -694,7 +689,14 @@ def _lookup_quote_by_token(token: str) -> dict:
         .select("*").eq("share_token", token).limit(1).execute()
     if not quote_result.data:
         raise HTTPException(status_code=404, detail="Quote not found")
-    return quote_result.data[0]
+    quote = quote_result.data[0]
+    # Finding #9: a share link is only valid within its expiry window.
+    if is_expired(quote.get("share_token_expires_at")):
+        raise HTTPException(
+            status_code=410,
+            detail="Deze offertelink is verlopen. Vraag de afzender om een nieuwe link.",
+        )
+    return quote
 
 
 def _esc_html(value) -> str:
