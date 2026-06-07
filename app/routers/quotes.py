@@ -381,7 +381,7 @@ async def convert_quote(quote_id: str, request: Request):
         "status": "converted",
         "converted_invoice_id": invoice_id,
         "updated_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", quote_id).execute()
+    }).eq("id", quote_id).eq("user_id", user_id).execute()
 
     return {
         "success": True,

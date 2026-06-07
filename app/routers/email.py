@@ -444,6 +444,7 @@ Dit bericht is verzonden via BigDogg · bigdogg.nl
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 })\
                 .eq("id", quote_id)\
+                .eq("user_id", user_id)\
                 .execute()
 
         return {"message": "Quote sent successfully"}

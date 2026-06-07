@@ -365,6 +365,7 @@ async def create_payment_link(invoice_id: str, request: Request):
                 "payment_link_id": payment_link.id,
             })\
             .eq("id", invoice_id)\
+            .eq("user_id", user_id)\
             .execute()
 
         return {
