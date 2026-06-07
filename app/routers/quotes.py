@@ -396,17 +396,11 @@ async def convert_quote(quote_id: str, request: Request):
 @router.post("/{quote_id}/pdf")
 @router.get("/{quote_id}/pdf")
 async def quote_pdf(quote_id: str, request: Request, token: str = Query(None)):
-    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
-    if auth_header:
-        token = auth_header.replace("Bearer ", "")
-    if not token:
-        raise HTTPException(status_code=401, detail="Authorization required")
-    try:
-        user = supabase.auth.get_user(token)
-        user_id = user.user.id
-        sender_email = user.user.email or ""
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    # Finding #7: prefer Bearer header / signed ?dt= token; ?token= JWT is
+    # the deprecated legacy path for older app builds.
+    from app.services.download_token import resolve_download_identity
+    user_id, sender_email = resolve_download_identity(
+        request, scope=f"quote_pdf:{quote_id}", legacy_jwt=token)
 
     quote_result = supabase.table("quotes")\
         .select("*, clients(*)").eq("id", quote_id).eq("user_id", user_id)\
