@@ -5,6 +5,7 @@ resend.api_key = settings.resend_api_key
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 from app.database import supabase
+from app.services.rate_limit import SlidingWindowLimiter, client_ip
 from datetime import datetime, timezone
 import hashlib
 import re
@@ -13,6 +14,17 @@ import requests as http_requests
 stripe.api_key = settings.stripe_secret_key
 
 router = APIRouter()
+
+# Brute-force / abuse protection for the unauthenticated auth endpoints.
+# Auth is proxied through this backend, so Supabase GoTrue sees the server
+# IP for every user and its per-IP limits can't isolate an attacker. These
+# app-level limiters key on the real client IP (and email) to fill that
+# gap. In-memory + single-instance (see app/services/rate_limit.py) — pair
+# with the GoTrue dashboard rate limits for multi-instance coverage.
+_login_ip_limiter = SlidingWindowLimiter(max_hits=10, window_seconds=300)
+_login_email_limiter = SlidingWindowLimiter(max_hits=8, window_seconds=900)
+_reset_limiter = SlidingWindowLimiter(max_hits=4, window_seconds=3600)
+_register_ip_limiter = SlidingWindowLimiter(max_hits=5, window_seconds=3600)
 
 
 # ─── New-device login notifications ─────────────────────────────
@@ -242,7 +254,8 @@ def _verify_current_password(email: str, current_password: str) -> None:
 
 
 @router.post("/register")
-async def register(data: RegisterRequest):
+async def register(data: RegisterRequest, request: Request):
+    _register_ip_limiter.check(f"register:ip:{client_ip(request)}")
     try:
         response = supabase.auth.sign_up({
             "email": data.email,
@@ -305,14 +318,18 @@ async def register(data: RegisterRequest):
     except HTTPException:
         raise
     except Exception as e:
+        print(f"[auth] registration error: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
+            detail="Registration could not be completed. Please check your details and try again."
         )
 
 
 @router.post("/login")
 async def login(data: LoginRequest, request: Request):
+    ip = client_ip(request)
+    _login_ip_limiter.check(f"login:ip:{ip}")
+    _login_email_limiter.check(f"login:email:{data.email.lower()}")
     try:
         response = supabase.auth.sign_in_with_password({
             "email": data.email,
@@ -385,12 +402,15 @@ async def logout():
 
 
 @router.post("/reset-password")
-async def reset_password(data: ResetPasswordRequest):
+async def reset_password(data: ResetPasswordRequest, request: Request):
+    _reset_limiter.check(f"reset:{client_ip(request)}:{data.email.lower()}")
     try:
         supabase.auth.reset_password_email(data.email)
-        return {"message": "Reset email sent"}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        # Never reveal whether the email exists, or surface the internal
+        # error — always return the same generic response (anti-enumeration).
+        print(f"[auth] reset email error (non-fatal): {e}")
+    return {"message": "Reset email sent"}
 
 @router.post("/change-password")
 async def change_password(data: ChangePasswordRequest, request: Request):
