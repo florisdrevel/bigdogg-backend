@@ -8,10 +8,16 @@ passlib[bcrypt]==1.7.4
 httpx==0.28.1
 pydantic-settings==2.13.1
 anthropic
-python-multipart
+python-multipart==0.0.27
 stripe
 reportlab
 resend
 Pillow
 mt-940
 google-auth==2.43.0
+
+# Security pins — transitive deps forced to patched versions (pip-audit, 2026-06-08)
+starlette==1.0.1
+PyJWT==2.13.0
+urllib3==2.7.0
+idna==3.15
