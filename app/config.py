@@ -27,6 +27,17 @@ class Settings:
     truelayer_client_id: str = os.getenv("TRUELAYER_CLIENT_ID", "")
     truelayer_client_secret: str = os.getenv("TRUELAYER_CLIENT_SECRET", "")
     truelayer_use_sandbox: str = os.getenv("TRUELAYER_USE_SANDBOX", "true")
+    # Fernet key used to encrypt TrueLayer access/refresh tokens at rest in
+    # user_profiles. Generate once with:
+    #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    # Rotating this key orphans existing connections (they fail to decrypt
+    # and surface as "reconnect needed") — acceptable, the user just
+    # reconnects. /connect fails closed (500) if this is unset.
+    tl_token_enc_key: str = os.getenv("TL_TOKEN_ENC_KEY", "")
+    # Comma-separated Supabase user_ids allowed to use the LIVE bank-connect
+    # flow while it's flag-gated. Everyone else sees the "coming soon"
+    # overlay and is refused at POST /banking/connect. Empty = nobody.
+    bank_live_user_ids: str = os.getenv("BANK_LIVE_USER_IDS", "")
     # Origin used in share links (client invites + quote share). Defaults
     # to the Railway hostname so previews render without extra DNS work;
     # set to "https://link.bigdogg.nl" once the custom subdomain is live.
