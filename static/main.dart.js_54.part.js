@@ -318,7 +318,7 @@ D=c[68]
 Y=c[17]
 Z=c[31]
 C.tk.prototype={
-V(){return new C.QN(D.a_q)}}
+V(){return new C.QN(D.a_p)}}
 C.QN.prototype={
 ae(){this.ap()
 this.yJ()},
@@ -333,7 +333,7 @@ break}r=J.U(s)
 if(J.d(r.h(s,"success"),!0)){q=x.h.a(r.h(s,"data"))
 r=q==null?null:J.t(q,"transactions")
 x.g.a(r)
-t.t(new C.b2T(t,r==null?B.dg:r))
+t.t(new C.b2T(t,r==null?B.df:r))
 if(!t.r){r=t.a.c
 r=r!=null&&r.length!==0}else r=!1
 if(r){t.r=!0
@@ -349,7 +349,7 @@ return(d>=0?"+":"\u2212")+" "+u+" "+v},
 aqu(d,e){var w,v,u,t
 if(d.length===0)return"\u2014"
 try{w=A.kK(d)
-v=e?D.a0o:B.pT
+v=e?D.a0n:B.pT
 u=J.t(v,A.bo(w)-1)
 return""+A.c9(w)+" "+u+" "+A.aU(w)}catch(t){return d}},
 awM(d,e){var w,v,u,t,s,r,q,p,o=null
@@ -386,7 +386,7 @@ q=I.ak
 p=D.wr
 break
 default:return B.aH}w=A.D(6)
-return A.B(o,A.Z(A.a([A.bN(p,q,o,11),B.be,new A.fG(1,B.c3,A.c(s,o,B.ad,o,o,A.aH(o,o,q,o,o,o,o,o,o,o,o,10.5,o,o,B.Q,o,o,!0,o,o,o,o,o,o,o,o),o,o,o),o)],x.p),B.j,B.d,B.I,0),B.h,o,o,new A.L(r,o,o,w,o,o,B.m),o,o,o,U.vy,B.d5,o,o,o)},
+return A.B(o,A.Z(A.a([A.bN(p,q,o,11),B.be,new A.fG(1,B.c3,A.c(s,o,B.ad,o,o,A.aH(o,o,q,o,o,o,o,o,o,o,o,10.5,o,o,B.Q,o,o,!0,o,o,o,o,o,o,o,o),o,o,o),o)],x.p),B.j,B.d,B.I,0),B.h,o,o,new A.M(r,o,o,w,o,o,B.m),o,o,o,U.vy,B.dz,o,o,o)},
 yZ(d,e){return this.ayT(d,e)},
 ayT(d,e){var w=0,v=A.o(x.H),u=this,t
 var $async$yZ=A.k(function(f,g){if(f===1)return A.l(g,v)
@@ -396,18 +396,18 @@ w=2
 return A.e(G.mH(B.i,new C.b30(u,d,e),t,!0,E.jS,x.H),$async$yZ)
 case 2:return A.m(null,v)}})
 return A.n($async$yZ,v)},
-G(d){var w,v=this,u=null,t=A.cM(d,!0,x.C).b==="nl",s=A.mN(u,u,!0,B.i,u,!1,0,B.l,D.SI,u,u,u,B.J,A.c(t?"Transacties":"Transactions",u,u,u,u,F.im,u,u,u))
+G(d){var w,v=this,u=null,t=A.cM(d,!0,x.C).b==="nl",s=A.mN(u,u,!0,B.i,u,!1,0,B.l,D.SH,u,u,u,B.J,A.c(t?"Transacties":"Transactions",u,u,u,u,F.il,u,u,u))
 if(v.d)w=O.b2
 else{if(v.e!=null)w=v.aE8(t)
 else if(J.cP(v.f))w=M.oX(A.a([D.I9,E.x7,B.y,A.c(t?"Nog geen transacties gevonden":"No transactions yet",u,u,u,u,D.aev,B.a3,u,u)],x.p),B.ck,F.dP,u,!1)
 else w=v.alm(t)
 w=Y.Bh(w,v.ga10())}return A.fu(s,B.a1,A.fN(!0,w,!0,B.a9,!0,!0),u,u)},
 aE8(d){var w,v=null,u=this.e,t=u==null
-if(B.c.p(t?"":u,"bank_session_expired")){u=A.c(d?"Bank-koppeling verlopen":"Bank connection expired",v,v,v,v,F.im,B.a3,v,v)
+if(B.c.p(t?"":u,"bank_session_expired")){u=A.c(d?"Bank-koppeling verlopen":"Bank connection expired",v,v,v,v,F.il,B.a3,v,v)
 t=A.c(d?"Tink-toegang in sandbox is ~1 uur geldig. Koppel je bankrekening opnieuw om de meest recente transacties op te halen.":"Tink sandbox access is ~1 hour. Reconnect your bank to fetch the latest transactions.",v,v,v,v,B.aU,B.a3,v,v)
-return M.oX(A.a([D.a8o,D.TL,B.D,u,B.F,new A.a9(D.Qo,t,v),B.aR,A.bH(R.fl(D.TK,A.c(d?"Ga naar instellingen":"Go to settings",v,v,v,v,B.bC,v,v,v),new C.b2L(this),A.cE(v,v,B.l,v,v,v,v,v,v,v,v,v,D.QH,v,new A.bp(A.D(8),B.v),v,v,v,v,v)),v,v)],x.p),B.ck,F.dP,v,!1)}w=A.c(d?"Kon transacties niet ophalen":"Could not fetch transactions",v,v,v,v,D.ac0,B.a3,v,v)
+return M.oX(A.a([D.a8n,D.TK,B.D,u,B.F,new A.a9(D.Qn,t,v),B.aR,A.bH(R.fl(D.TJ,A.c(d?"Ga naar instellingen":"Go to settings",v,v,v,v,B.bC,v,v,v),new C.b2L(this),A.cE(v,v,B.l,v,v,v,v,v,v,v,v,v,D.QG,v,new A.bp(A.D(8),B.v),v,v,v,v,v)),v,v)],x.p),B.ck,F.dP,v,!1)}w=A.c(d?"Kon transacties niet ophalen":"Could not fetch transactions",v,v,v,v,D.ac_,B.a3,v,v)
 u=A.c(t?"":u,v,v,v,v,L.az,B.a3,v,v)
-return M.oX(A.a([D.I9,D.TJ,B.y,w,B.aS,u,B.D,A.bH(W.no(D.T6,A.c(d?"Opnieuw proberen":"Try again",v,v,v,v,v,v,v,v),this.ga10(),v),v,v)],x.p),B.ck,F.dP,v,!1)},
+return M.oX(A.a([D.I9,D.TI,B.y,w,B.aS,u,B.D,A.bH(W.no(D.T5,A.c(d?"Opnieuw proberen":"Try again",v,v,v,v,v,v,v,v),this.ga10(),v),v,v)],x.p),B.ck,F.dP,v,!1)},
 alm(d){var w,v,u,t,s=A.z(x.N,x.D)
 for(w=J.bb(this.f);w.B();){v=w.gP(w)
 u=J.t(v,"date")
@@ -440,21 +440,21 @@ n=d&&u.length!==0&&u!==t?u:""
 m=p?B.C:B.z
 l=p?B.c0:B.cP
 d=A.bB(a2,e,x.w).w
-w=A.bH(A.B(e,e,B.h,e,e,new A.L(B.w,e,e,A.D(2),e,e,B.m),e,4,e,e,e,e,e,40),e,e)
+w=A.bH(A.B(e,e,B.h,e,e,new A.M(B.w,e,e,A.D(2),e,e,B.m),e,4,e,e,e,e,e,40),e,e)
 k=A.D(12)
 j=A.D(10)
-j=A.B(e,A.bN(p?D.wH:D.wA,m,e,e),B.h,e,e,new A.L(B.i,e,e,j,e,e,B.m),e,44,e,e,e,e,e,44)
+j=A.B(e,A.bN(p?D.wH:D.wA,m,e,e),B.h,e,e,new A.M(B.i,e,e,j,e,e,B.m),e,44,e,e,e,e,e,44)
 if(o.length===0)i=a1?"Transactie":"Transaction"
 else i=o
 h=x.p
 i=A.a([A.c(i,1,B.ad,e,e,B.f4,e,e,e)],h)
 if(n.length!==0)B.b.I(i,A.a([B.bf,A.c(n,1,B.ad,e,e,B.aA,e,e,e)],h))
 if(s.length!==0)B.b.I(i,A.a([B.av,A.c(s,e,e,e,e,B.cX,e,e,e)],h))
-i=A.a1(A.G(i,B.q,B.d,B.f),1)
+i=A.a1(A.G(i,B.p,B.d,B.f),1)
 g=p?"+":"\u2212"
 f=B.e.S(Math.abs(v),2)
-w=A.a([B.y,w,B.D,A.B(e,A.Z(A.a([j,K.br,i,K.br,A.c(g+" \u20ac "+A.es(f,".",","),e,e,e,e,A.aH(e,e,m,e,e,e,e,e,e,e,e,18,e,e,B.E,e,e,!0,e,e,e,e,e,e,e,e),e,e,e)],h),B.j,B.d,B.f,0),B.h,e,e,new A.L(l,e,e,k,e,e,B.m),e,e,e,B.dy,B.a5,e,e,e),B.D],h)
-if(this.d)w.push(D.a4c)
+w=A.a([B.y,w,B.D,A.B(e,A.Z(A.a([j,K.br,i,K.br,A.c(g+" \u20ac "+A.es(f,".",","),e,e,e,e,A.aH(e,e,m,e,e,e,e,e,e,e,e,18,e,e,B.E,e,e,!0,e,e,e,e,e,e,e,e),e,e,e)],h),B.j,B.d,B.f,0),B.h,e,e,new A.M(l,e,e,k,e,e,B.m),e,e,e,B.dx,B.a5,e,e,e),B.D],h)
+if(this.d)w.push(D.a4b)
 else B.b.I(w,this.al1(q,p,a1))
 w.push(B.y)
 return A.fN(!0,new A.a9(new A.a6(0,0,0,d.f.d),A.dm(A.G(w,B.aN,B.d,B.I),e,B.r,e,e,B.a8),e),!0,B.a9,!0,!0)},
@@ -470,16 +470,16 @@ if(a1)s="invoice"
 else s=a2===g?"investment":"expense"
 a1=A.D(12)
 w=A.aw(A.a0(B.e.am(76.5),I.ak.m()>>>16&255,I.ak.m()>>>8&255,I.ak.m()&255),1)
-u=A.Z(A.a([D.TU,B.aX,A.c(a4?"Mogelijk match":"Possible match",h,h,h,h,D.abd,h,h,h)],d),B.j,B.d,B.f,0)
+u=A.Z(A.a([D.TT,B.aX,A.c(a4?"Mogelijk match":"Possible match",h,h,h,h,D.abc,h,h,h)],d),B.j,B.d,B.f,0)
 if(s==="invoice")r=a4?"Wij denken dat dit een betaling is van factuur "+t+".":"We think this is a payment of invoice "+t+"."
 else if(s==="investment")r=a4?"Wij denken dat dit hoort bij investering \xb7 "+t+".":"We think this matches investment \xb7 "+t+"."
 else r=a4?"Wij denken dat dit hoort bij kosten \xb7 "+t+".":"We think this matches expense \xb7 "+t+"."
 r=A.c(r,h,h,h,h,F.mK,h,h,h)
 q=i.d?h:new C.b2f(i,s,v)
-q=A.a1(R.fl(D.Tt,A.c(a4?"Klopt":"Confirm",h,h,h,h,B.bC,h,h,h),q,A.cE(h,h,B.C,h,h,h,h,h,h,h,h,h,E.fx,h,new A.bp(A.D(8),B.v),h,h,h,h,h)),1)
+q=A.a1(R.fl(D.Ts,A.c(a4?"Klopt":"Confirm",h,h,h,h,B.bC,h,h,h),q,A.cE(h,h,B.C,h,h,h,h,h,h,h,h,h,E.fx,h,new A.bp(A.D(8),B.v),h,h,h,h,h)),1)
 p=i.d?h:new C.b2g(i)
 o=A.l5(h,h,h,h,h,h,h,h,h,B.G,h,h,E.fx,h,new A.bp(A.D(8),B.v),V.nF,h,h,h,h)
-a0.push(A.B(h,A.G(A.a([u,B.F,r,B.y,A.Z(A.a([q,B.a0,A.a1(A.IL(A.c(a4?"Anders":"Different",h,h,h,h,h,h,h,h),p,o),1)],d),B.j,B.d,B.f,0)],d),B.aN,B.d,B.f),B.h,h,h,new A.L(F.eo,h,w,a1,h,h,B.m),h,h,h,B.dy,B.d4,h,h,h))
+a0.push(A.B(h,A.G(A.a([u,B.F,r,B.y,A.Z(A.a([q,B.a0,A.a1(A.IL(A.c(a4?"Anders":"Different",h,h,h,h,h,h,h,h),p,o),1)],d),B.j,B.d,B.f,0)],d),B.aN,B.d,B.f),B.h,h,h,new A.M(F.eo,h,w,a1,h,h,B.m),h,h,h,B.dx,B.d4,h,h,h))
 a0.push(B.D)}a1=a2==="invoice"
 if(a1||a2==="expense"||a2==="investment"||a2==="private"){if(e==null)n=h
 else{w=J.t(e,f)
@@ -498,7 +498,7 @@ j=B.c0}else{m=a4?"Gemarkeerd als priv\xe9":"Marked as private"
 l=B.jj
 k=B.G
 j=B.og}w=A.D(12)
-a0.push(A.B(h,A.Z(A.a([A.bN(l,k,h,18),B.bL,A.a1(A.c(m,h,h,h,h,A.aH(h,h,k,h,h,h,h,h,h,h,h,13,h,h,B.Q,h,h,!0,h,h,h,h,h,h,h,h),h,h,h),1)],d),B.j,B.d,B.f,0),B.h,h,h,new A.L(j,h,h,w,h,h,B.m),h,h,h,B.dy,B.d4,h,h,h))
+a0.push(A.B(h,A.Z(A.a([A.bN(l,k,h,18),B.bL,A.a1(A.c(m,h,h,h,h,A.aH(h,h,k,h,h,h,h,h,h,h,h,13,h,h,B.Q,h,h,!0,h,h,h,h,h,h,h,h),h,h,h),1)],d),B.j,B.d,B.f,0),B.h,h,h,new A.M(j,h,h,w,h,h,B.m),h,h,h,B.dx,B.d4,h,h,h))
 a0.push(B.y)
 d=a4?"Ontkoppel":"Unlink"
 if(a4)a1=a1?"Factuur weer als verzonden markeren":"Verwijder de koppeling"
@@ -511,12 +511,12 @@ a1=a4?"Maak een kostenpost aan met BTW":"Create an expense entry with VAT"
 a0.push(i.xp(Z.pJ,B.l,i.ganE(),a1,d))
 d=a4?"Voeg toe als investering":"Add as investment"
 a1=a4?"Voor aankopen die je afschrijft over meerdere jaren":"For purchases depreciated over multiple years"
-a0.push(i.xp(D.RX,B.l,i.ganH(),a1,d))}d=a4?"Priv\xe9 / negeren":"Private / ignore"
+a0.push(i.xp(D.RW,B.l,i.ganH(),a1,d))}d=a4?"Priv\xe9 / negeren":"Private / ignore"
 a1=a4?"Hoort niet bij je administratie":"Does not belong to your bookkeeping"
 a0.push(i.xp(B.jj,B.G,i.gax2(),a1,d))
 return a0},
 xp(d,e,f,g,h){var w=null,v=this.d?w:f,u=A.D(10),t=A.D(10),s=A.aw(B.w,1),r=A.a0(B.e.am(25.5),e.m()>>>16&255,e.m()>>>8&255,e.m()&255),q=A.D(8),p=x.p
-return new A.a9(B.oK,A.eD(!1,B.a_,!0,w,A.ea(!1,u,!0,H.WE(new A.a9(S.oI,A.Z(A.a([A.B(w,A.bN(d,e,w,18),B.h,w,w,new A.L(r,w,w,q,w,w,B.m),w,36,w,w,w,w,w,36),K.br,A.a1(A.G(A.a([A.c(h,w,w,w,w,N.rt,w,w,w),B.bf,A.c(g,w,w,w,w,B.aA,w,w,w)],p),B.q,B.d,B.f),1),D.Tn],p),B.j,B.d,B.f,0),w),w,new A.L(B.i,w,s,t,w,w,B.m)),w,!0,w,w,w,w,w,w,w,w,w,w,v,w,w,w,w,w,w,w),B.h,B.J,0,w,w,w,w,w,B.ca),w)},
+return new A.a9(B.oK,A.eD(!1,B.a_,!0,w,A.ea(!1,u,!0,H.WE(new A.a9(S.oI,A.Z(A.a([A.B(w,A.bN(d,e,w,18),B.h,w,w,new A.M(r,w,w,q,w,w,B.m),w,36,w,w,w,w,w,36),K.br,A.a1(A.G(A.a([A.c(h,w,w,w,w,N.rt,w,w,w),B.bf,A.c(g,w,w,w,w,B.aA,w,w,w)],p),B.p,B.d,B.f),1),D.Tm],p),B.j,B.d,B.f,0),w),w,new A.M(B.i,w,s,t,w,w,B.m)),w,!0,w,w,w,w,w,w,w,w,w,w,v,w,w,w,w,w,w,w),B.h,B.J,0,w,w,w,w,w,B.ca),w)},
 xJ(d,e){return this.ani(d,e)},
 ani(d,e){var w=0,v=A.o(x.H),u,t=this,s,r,q,p
 var $async$xJ=A.k(function(f,g){if(f===1)return A.l(g,v)
@@ -590,7 +590,7 @@ if(!J.d(s.h(o,"success"),!0)){s=t.c.O(x.q).f
 s.b2(H.bw(null,null,null,B.z,null,B.n,null,A.c(t.a.d?"Kon facturen niet laden":"Could not load invoices",null,null,null,null,null,null,null,null),null,B.a4,null,null,null,null,null,null,null,null,null,null))
 w=1
 break}r=x.g.a(s.h(o,"invoices"))
-if(r==null)r=B.dg
+if(r==null)r=B.df
 s=J.u9(r,new C.b2G())
 q=A.aa(s,s.$ti.i("A.E"))
 if(q.length===0){s=t.c.O(x.q).f
@@ -721,7 +721,7 @@ i=i.h(m,"message")
 i=i==null?null:J.a3(i)
 h.b2(H.bw(null,null,null,B.z,null,B.n,null,A.c(i==null?"Error":i,null,null,null,null,null,null,null,null),null,B.a4,null,null,null,null,null,null,null,null,null,null))}case 1:return A.m(u,v)}})
 return A.n($async$xP,v)}}
-var z=a.updateTypes(["al<~>()","kF(S,~(~()))","y2(S)","al<~>({silent:M})","rf(S,x)"])
+var z=a.updateTypes(["al<~>()","kF(S,~(~()))","y2(S)","al<~>({silent:L})","rf(S,x)"])
 C.b2S.prototype={
 $0(){var w=this.a
 w.d=!0
@@ -785,9 +785,9 @@ t=p.d
 s=A.c(u.aqu(n,t),o,o,o,o,B.ce,o,o,o)
 r=u.ZS(v,"EUR")
 q=x.p
-q=A.a([new A.a9(D.QB,A.Z(A.a([s,A.c(r,o,o,o,o,A.aH(o,o,v>=0?B.C:B.z,o,o,o,o,o,o,o,o,12,o,o,B.Q,o,o,!0,o,o,o,o,o,o,o,o),o,o,o)],q),B.j,B.c9,B.f,0),o)],q)
+q=A.a([new A.a9(D.QA,A.Z(A.a([s,A.c(r,o,o,o,o,A.aH(o,o,v>=0?B.C:B.z,o,o,o,o,o,o,o,o,12,o,o,B.Q,o,o,!0,o,o,o,o,o,o,o,o),o,o,o)],q),B.j,B.c9,B.f,0),o)],q)
 B.b.I(q,w.cN(m,new C.b2O(u,t),x.l))
-return A.G(q,B.q,B.d,B.f)},
+return A.G(q,B.p,B.d,B.f)},
 $S:710}
 C.b2N.prototype={
 $2(d,e){var w=A.dR(J.t(e,"amount"))
@@ -817,9 +817,9 @@ m=x.p
 l=A.a([A.c(n?u:v,1,B.ad,k,k,E.f3,k,k,k)],m)
 if(n&&v.length!==0&&v!==u)l.push(A.c(v,1,B.ad,k,k,B.cX,k,k,k))
 l.push(i.awM(t,s))
-n=A.a1(A.G(l,B.q,B.d,B.f),1)
+n=A.a1(A.G(l,B.p,B.d,B.f),1)
 l=i.ZS(h,w)
-return A.ea(!1,j,!0,A.B(k,A.Z(A.a([o,B.bL,n,B.a0,A.c(l,k,k,k,k,A.aH(k,k,p?B.C:B.z,k,k,k,k,k,k,k,k,k,k,k,B.E,k,k,!0,k,k,k,k,k,k,k,k),k,k,k)],m),B.j,B.d,B.f,0),B.h,k,k,new A.L(B.i,k,q,r,k,k,B.m),k,k,k,E.vF,F.d3,k,k,k),k,!0,k,k,k,k,k,k,k,k,k,k,new C.b2M(i,d,s),k,k,k,k,k,k,k)},
+return A.ea(!1,j,!0,A.B(k,A.Z(A.a([o,B.bL,n,B.a0,A.c(l,k,k,k,k,A.aH(k,k,p?B.C:B.z,k,k,k,k,k,k,k,k,k,k,k,B.E,k,k,!0,k,k,k,k,k,k,k,k),k,k,k)],m),B.j,B.d,B.f,0),B.h,k,k,new A.M(B.i,k,q,r,k,k,B.m),k,k,k,E.vF,F.d3,k,k,k),k,!0,k,k,k,k,k,k,k,k,k,k,new C.b2M(i,d,s),k,k,k,k,k,k,k)},
 $S:712}
 C.b2M.prototype={
 $0(){return this.a.yZ(this.b,this.c)},
@@ -857,8 +857,8 @@ w=w==null?null:J.a3(w)
 return(w==null?"":w)!=="paid"},
 $S:19}
 C.b2H.prototype={
-$1(d){var w=null,v=A.B(w,w,B.h,w,w,new A.L(B.w,w,w,A.D(2),w,w,B.m),w,4,w,w,w,w,w,40),u=this.b
-return A.fN(!0,A.b0(A.G(A.a([B.y,v,B.y,new A.a9(D.vJ,new A.dE(B.hm,w,w,A.c(this.a.a.d?"Kies een factuur":"Pick an invoice",w,w,w,w,N.aZ,w,w,w),w),w),B.F,A.a1(G.b8T(w,new C.b2E(u,d),u.length,D.vJ,new C.b2F()),1)],x.p),B.j,B.d,B.f),480,w),!0,B.a9,!0,!0)},
+$1(d){var w=null,v=A.B(w,w,B.h,w,w,new A.M(B.w,w,w,A.D(2),w,w,B.m),w,4,w,w,w,w,w,40),u=this.b
+return A.fN(!0,A.b0(A.G(A.a([B.y,v,B.y,new A.a9(D.vJ,new A.dK(B.iB,w,w,A.c(this.a.a.d?"Kies een factuur":"Pick an invoice",w,w,w,w,N.aZ,w,w,w),w),w),B.F,A.a1(G.b8T(w,new C.b2E(u,d),u.length,D.vJ,new C.b2F()),1)],x.p),B.j,B.d,B.f),480,w),!0,B.a9,!0,!0)},
 $S:713}
 C.b2F.prototype={
 $2(d,e){return B.d1},
@@ -889,13 +889,13 @@ $1(d){var w=this
 return new A.eG(new C.b2o(w.a,w.b,w.c,w.d),null)},
 $S:15}
 C.b2o.prototype={
-$2(d,e){var w,v=this,u=null,t=v.b,s=A.c(t?"Nieuwe kostenpost":"New expense",u,u,u,u,u,u,u,u),r=A.bQ(u,B.S,!1,u,!0,B.n,u,A.bS(),v.c,u,u,u,u,u,2,A.by(u,P.i3,u,u,u,u,u,u,!0,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,!0,u,u,t?"Omschrijving":"Description",!0,!0,!1,u,u,u,u,u,u,u,u,u,u,u,u,u,u),B.r,!0,u,!0,u,!1,u,B.R,u,u,u,u,u,u,u,u,1,u,u,!1,"\u2022",u,u,u,u,u,!1,u,u,!1,u,!0,u,B.N,u,u,u,u,u,u,u,u,u,u,u,u,!0,B.K,u,B.Y,u,u,u,u),q=x.p,p=A.a([A.c(t?"BTW:":"VAT:",u,u,u,u,F.eh,u,u,u),K.br],q),o=v.a,n=v.d
+$2(d,e){var w,v=this,u=null,t=v.b,s=A.c(t?"Nieuwe kostenpost":"New expense",u,u,u,u,u,u,u,u),r=A.bQ(u,B.S,!1,u,!0,B.n,u,A.bS(),v.c,u,u,u,u,u,2,A.by(u,P.i2,u,u,u,u,u,u,!0,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,!0,u,u,t?"Omschrijving":"Description",!0,!0,!1,u,u,u,u,u,u,u,u,u,u,u,u,u,u),B.r,!0,u,!0,u,!1,u,B.R,u,u,u,u,u,u,u,u,1,u,u,!1,"\u2022",u,u,u,u,u,!1,u,u,!1,u,!0,u,B.N,u,u,u,u,u,u,u,u,u,u,u,u,!0,B.K,u,B.Y,u,u,u,u),q=x.p,p=A.a([A.c(t?"BTW:":"VAT:",u,u,u,u,F.eh,u,u,u),K.br],q),o=v.a,n=v.d
 B.b.I(p,new A.ad(A.a([0,9,21],x.Y),new C.b2l(o,e,n),x.Q))
 p=A.Z(p,B.j,B.d,B.f,0)
 w=t?"Bedrag excl. BTW":"Amount ex VAT"
 o=A.c(w+": \u20ac "+B.e.S(o.b,2),u,u,u,u,L.az,u,u,u)
 w=t?"Totaal incl. BTW":"Total incl VAT"
-n=A.b0(A.G(A.a([r,B.y,p,B.y,o,A.c(w+": \u20ac "+B.e.S(n,2),u,u,u,u,L.az,u,u,u)],q),B.q,B.d,B.I),u,360)
+n=A.b0(A.G(A.a([r,B.y,p,B.y,o,A.c(w+": \u20ac "+B.e.S(n,2),u,u,u,u,L.az,u,u,u)],q),B.p,B.d,B.I),u,360)
 r=A.ca(A.c(t?"Annuleren":"Cancel",u,u,u,u,u,u,u,u),new C.b2m(d),u)
 p=A.cE(u,u,B.l,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u)
 return Q.el(A.a([r,A.bZ(A.c(t?"Aanmaken":"Create",u,u,u,u,B.bC,u,u,u),new C.b2n(d),p)],q),n,u,s)},
@@ -932,11 +932,11 @@ $1(d){var w=this
 return new A.eG(new C.b2x(w.a,w.b,w.c,w.d),null)},
 $S:15}
 C.b2x.prototype={
-$2(d,e){var w,v=this,u=null,t=v.b,s=A.c(t?"Nieuwe investering":"New investment",u,u,u,u,u,u,u,u),r=A.bQ(u,B.S,!1,u,!0,B.n,u,A.bS(),v.c,u,u,u,u,u,2,A.by(u,P.i3,u,u,u,u,u,u,!0,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,!0,u,u,t?"Omschrijving":"Description",!0,!0,!1,u,u,u,u,u,u,u,u,u,u,u,u,u,u),B.r,!0,u,!0,u,!1,u,B.R,u,u,u,u,u,u,u,u,1,u,u,!1,"\u2022",u,u,u,u,u,!1,u,u,!1,u,!0,u,B.N,u,u,u,u,u,u,u,u,u,u,u,u,!0,B.K,u,B.Y,u,u,u,u),q=x.p,p=A.a([A.c(t?"Afschrijving:":"Depreciation:",u,u,u,u,F.eh,u,u,u),K.br],q)
+$2(d,e){var w,v=this,u=null,t=v.b,s=A.c(t?"Nieuwe investering":"New investment",u,u,u,u,u,u,u,u),r=A.bQ(u,B.S,!1,u,!0,B.n,u,A.bS(),v.c,u,u,u,u,u,2,A.by(u,P.i2,u,u,u,u,u,u,!0,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,!0,u,u,t?"Omschrijving":"Description",!0,!0,!1,u,u,u,u,u,u,u,u,u,u,u,u,u,u),B.r,!0,u,!0,u,!1,u,B.R,u,u,u,u,u,u,u,u,1,u,u,!1,"\u2022",u,u,u,u,u,!1,u,u,!1,u,!0,u,B.N,u,u,u,u,u,u,u,u,u,u,u,u,!0,B.K,u,B.Y,u,u,u,u),q=x.p,p=A.a([A.c(t?"Afschrijving:":"Depreciation:",u,u,u,u,F.eh,u,u,u),K.br],q)
 B.b.I(p,new A.ad(A.a([3,5,10],x.Y),new C.b2u(v.a,t,e),x.Q))
 p=A.Z(p,B.j,B.d,B.f,0)
 w=t?"Aankoopbedrag":"Purchase amount"
-w=A.b0(A.G(A.a([r,B.y,p,B.y,A.c(w+": \u20ac "+B.e.S(v.d,2),u,u,u,u,L.az,u,u,u)],q),B.q,B.d,B.I),u,360)
+w=A.b0(A.G(A.a([r,B.y,p,B.y,A.c(w+": \u20ac "+B.e.S(v.d,2),u,u,u,u,L.az,u,u,u)],q),B.p,B.d,B.I),u,360)
 r=A.ca(A.c(t?"Annuleren":"Cancel",u,u,u,u,u,u,u,u),new C.b2v(d),u)
 p=A.cE(u,u,B.l,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u)
 return Q.el(A.a([r,A.bZ(A.c(t?"Aanmaken":"Create",u,u,u,u,B.bC,u,u,u),new C.b2w(d),p)],q),w,u,s)},
@@ -996,31 +996,31 @@ w(A.jb,[C.b2Q,C.b2R,C.b2N,C.b2F,C.b2E,C.b2o,C.b2x])})()
 A.fB(b.typeUniverse,JSON.parse('{"y2":{"a_":[],"h":[]},"tk":{"a_":[],"h":[]},"QN":{"a2":["tk"]},"QM":{"a2":["y2"]}}'))
 var y={d:"https://bigdogg-production.up.railway.app/api/v1/banking/transactions/"}
 var x=(function rtii(){var w=A.ab
-return{C:w("lI"),t:w("C<ah<p,@>>"),p:w("C<h>"),Y:w("C<x>"),D:w("P<ah<p,@>>"),P:w("ah<p,@>"),Q:w("ad<x,h>"),w:w("hs"),K:w("N"),N:w("p"),l:w("h"),q:w("nW"),y:w("M"),i:w("R"),z:w("@"),g:w("P<@>?"),h:w("ah<p,@>?"),U:w("ah<@,@>?"),X:w("N?"),T:w("p?"),H:w("~")}})();(function constants(){var w=a.makeConstList
-D.Qo=new A.a6(12,0,12,0)
-D.QB=new A.a6(16,16,16,6)
+return{C:w("lI"),t:w("C<ah<p,@>>"),p:w("C<h>"),Y:w("C<x>"),D:w("P<ah<p,@>>"),P:w("ah<p,@>"),Q:w("ad<x,h>"),w:w("hs"),K:w("N"),N:w("p"),l:w("h"),q:w("nW"),y:w("L"),i:w("R"),z:w("@"),g:w("P<@>?"),h:w("ah<p,@>?"),U:w("ah<@,@>?"),X:w("N?"),T:w("p?"),H:w("~")}})();(function constants(){var w=a.makeConstList
+D.Qn=new A.a6(12,0,12,0)
+D.QA=new A.a6(16,16,16,6)
 D.vJ=new A.a6(20,0,20,0)
-D.QH=new A.a6(22,12,22,12)
+D.QG=new A.a6(22,12,22,12)
 D.wr=new A.aj(57582,"MaterialIcons",null,!1)
 D.wA=new A.aj(58435,"MaterialIcons",null,!1)
 D.wH=new A.aj(58839,"MaterialIcons",null,!1)
-D.RX=new A.aj(62151,"MaterialIcons",null,!1)
-D.SI=new A.dj(null,null,null,null,null,B.l,null,null,null)
-D.T6=new A.aq(E.wG,null,null,null,null)
-D.Tn=new A.aq(E.jg,null,B.aq,null,null)
-D.Tt=new A.aq(E.wu,16,B.i,null,null)
-D.TJ=new A.aq(X.py,56,B.z,null,null)
-D.TK=new A.aq(E.wm,16,B.i,null,null)
-D.S6=new A.aj(62537,"MaterialIcons",null,!1)
-D.TL=new A.aq(D.S6,64,I.ak,null,null)
-D.TU=new A.aq(D.wr,16,I.ak,null,null)
-D.a_q=w([],x.t)
-D.a0o=w(["januari","februari","maart","april","mei","juni","juli","augustus","september","oktober","november","december"],A.ab("C<p>"))
-D.Qh=new A.a6(0,32,0,32)
-D.a4c=new A.a9(D.Qh,O.b2,null)
-D.a8o=new A.cd(null,60,null,null)
+D.RW=new A.aj(62151,"MaterialIcons",null,!1)
+D.SH=new A.dj(null,null,null,null,null,B.l,null,null,null)
+D.T5=new A.aq(E.wG,null,null,null,null)
+D.Tm=new A.aq(E.jg,null,B.aq,null,null)
+D.Ts=new A.aq(E.wu,16,B.i,null,null)
+D.TI=new A.aq(X.py,56,B.z,null,null)
+D.TJ=new A.aq(E.wm,16,B.i,null,null)
+D.S5=new A.aj(62537,"MaterialIcons",null,!1)
+D.TK=new A.aq(D.S5,64,I.ak,null,null)
+D.TT=new A.aq(D.wr,16,I.ak,null,null)
+D.a_p=w([],x.t)
+D.a0n=w(["januari","februari","maart","april","mei","juni","juli","augustus","september","oktober","november","december"],A.ab("C<p>"))
+D.Qg=new A.a6(0,32,0,32)
+D.a4b=new A.a9(D.Qg,O.b2,null)
+D.a8n=new A.cd(null,60,null,null)
 D.I9=new A.cd(null,80,null,null)
-D.abd=new A.q(!0,I.ak,null,null,null,null,12,B.E,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null)
-D.ac0=new A.q(!0,B.z,null,null,null,null,null,B.E,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null)
+D.abc=new A.q(!0,I.ak,null,null,null,null,12,B.E,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null)
+D.ac_=new A.q(!0,B.z,null,null,null,null,null,B.E,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null)
 D.aev=new A.q(!0,B.G,null,null,null,null,null,B.E,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null)})()};
-(a=>{a["AKjifIf/psMb88BqPH/yX+lCZEw="]=a.current})($__dart_deferred_initializers__);
+(a=>{a["hiLvNhQRLaPsYAoicETRclX6JDc="]=a.current})($__dart_deferred_initializers__);

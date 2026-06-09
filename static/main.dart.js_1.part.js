@@ -26,10 +26,10 @@ x.toString
 x=F.VV(x).b
 w.d=x.gdg().h(0,"email")
 if(x.gdg().h(0,"lang")==="en")w.e=!1},
-G(d){var x=null,w=B.bB(d,x,y.k).w.a.a>=900,v=w?48:20,u=B.k7("assets/images/logo.png",x,56,56),t=this.e,s=B.c(t?"Kies je BigDogg plan":"Choose your BigDogg plan",x,x,x,x,D.abg,A.a3,x,x),r=y.e
-s=B.G(B.a([u,A.y,s,A.aE,B.c(t?"Features van deze tijd, voor een eerlijke prijs.":"Modern features at an honest price.",x,x,x,x,D.adL,A.a3,x,x)],r),A.j,A.d,A.f)
+G(d){var x=null,w=B.bB(d,x,y.k).w.a.a>=900,v=w?48:20,u=B.k7("assets/images/logo.png",x,56,56),t=this.e,s=B.c(t?"Kies je BigDogg plan":"Choose your BigDogg plan",x,x,x,x,D.abf,A.a3,x,x),r=y.e
+s=B.G(B.a([u,A.y,s,A.aF,B.c(t?"Features van deze tijd, voor een eerlijke prijs.":"Modern features at an honest price.",x,x,x,x,D.adL,A.a3,x,x)],r),A.j,A.d,A.f)
 u=this.amc(w)
-return B.fu(x,A.a1,B.fN(!0,B.dm(B.bH(new B.cH(D.L3,B.G(B.a([s,A.k8,u,A.ii,B.bH(B.c(this.e?"Betalingen verlopen veilig via Stripe \xb7 iDEAL & creditcard":"Payments securely via Stripe \xb7 iDEAL & credit card",x,x,x,x,A.dJ,x,x,x),x,x)],r),A.aN,A.d,A.f),x),x,x),x,A.r,new B.a6(v,32,v,32),x,A.a8),!0,A.a9,!0,!0),x,x)},
+return B.fu(x,A.a1,B.fN(!0,B.dm(B.bH(new B.cH(D.L2,B.G(B.a([s,A.k8,u,A.ih,B.bH(B.c(this.e?"Betalingen verlopen veilig via Stripe \xb7 iDEAL & creditcard":"Payments securely via Stripe \xb7 iDEAL & credit card",x,x,x,x,A.dJ,x,x,x),x,x)],r),A.aN,A.d,A.f),x),x,x),x,A.r,new B.a6(v,32,v,32),x,A.a8),!0,A.a9,!0,!0),x,x)},
 amc(d){var x,w,v,u=this,t="\u2713 Onbeperkt jaarrapporten",s="\u2713 Unlimited annual reports",r="\u2713 Onbeperkt BTW-aangiftes",q="\u2713 Unlimited VAT reports",p=u.e,o=p?"Maandelijks":"Monthly",n=p?"/ maand":"/ month",m=p?"Flexibel \u2014 zeg op wanneer je wilt":"Flexible \u2014 cancel any time",l=p?"\u2713 Onbeperkt facturen":"\u2713 Unlimited invoices",k=p?"\u2713 AI factuur assistent":"\u2713 AI invoice assistant",j=p?t:s,i=p?r:q
 p=p?"\u2713 Importeren oude facturen":"\u2713 Import old invoices"
 x=y.h
@@ -52,7 +52,7 @@ q=f?B.a([new B.bG(0,A.af,B.a0(64,A.l.m()>>>16&255,A.l.m()>>>8&255,A.l.m()&255),A
 x=y.e
 w=B.a([],x)
 if(f){v=B.D(6)
-A.b.I(w,B.a([B.B(u,B.c(this.e?"AANBEVOLEN":"RECOMMENDED",u,u,u,u,D.af5,u,u,u),A.h,u,u,new B.L(A.p,u,u,v,u,u,A.m),u,u,u,u,A.et,u,u,u),A.y],x))}w.push(B.c(k,u,u,u,u,B.aH(u,u,f?A.i:A.l,u,u,u,u,u,"PlusJakartaSans",u,u,20,u,u,A.E,u,u,!0,u,u,u,u,u,u,u,u),u,u,u))
+A.b.I(w,B.a([B.B(u,B.c(this.e?"AANBEVOLEN":"RECOMMENDED",u,u,u,u,D.af5,u,u,u),A.h,u,u,new B.M(A.q,u,u,v,u,u,A.m),u,u,u,u,A.et,u,u,u),A.y],x))}w.push(B.c(k,u,u,u,u,B.aH(u,u,f?A.i:A.l,u,u,u,u,u,"PlusJakartaSans",u,u,20,u,u,A.E,u,u,!0,u,u,u,u,u,u,u,u),u,u,u))
 w.push(A.y)
 v=B.c(h,u,u,u,u,B.aH(u,u,f?A.i:A.l,u,u,u,u,u,u,u,u,42,u,u,A.am,u,u,!0,u,-1,u,u,u,u,u,u),u,u,u)
 w.push(B.Z(B.a([v,A.aX,new B.a9(E.cT,B.c(i,u,u,u,u,B.aH(u,u,f?A.ac:A.G,u,u,u,u,u,u,u,u,14,u,u,u,u,u,!0,u,u,u,u,u,u,u,u),u,u,u),u)],x),A.cj,A.d,A.f,0))
@@ -61,10 +61,10 @@ w.push(B.c(j,u,u,u,u,B.aH(u,u,f?A.en:A.G,u,u,u,u,u,u,u,u,13,u,u,A.Q,u,u,!0,u,u,u
 w.push(A.h3)
 A.b.I(w,new B.ad(d,new C.aTv(f),B.ac(d).i("ad<1,h>")))
 w.push(A.D)
-x=f?A.p:A.l
+x=f?A.q:A.l
 x=B.cE(u,u,x,u,u,u,u,u,u,A.i,u,u,G.vu,u,new B.bp(B.D(12),A.v),u,u,u,A.hc,u)
 w.push(B.b0(B.bZ(B.c(e,u,u,u,u,u,u,u,u),new C.aTw(this,g),x),u,1/0))
-return B.B(u,B.G(w,A.q,A.d,A.f),A.h,u,u,new B.L(t,u,r,s,q,u,A.m),u,u,u,u,A.ck,u,u,u)}}
+return B.B(u,B.G(w,A.p,A.d,A.f),A.h,u,u,new B.M(t,u,r,s,q,u,A.m),u,u,u,u,A.ck,u,u,u)}}
 var z=a.updateTypes([])
 C.aTv.prototype={
 $1(d){var x=null
@@ -84,8 +84,8 @@ x(C.a7j,B.a2)
 x(C.aTv,B.eK)
 x(C.aTw,B.h_)})()
 B.fB(b.typeUniverse,JSON.parse('{"rF":{"a_":[],"h":[]},"a7j":{"a2":["rF"]}}'))
-var y={c:B.ab("C<bG>"),h:B.ab("C<p>"),e:B.ab("C<h>"),k:B.ab("hs")};(function constants(){D.L3=new B.ao(0,1100,0,1/0)
-D.abg=new B.q(!0,A.l,null,"PlusJakartaSans",null,null,32,A.am,null,-0.6,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null)
+var y={c:B.ab("C<bG>"),h:B.ab("C<p>"),e:B.ab("C<h>"),k:B.ab("hs")};(function constants(){D.L2=new B.ao(0,1100,0,1/0)
+D.abf=new B.q(!0,A.l,null,"PlusJakartaSans",null,null,32,A.am,null,-0.6,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null)
 D.adL=new B.q(!0,A.G,null,null,null,null,15,null,null,null,null,null,1.5,null,null,null,null,null,null,null,null,null,null,null,null,null)
 D.af5=new B.q(!0,A.i,null,null,null,null,11,A.am,null,1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null)})()};
-(a=>{a["2beXAumPwccdw8aUq9ZyrQHjmXo="]=a.current})($__dart_deferred_initializers__);
+(a=>{a["nEh6YcVi/gRL562DjVJ8RHNLakY="]=a.current})($__dart_deferred_initializers__);

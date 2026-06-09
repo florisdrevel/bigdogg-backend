@@ -145,30 +145,30 @@ G(d){var w,v,u,t=this,s=null,r="assets/images/logo.png"
 if(t.ax)w=K.b2
 else if(!t.ay){w=B.k7(r,s,120,120)
 v=t.ch
-u=B.c(v?"Ongeldige uitnodigingslink":"Invalid invite link",s,s,s,s,A.ip,s,s,s)
+u=B.c(v?"Ongeldige uitnodigingslink":"Invalid invite link",s,s,s,s,A.io,s,s,s)
 w=B.bH(new B.a9(A.ev,B.G(B.a([w,A.aR,u,A.F,B.c(v?"Deze link is verlopen of al gebruikt.":"This link has expired or already been used.",s,s,s,s,A.ef,A.a3,s,s)],x.u),A.j,A.b4,A.f),s),s,s)}else if(t.at){w=B.k7(r,s,120,120)
 v=t.ch
 u=B.c(v?"Gegevens ontvangen!":"Details received!",s,s,s,s,D.ae3,s,s,s)
-w=B.bH(new B.a9(A.ev,B.G(B.a([w,A.aR,D.T7,A.D,u,A.F,B.c(v?"Je gegevens zijn succesvol doorgestuurd. Je wordt binnenkort toegevoegd als klant.":"Your details have been successfully submitted. You will be added as a client shortly.",s,s,s,s,A.iq,A.a3,s,s)],x.u),A.j,A.b4,A.f),s),s,s)}else w=t.amR()
+w=B.bH(new B.a9(A.ev,B.G(B.a([w,A.aR,D.T6,A.D,u,A.F,B.c(v?"Je gegevens zijn succesvol doorgestuurd. Je wordt binnenkort toegevoegd als klant.":"Your details have been successfully submitted. You will be added as a client shortly.",s,s,s,s,A.ip,A.a3,s,s)],x.u),A.j,A.b4,A.f),s),s,s)}else w=t.amR()
 return B.fu(s,A.a1,w,s,s)},
-amR(){var w,v,u,t,s,r=this,q=null,p="\u2022",o=B.a0(31,A.p.m()>>>16&255,A.p.m()>>>8&255,A.p.m()&255),n=B.D(6),m=B.aw(B.a0(102,A.p.m()>>>16&255,A.p.m()>>>8&255,A.p.m()&255),1),l=x.u
-n=B.Z(B.a([B.cY(q,B.B(q,B.c(r.ch?"EN":"NL",q,q,q,q,A.h9,q,q,q),A.h,q,q,new B.L(o,q,m,n,q,q,A.m),q,q,q,q,A.et,q,q,q),A.r,!1,q,q,q,q,q,q,q,q,q,q,q,q,q,q,new C.aGb(r),q,q,q,q,q,q)],l),A.j,A.eW,A.f,0)
+amR(){var w,v,u,t,s,r=this,q=null,p="\u2022",o=B.a0(31,A.q.m()>>>16&255,A.q.m()>>>8&255,A.q.m()&255),n=B.D(6),m=B.aw(B.a0(102,A.q.m()>>>16&255,A.q.m()>>>8&255,A.q.m()&255),1),l=x.u
+n=B.Z(B.a([B.cY(q,B.B(q,B.c(r.ch?"EN":"NL",q,q,q,q,A.h9,q,q,q),A.h,q,q,new B.M(o,q,m,n,q,q,A.m),q,q,q,q,A.et,q,q,q),A.r,!1,q,q,q,q,q,q,q,q,q,q,q,q,q,q,new C.aGb(r),q,q,q,q,q,q)],l),A.j,A.eW,A.f,0)
 m=B.k7("assets/images/logo.png",q,200,200)
 o=B.D(16)
 w=B.aw(A.w,1)
 v=B.a([new B.bG(0,A.af,B.a0(15,A.B.m()>>>16&255,A.B.m()>>>8&255,A.B.m()&255),A.jM,24)],x.c)
 u=r.ch
-t=B.c(u?"Jouw gegevens":"Your details",q,q,q,q,A.ip,q,q,q)
+t=B.c(u?"Jouw gegevens":"Your details",q,q,q,q,A.io,q,q,q)
 t=B.a([t,A.av,B.c(u?"Vul je gegevens in zodat je aan de slag kunt.":"Fill in your details to get started.",q,q,q,q,A.cL,q,q,q),A.aR],l)
 u=r.CW
 if(u!=null){s=B.D(8)
-t.push(B.B(q,B.c(u,q,q,q,q,H.eG,q,q,q),A.h,q,q,new B.L(A.cP,q,q,s,q,q,A.m),q,q,q,A.er,A.aQ,q,q,q))}t.push(B.bQ(q,A.S,!1,q,!0,A.n,q,B.bS(),r.d,q,q,q,q,q,2,B.by(q,q,q,q,q,q,q,q,!0,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,r.ch?"Volledige naam *":"Full name *",!0,!0,!1,q,q,q,q,q,q,q,q,q,q,q,q,q,q),A.r,!0,q,!0,q,!1,q,A.R,q,q,q,q,q,q,q,q,1,q,q,!1,p,q,q,q,q,q,!1,q,q,!1,q,!0,q,A.N,q,q,q,q,q,q,q,q,q,q,q,q,!0,A.K,q,A.Y,q,A.cK,q,q))
+t.push(B.B(q,B.c(u,q,q,q,q,H.eG,q,q,q),A.h,q,q,new B.M(A.cP,q,q,s,q,q,A.m),q,q,q,A.er,A.aQ,q,q,q))}t.push(B.bQ(q,A.S,!1,q,!0,A.n,q,B.bS(),r.d,q,q,q,q,q,2,B.by(q,q,q,q,q,q,q,q,!0,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,r.ch?"Volledige naam *":"Full name *",!0,!0,!1,q,q,q,q,q,q,q,q,q,q,q,q,q,q),A.r,!0,q,!0,q,!1,q,A.R,q,q,q,q,q,q,q,q,1,q,q,!1,p,q,q,q,q,q,!1,q,q,!1,q,!0,q,A.N,q,q,q,q,q,q,q,q,q,q,q,q,!0,A.K,q,A.Y,q,A.cK,q,q))
 t.push(A.y)
 t.push(B.bQ(q,A.S,!1,q,!0,A.n,q,B.bS(),r.e,q,q,q,q,q,2,E.xh,A.r,!0,q,!0,q,!1,q,A.R,q,q,q,q,A.f2,q,q,q,1,q,q,!1,p,q,q,q,q,q,!1,q,q,!1,q,!0,q,A.N,q,q,q,q,q,q,q,q,q,q,q,q,!0,A.K,q,A.Y,q,A.cK,q,q))
 t.push(A.y)
 t.push(B.bQ(q,A.S,!1,q,!0,A.n,q,B.bS(),r.f,q,q,q,q,q,2,B.by(q,q,q,q,q,q,q,q,!0,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,r.ch?"Bedrijfsnaam":"Company name",!0,!0,!1,q,q,q,q,q,q,q,q,q,q,q,q,q,q),A.r,!0,q,!0,q,!1,q,A.R,q,q,q,q,q,q,q,q,1,q,q,!1,p,q,q,q,q,q,!1,q,q,!1,q,!0,q,A.N,q,q,q,q,q,q,q,q,q,q,q,q,!0,A.K,q,A.Y,q,A.cK,q,q))
 t.push(A.y)
-t.push(B.bQ(q,A.S,!1,q,!0,A.n,q,B.bS(),r.r,q,q,q,q,q,2,B.by(q,q,q,q,q,q,q,q,!0,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,r.ch?"Telefoonnummer":"Phone number",!0,!0,!1,q,q,q,q,q,q,q,q,q,q,q,q,q,q),A.r,!0,q,!0,q,!1,q,A.R,q,q,q,q,A.dm,q,q,q,1,q,q,!1,p,q,q,q,q,q,!1,q,q,!1,q,!0,q,A.N,q,q,q,q,q,q,q,q,q,q,q,q,!0,A.K,q,A.Y,q,A.cK,q,q))
+t.push(B.bQ(q,A.S,!1,q,!0,A.n,q,B.bS(),r.r,q,q,q,q,q,2,B.by(q,q,q,q,q,q,q,q,!0,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,r.ch?"Telefoonnummer":"Phone number",!0,!0,!1,q,q,q,q,q,q,q,q,q,q,q,q,q,q),A.r,!0,q,!0,q,!1,q,A.R,q,q,q,q,A.dl,q,q,q,1,q,q,!1,p,q,q,q,q,q,!1,q,q,!1,q,!0,q,A.N,q,q,q,q,q,q,q,q,q,q,q,q,!0,A.K,q,A.Y,q,A.cK,q,q))
 t.push(A.y)
 t.push(B.bQ(q,A.S,!1,q,!0,A.n,q,B.bS(),r.w,q,q,q,q,q,2,B.by(q,q,q,q,q,q,q,q,!0,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,q,r.ch?"Adres":"Address",!0,!0,!1,q,q,q,q,q,q,q,q,q,q,q,q,q,q),A.r,!0,q,!0,q,!1,q,A.R,q,q,q,q,q,q,q,q,1,q,q,!1,p,q,q,q,q,q,!1,q,q,!1,q,!0,q,A.N,q,q,q,q,q,q,q,q,q,q,q,q,!0,A.K,q,A.Y,q,A.cK,q,q))
 t.push(A.y)
@@ -186,7 +186,7 @@ else u=B.c(r.ch?"Gegevens versturen":"Submit details",q,q,q,q,A.ru,q,q,q)
 t.push(B.b0(B.bZ(u,s,q),50,1/0))
 t.push(A.D)
 t.push(B.bH(B.c("Powered by BigDogg \xb7 bigdogg.nl",q,q,q,q,A.dJ,q,q,q),q,q))
-return B.dm(new B.a9(F.oM,B.G(B.a([n,A.D,m,A.F,D.afO,A.aR,B.B(q,B.G(t,A.q,A.d,A.f),A.h,q,A.iE,new B.L(A.i,q,w,o,v,q,A.m),q,q,q,q,I.vP,q,q,420),A.ii],l),A.j,A.d,A.f),q),q,A.r,q,q,A.a8)}}
+return B.dm(new B.a9(F.oM,B.G(B.a([n,A.D,m,A.F,D.afO,A.aR,B.B(q,B.G(t,A.p,A.d,A.f),A.h,q,A.iE,new B.M(A.i,q,w,o,v,q,A.m),q,q,q,q,I.vP,q,q,420),A.ih],l),A.j,A.d,A.f),q),q,A.r,q,q,A.a8)}}
 var z=a.updateTypes(["al<~>()"])
 C.aGi.prototype={
 $0(){var w=this.a
@@ -229,7 +229,7 @@ v(B.h_,[C.aGi,C.aGd,C.aGe,C.aGf,C.aGg,C.aGh,C.aGb,C.aGa])
 w(C.aGc,B.eK)})()
 B.fB(b.typeUniverse,JSON.parse('{"qx":{"a_":[],"h":[]},"MK":{"a2":["qx"]}}'))
 var y={b:"https://bigdogg-production.up.railway.app/api/v1/clients/onboarding/"}
-var x={c:B.ab("C<bG>"),u:B.ab("C<h>"),y:B.ab("ah<p,@>"),w:B.ab("p"),b:B.ab("@"),x:B.ab("p?"),v:B.ab("~")};(function constants(){D.T7=new B.aq(A.c4,64,A.C,null,null)
+var x={c:B.ab("C<bG>"),u:B.ab("C<h>"),y:B.ab("ah<p,@>"),w:B.ab("p"),b:B.ab("@"),x:B.ab("p?"),v:B.ab("~")};(function constants(){D.T6=new B.aq(A.c4,64,A.C,null,null)
 D.ae3=new B.q(!0,A.l,null,null,null,null,24,A.E,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null)
 D.afO=new B.dn("BigDogg",null,A.rw,null,null,null,null,null,null,null,null)})()};
-(a=>{a["enM62ty9jESFRYmvjEVlH4Y8dH4="]=a.current})($__dart_deferred_initializers__);
+(a=>{a["tOgsJVdKZMEHzEOQ4yybi4naWNY="]=a.current})($__dart_deferred_initializers__);
