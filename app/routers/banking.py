@@ -127,15 +127,20 @@ def _ensure_credentials_configured() -> None:
 
 # ─── Feature flag ──────────────────────────────────────────────
 def _live_enabled(user_id: str) -> bool:
-    """Whether this user is allowed to use the LIVE bank-connect flow.
+    """Whether this user may use the LIVE bank-connect flow.
 
-    Driven by the BANK_LIVE_USER_IDS env allowlist so the rollout can be
-    flipped (founder-only → everyone) without a deploy. Empty list = no
-    one, which keeps the flow dark by default.
+    Default-OPEN (launched state): with BANK_LIVE_USER_IDS unset or empty
+    the flow is available to everyone. Set the env to a comma-separated
+    list of Supabase user_ids to RESTRICT it to just those accounts — e.g.
+    to re-gate during an incident or run a closed beta. A literal "*" also
+    means everyone. Driven entirely by env so the gate flips without a
+    code deploy.
     """
     allow = {
         x.strip() for x in (settings.bank_live_user_ids or "").split(",") if x.strip()
     }
+    if not allow or "*" in allow:
+        return True
     return bool(user_id) and user_id in allow
 
 

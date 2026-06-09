@@ -66,11 +66,18 @@ def test_live_enabled_blocks_unlisted_user(monkeypatch):
     assert _live_enabled("user-z") is False
 
 
-def test_live_enabled_empty_allowlist_blocks_everyone(monkeypatch):
+def test_live_enabled_empty_allowlist_allows_everyone(monkeypatch):
+    # Default-open launched state: no allowlist configured -> everyone in.
     monkeypatch.setattr(settings, "bank_live_user_ids", "")
-    assert _live_enabled("user-a") is False
+    assert _live_enabled("user-a") is True
 
 
-def test_live_enabled_blank_user_id(monkeypatch):
+def test_live_enabled_wildcard_allows_everyone(monkeypatch):
+    monkeypatch.setattr(settings, "bank_live_user_ids", "*")
+    assert _live_enabled("anyone-at-all") is True
+
+
+def test_live_enabled_blank_user_id_with_restriction(monkeypatch):
+    # When an explicit allowlist IS set, a blank user_id is still refused.
     monkeypatch.setattr(settings, "bank_live_user_ids", "user-a")
     assert _live_enabled("") is False

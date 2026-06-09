@@ -34,9 +34,10 @@ class Settings:
     # and surface as "reconnect needed") — acceptable, the user just
     # reconnects. /connect fails closed (500) if this is unset.
     tl_token_enc_key: str = os.getenv("TL_TOKEN_ENC_KEY", "")
-    # Comma-separated Supabase user_ids allowed to use the LIVE bank-connect
-    # flow while it's flag-gated. Everyone else sees the "coming soon"
-    # overlay and is refused at POST /banking/connect. Empty = nobody.
+    # Optional restriction on the LIVE bank-connect flow. DEFAULT-OPEN:
+    # unset/empty means everyone can use it (launched state). Set to a
+    # comma-separated list of Supabase user_ids to RESTRICT it to those
+    # accounts (closed beta / incident kill-switch); "*" also = everyone.
     bank_live_user_ids: str = os.getenv("BANK_LIVE_USER_IDS", "")
     # Origin used in share links (client invites + quote share). Defaults
     # to the Railway hostname so previews render without extra DNS work;
