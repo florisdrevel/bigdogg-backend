@@ -80,7 +80,15 @@ app.include_router(downloads.router, prefix="/api/v1/downloads", tags=["download
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    # Expose the deployed commit + a build marker so a deploy can be
+    # verified from outside (Railway injects RAILWAY_GIT_COMMIT_SHA). The
+    # marker string bumps with each deploy-debug build so we can tell which
+    # code is actually running without an authenticated call.
+    return {
+        "status": "healthy",
+        "commit": (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "unknown")[:8],
+        "build_marker": "bank-default-open-v1",
+    }
 
 @app.get("/debug-headers")
 async def debug_headers(request: Request):
