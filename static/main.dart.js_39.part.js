@@ -9393,43 +9393,47 @@ m=A.hd(k,k,k,k,k,k,k,k,k,C.ax,k,C.h1,k,C.hH,k,k,k,k,C.e7,k,k)
 m=B.px(D.UJ,A.c("+14d",k,k,k,k,E.mH,k,k,k),new B.aYQ(this,s,e),m)
 l=A.hd(k,k,k,k,k,k,k,k,k,C.z,k,C.h1,k,C.hH,k,k,k,k,C.e7,k,k)
 return A.B(k,A.G(A.a([o,C.aS,A.Z(A.a([n,m,C.cr,B.px(D.TN,A.c(e?"Intrekken":"Revoke",k,k,k,k,E.mH,k,k,k),new B.aYR(this,s,h,e),l)],p),C.j,C.d,C.f,0)],p),C.q,C.d,C.f),C.h,k,k,new A.L(C.a1,k,i,j,k,k,C.m),k,k,k,S.vs,C.oH,k,k,k)},
-al0(d){var w,v,u,t,s,r,q,p,o,n,m,l,k,j=this,i=null,h=j.Q,g=J.d(h==null?i:J.t(h,"connected"),!0)
-h=j.Q
-if(h==null)w=i
-else{h=J.t(h,"connected_at")
-w=h==null?i:J.a3(h)}h=A.D(12)
-v=A.aw(C.w,1)
-u=x.p
-t=A.Z(A.a([D.U4,C.a0,A.c(d?"Bankrekening":"Bank account",i,i,i,i,C.f4,i,i,i)],u),C.j,C.d,C.f,0)
-s=A.c(d?"Koppel je Nederlandse bankrekening om transacties automatisch in te lezen.":"Connect your Dutch bank account to import transactions automatically.",i,i,i,i,C.aU,i,i,i)
-r=A.a0(46,C.p.m()>>>16&255,C.p.m()>>>8&255,C.p.m()&255)
-q=A.D(20)
-r=A.a([new A.dE(C.hm,i,i,A.B(i,A.c(d?"Live koppeling \u2014 binnenkort beschikbaar":"Live sync \u2014 coming soon",i,i,i,i,E.J2,i,i,i),C.h,i,i,new A.L(r,i,i,q,i,i,C.m),i,i,i,i,C.d5,i,i,i),i),C.aE],u)
-if(j.as)r.push(Q.b2)
-else if(g){q=A.a([A.c(d?"Bankrekening gekoppeld":"Bank account connected",i,i,i,i,D.IK,i,i,i)],u)
-if(w!=null&&w.length!==0){p=d?"Sinds":"Since"
-q.push(A.c(p+" "+j.aqt(w,d),i,i,i,i,C.aA,i,i,i))}q=A.Z(A.a([D.pO,C.a0,A.a1(A.G(q,C.q,C.d,C.f),1)],u),C.j,C.d,C.f,0)
-p=A.b0(R.fl(D.UD,A.c(d?"Bekijk transacties":"View transactions",i,i,i,i,C.bC,i,i,i),new B.aYU(j),A.cE(i,i,C.l,i,i,i,i,i,i,i,i,i,D.hF,i,new A.bp(A.D(8),C.v),i,i,i,i,i)),i,1/0)
-o=j.ax
-n=o?i:new B.aYV(j,d)
-o=o?D.r9:D.T_
-C.b.I(r,A.a([q,C.y,p,C.F,A.b0(V.no(o,A.c(d?"Verwijder koppeling":"Remove connection",i,i,i,i,i,i,i,i),n,A.l5(i,i,i,i,i,i,i,i,i,C.z,i,i,D.hF,i,new A.bp(A.D(8),C.v),N.nE,i,i,i,i)),i,1/0)],u))}else{q=j.at
-p=q?i:new B.aYW(j,d)
-q=q?N.eC:D.Ul
-r.push(A.b0(R.fl(q,A.c(d?"Koppel je bankrekening":"Connect your bank account",i,i,i,i,C.bC,i,i,i),p,A.cE(i,i,C.l,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i)),i,1/0))}r=A.w1(A.bcQ(!0,A.G(r,C.q,C.d,C.f)),0.5)
-q=A.c(d?"Beveiligd via TrueLayer (PSD2). BigDogg krijgt alleen leestoegang tot je transacties.":"Secured via TrueLayer (PSD2). BigDogg only gets read access to your transactions.",i,i,i,i,C.cX,i,i,i)
-p=A.Z(A.a([D.T1,C.aX,A.c(d?"Of importeer een bankafschrift":"Or import a bank statement",i,i,i,i,C.dK,i,i,i)],u),C.j,C.d,C.f,0)
-o=A.c(d?"PDF, MT940 of CAMT.053 \u2014 direct te downloaden vanuit je internetbankieren.":"PDF, MT940 or CAMT.053 \u2014 downloadable from your bank's online portal.",i,i,i,i,L.az,i,i,i)
-n=j.ay
-m=n?i:new B.aYX(j,d)
-n=n?D.r9:D.SN
-n=A.b0(V.no(n,A.c(d?"Bestand kiezen":"Choose file",i,i,i,i,i,i,i,i),m,A.l5(i,i,i,i,i,i,i,i,i,C.l,i,i,D.hF,i,new A.bp(A.D(8),C.v),D.KL,i,i,i,i)),i,1/0)
-m=j.ch
-l=m?i:new B.aYY(j,d)
-k=m?E.r7:D.UG
-if(m)m=d?"PDF wordt gelezen\u2026":"Reading PDF\u2026"
-else m=d?"PDF afschrift inlezen (AI)":"Scan PDF statement (AI)"
-return A.B(i,A.G(A.a([t,C.av,s,C.y,r,C.F,q,C.bB,D.vd,C.bB,p,C.av,o,C.aE,n,C.F,A.b0(R.fl(k,A.c(m,i,i,i,i,C.bC,i,i,i),l,A.cE(i,i,C.l,i,i,i,i,i,i,i,i,i,D.hF,i,new A.bp(A.D(8),C.v),i,i,i,i,i)),i,1/0)],u),C.q,C.d,C.f),C.h,i,i,new A.L(C.i,i,v,h,i,i,C.m),i,i,i,i,C.a5,i,i,i)},
+al0(d){var w,v,u,t,s,r,q,p,o,n,m,l,k,j,i=this,h=null,g=i.Q,f=J.d(g==null?h:J.t(g,"connected"),!0)
+g=i.Q
+if(g==null)w=h
+else{g=J.t(g,"connected_at")
+w=g==null?h:J.a3(g)}g=i.Q
+v=J.d(g==null?h:J.t(g,"live_enabled"),!0)
+g=A.D(12)
+u=A.aw(C.w,1)
+t=x.p
+s=A.Z(A.a([D.U4,C.a0,A.c(d?"Bankrekening":"Bank account",h,h,h,h,C.f4,h,h,h)],t),C.j,C.d,C.f,0)
+r=A.c(d?"Koppel je Nederlandse bankrekening om transacties automatisch in te lezen.":"Connect your Dutch bank account to import transactions automatically.",h,h,h,h,C.aU,h,h,h)
+q=v?1:0.5
+p=!v
+o=A.a([],t)
+if(p){n=A.a0(46,C.p.m()>>>16&255,C.p.m()>>>8&255,C.p.m()&255)
+m=A.D(20)
+C.b.I(o,A.a([new A.dE(C.hm,h,h,A.B(h,A.c(d?"Live koppeling \u2014 binnenkort beschikbaar":"Live sync \u2014 coming soon",h,h,h,h,E.J2,h,h,h),C.h,h,h,new A.L(n,h,h,m,h,h,C.m),h,h,h,h,C.d5,h,h,h),h),C.aE],t))}if(i.as)o.push(Q.b2)
+else if(f){n=A.a([A.c(d?"Bankrekening gekoppeld":"Bank account connected",h,h,h,h,D.IK,h,h,h)],t)
+if(w!=null&&w.length!==0){m=d?"Sinds":"Since"
+n.push(A.c(m+" "+i.aqt(w,d),h,h,h,h,C.aA,h,h,h))}n=A.Z(A.a([D.pO,C.a0,A.a1(A.G(n,C.q,C.d,C.f),1)],t),C.j,C.d,C.f,0)
+m=A.b0(R.fl(D.UD,A.c(d?"Bekijk transacties":"View transactions",h,h,h,h,C.bC,h,h,h),new B.aYU(i),A.cE(h,h,C.l,h,h,h,h,h,h,h,h,h,D.hF,h,new A.bp(A.D(8),C.v),h,h,h,h,h)),h,1/0)
+l=i.ax
+k=l?h:new B.aYV(i,d)
+l=l?D.r9:D.T_
+C.b.I(o,A.a([n,C.y,m,C.F,A.b0(V.no(l,A.c(d?"Verwijder koppeling":"Remove connection",h,h,h,h,h,h,h,h),k,A.l5(h,h,h,h,h,h,h,h,h,C.z,h,h,D.hF,h,new A.bp(A.D(8),C.v),N.nE,h,h,h,h)),h,1/0)],t))}else{n=i.at
+m=n?h:new B.aYW(i,d)
+n=n?N.eC:D.Ul
+o.push(A.b0(R.fl(n,A.c(d?"Koppel je bankrekening":"Connect your bank account",h,h,h,h,C.bC,h,h,h),m,A.cE(h,h,C.l,h,h,h,h,h,h,h,h,h,h,h,h,h,h,h,h,h)),h,1/0))}q=A.w1(A.bcQ(p,A.G(o,C.q,C.d,C.f)),q)
+p=A.c(d?"Beveiligd via TrueLayer (PSD2). BigDogg krijgt alleen leestoegang tot je transacties.":"Secured via TrueLayer (PSD2). BigDogg only gets read access to your transactions.",h,h,h,h,C.cX,h,h,h)
+o=A.Z(A.a([D.T1,C.aX,A.c(d?"Of importeer een bankafschrift":"Or import a bank statement",h,h,h,h,C.dK,h,h,h)],t),C.j,C.d,C.f,0)
+n=A.c(d?"PDF, MT940 of CAMT.053 \u2014 direct te downloaden vanuit je internetbankieren.":"PDF, MT940 or CAMT.053 \u2014 downloadable from your bank's online portal.",h,h,h,h,L.az,h,h,h)
+m=i.ay
+l=m?h:new B.aYX(i,d)
+m=m?D.r9:D.SN
+m=A.b0(V.no(m,A.c(d?"Bestand kiezen":"Choose file",h,h,h,h,h,h,h,h),l,A.l5(h,h,h,h,h,h,h,h,h,C.l,h,h,D.hF,h,new A.bp(A.D(8),C.v),D.KL,h,h,h,h)),h,1/0)
+l=i.ch
+k=l?h:new B.aYY(i,d)
+j=l?E.r7:D.UG
+if(l)l=d?"PDF wordt gelezen\u2026":"Reading PDF\u2026"
+else l=d?"PDF afschrift inlezen (AI)":"Scan PDF statement (AI)"
+return A.B(h,A.G(A.a([s,C.av,r,C.y,q,C.F,p,C.bB,D.vd,C.bB,o,C.av,n,C.aE,m,C.F,A.b0(R.fl(j,A.c(l,h,h,h,h,C.bC,h,h,h),k,A.cE(h,h,C.l,h,h,h,h,h,h,h,h,h,D.hF,h,new A.bp(A.D(8),C.v),h,h,h,h,h)),h,1/0)],t),C.q,C.d,C.f),C.h,h,h,new A.L(C.i,h,u,g,h,h,C.m),h,h,h,h,C.a5,h,h,h)},
 G(b1){var w,v,u,t,s,r,q,p,o,n,m,l,k,j,i,h,g,f,e,d,a0,a1,a2,a3,a4=this,a5=null,a6="connected",a7="Account verwijderen",a8=x.C,a9=A.cM(b1,!0,a8).b==="nl",b0=A.cM(b1,!0,a8)
 if(b0.cx)$.af.k4$.push(new B.b_u(a4,b0))
 if(a4.f)return Q.b2
@@ -20560,4 +20564,4 @@ w($,"bGA","bmf",()=>new A.N())
 v($,"bGz","bme",()=>{var u=new B.aro()
 u.qq($.bmf())
 return u})})()};
-(a=>{a["bAbQA48hfXC+VYn5r8iKik71plM="]=a.current})($__dart_deferred_initializers__);
+(a=>{a["W6NP6vGr5p7428tBtMEyTzb/sPo="]=a.current})($__dart_deferred_initializers__);
