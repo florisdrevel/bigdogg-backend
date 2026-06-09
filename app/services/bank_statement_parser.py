@@ -14,7 +14,7 @@ Two formats covered:
     about.
 
 Both parsers normalize their output to the SAME dict shape as
-`banking._normalize_tink_transaction`, so the auto-matcher can chew
+`banking._normalize_truelayer_transaction`, so the auto-matcher can chew
 on either source without caring where the data came from.
 """
 
@@ -28,7 +28,7 @@ from typing import List
 import mt940
 
 
-# Tx shape matches `banking._normalize_tink_transaction`:
+# Tx shape matches `banking._normalize_truelayer_transaction`:
 #   id, date (YYYY-MM-DD), description, merchant, amount (signed
 #   decimal), currency, type, status.
 NormalizedTx = dict

@@ -47,6 +47,7 @@ import base64
 import json as _json
 import secrets
 import httpx
+from cryptography.fernet import Fernet, InvalidToken
 
 from app.database import supabase
 from app.config import settings
@@ -124,6 +125,58 @@ def _ensure_credentials_configured() -> None:
         )
 
 
+# ─── Feature flag ──────────────────────────────────────────────
+def _live_enabled(user_id: str) -> bool:
+    """Whether this user is allowed to use the LIVE bank-connect flow.
+
+    Driven by the BANK_LIVE_USER_IDS env allowlist so the rollout can be
+    flipped (founder-only → everyone) without a deploy. Empty list = no
+    one, which keeps the flow dark by default.
+    """
+    allow = {
+        x.strip() for x in (settings.bank_live_user_ids or "").split(",") if x.strip()
+    }
+    return bool(user_id) and user_id in allow
+
+
+# ─── Token encryption at rest ──────────────────────────────────
+def _fernet() -> Optional[Fernet]:
+    key = (settings.tl_token_enc_key or "").strip()
+    if not key:
+        return None
+    return Fernet(key.encode())
+
+
+def _encrypt_token(plain: Optional[str]) -> Optional[str]:
+    """Encrypt a TrueLayer token before persisting. Fail closed: if no key
+    is configured we refuse to store a plaintext bank token."""
+    if plain is None:
+        return None
+    f = _fernet()
+    if f is None:
+        raise HTTPException(
+            status_code=500,
+            detail="TL_TOKEN_ENC_KEY not configured — cannot store bank tokens.",
+        )
+    return f.encrypt(plain.encode()).decode()
+
+
+def _decrypt_token(stored: Optional[str]) -> Optional[str]:
+    """Decrypt a stored TrueLayer token. Tolerant of legacy plaintext rows
+    written before encryption existed: if the value isn't a valid Fernet
+    token, return it unchanged so a pre-existing connection still works
+    until its next refresh re-encrypts it."""
+    if not stored:
+        return stored
+    f = _fernet()
+    if f is None:
+        return stored
+    try:
+        return f.decrypt(stored.encode()).decode()
+    except InvalidToken:
+        return stored
+
+
 # ─── Token management ──────────────────────────────────────────
 def _build_auth_url(state: str) -> str:
     """Construct the TrueLayer hosted-auth URL the user opens in browser.
@@ -197,8 +250,8 @@ async def _get_user_access_token(bigdogg_user_id: str) -> str:
     if not profile_result.data:
         raise HTTPException(status_code=404, detail="No bank connection")
     profile = profile_result.data[0]
-    access_token = profile.get("tl_access_token")
-    refresh = profile.get("tl_refresh_token")
+    access_token = _decrypt_token(profile.get("tl_access_token"))
+    refresh = _decrypt_token(profile.get("tl_refresh_token"))
     expires_at_raw = profile.get("tl_token_expires_at")
     if not access_token:
         raise HTTPException(status_code=404, detail="No bank connection")
@@ -226,8 +279,8 @@ async def _get_user_access_token(bigdogg_user_id: str) -> str:
         expires_in = int(tokens.get("expires_in", 3600))
         new_expires = datetime.now(timezone.utc) + timedelta(seconds=expires_in - 30)
         supabase.table("user_profiles").update({
-            "tl_access_token": access_token,
-            "tl_refresh_token": new_refresh,
+            "tl_access_token": _encrypt_token(access_token),
+            "tl_refresh_token": _encrypt_token(new_refresh),
             "tl_token_expires_at": new_expires.isoformat(),
         }).eq("id", bigdogg_user_id).execute()
 
@@ -244,6 +297,12 @@ async def connect_bank(request: Request):
     consent flow; on completion, TrueLayer redirects to /callback.
     """
     bigdogg_user_id = get_user_id(request)
+    # Flag gate: the live PSD2 flow is dark for everyone except the
+    # allowlisted founder account until rollout. The Flutter overlay
+    # enforces this in the UI; this is the server-side backstop so a
+    # direct API call can't bypass it.
+    if not _live_enabled(bigdogg_user_id):
+        raise HTTPException(status_code=403, detail="bank_live_not_enabled")
     _ensure_credentials_configured()
 
     state = secrets.token_urlsafe(24)
@@ -313,8 +372,8 @@ async def banking_callback(
         print(f"[truelayer] /me lookup failed (non-fatal): {e}")
 
     supabase.table("user_profiles").update({
-        "tl_access_token": tokens["access_token"],
-        "tl_refresh_token": tokens.get("refresh_token"),
+        "tl_access_token": _encrypt_token(tokens["access_token"]),
+        "tl_refresh_token": _encrypt_token(tokens.get("refresh_token")),
         "tl_token_expires_at": expires_at.isoformat(),
         "tl_connected_at": datetime.now(timezone.utc).isoformat(),
         "tl_link_state": None,
@@ -1498,17 +1557,19 @@ async def banking_status(request: Request):
     """Whether the user has a connected bank, plus enough metadata for
     the Settings card to render."""
     bigdogg_user_id = get_user_id(request)
+    live_enabled = _live_enabled(bigdogg_user_id)
     profile_result = supabase.table("user_profiles")\
         .select("tl_access_token, tl_connected_at, tl_token_expires_at, tl_provider_id")\
         .eq("id", bigdogg_user_id).execute()
     if not profile_result.data:
-        return {"connected": False}
+        return {"connected": False, "live_enabled": live_enabled}
     profile = profile_result.data[0]
     return {
         "connected": bool(profile.get("tl_access_token")),
         "connected_at": profile.get("tl_connected_at"),
         "token_expires_at": profile.get("tl_token_expires_at"),
         "provider_id": profile.get("tl_provider_id"),
+        "live_enabled": live_enabled,
     }
 
 
@@ -1521,7 +1582,7 @@ async def banking_disconnect(request: Request):
     # invalidates the access token and the corresponding consent.
     profile_result = supabase.table("user_profiles")\
         .select("tl_access_token").eq("id", bigdogg_user_id).execute()
-    access_token = (profile_result.data[0].get("tl_access_token")
+    access_token = (_decrypt_token(profile_result.data[0].get("tl_access_token"))
                     if profile_result.data else None)
     if access_token:
         try:
