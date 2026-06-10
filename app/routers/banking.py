@@ -634,6 +634,16 @@ def _format_amount_eur(amount: float) -> str:
 
 
 # ─── Link persistence + hydration ─────────────────────────────
+def _confirmed_taken_ids(existing_links: dict) -> set:
+    """IDs of invoices/expenses/investments already linked to a transaction,
+    fed to the matcher so it never double-links a target (one-to-one)."""
+    return {
+        r["linked_id"] for r in existing_links.values()
+        if r.get("link_type") in ("invoice", "expense", "investment")
+        and r.get("linked_id")
+    }
+
+
 def _enrich_transaction_with_link(
     tx: dict,
     existing_links: dict,
@@ -641,6 +651,7 @@ def _enrich_transaction_with_link(
     expenses: list,
     investments: list,
     user_id: str,
+    taken_ids: Optional[set] = None,
 ) -> dict:
     """Attach a `link` field to `tx`. If a manual link exists, use it as-is.
     Otherwise compute the best automatic match and persist firm/suggested
@@ -667,6 +678,8 @@ def _enrich_transaction_with_link(
     if amount > 0:
         best_inv = (0, None)
         for inv in invoices:
+            if taken_ids and inv.get("id") in taken_ids:
+                continue  # already linked to another transaction
             s = _score_invoice_match(tx, inv)
             if s > best_inv[0]:
                 best_inv = (s, inv)
@@ -705,12 +718,16 @@ def _enrich_transaction_with_link(
     elif amount < 0:
         best_ex = (0, None)
         for ex in expenses:
+            if taken_ids and ex.get("id") in taken_ids:
+                continue  # already linked to another transaction
             s = _score_expense_match(tx, ex)
             if s > best_ex[0]:
                 best_ex = (s, ex)
 
         best_iv = (0, None)
         for iv in investments:
+            if taken_ids and iv.get("id") in taken_ids:
+                continue  # already linked to another transaction
             s = _score_investment_match(tx, iv)
             if s > best_iv[0]:
                 best_iv = (s, iv)
@@ -1049,15 +1066,19 @@ async def reconcile_user_transactions(user_id: str) -> None:
         # Only run the matcher on transactions that aren't already
         # linked. Auto-linking + notifications happen inside
         # _enrich_transaction_with_link as a side effect.
+        taken_ids = _confirmed_taken_ids(existing_links)
         new_matches = 0
         for tx in normalized:
             if existing_links.get(tx.get("id")):
                 continue
             before = tx.get("link")
             _enrich_transaction_with_link(
-                tx, existing_links, invoices, expenses, investments, user_id,
+                tx, existing_links, invoices, expenses, investments, user_id, taken_ids,
             )
-            if tx.get("link") and tx.get("link") != before:
+            link = tx.get("link")
+            if link and link.get("type") in ("invoice", "expense", "investment") and link.get("linked_id"):
+                taken_ids.add(link["linked_id"])
+            if link and link != before:
                 new_matches += 1
         print(f"[banking] reconcile: user={user_id[:8]}… "
               f"checked={len(normalized)} new_matches={new_matches}")
@@ -1143,10 +1164,16 @@ async def _enriched_transactions_for_user(
         except Exception:
             pass
 
-    enriched = [
-        _enrich_transaction_with_link(t, existing_links, invoices, expenses, investments, user_id)
-        for t in combined[:page_size]
-    ]
+    taken_ids = _confirmed_taken_ids(existing_links)
+    enriched = []
+    for t in combined[:page_size]:
+        _enrich_transaction_with_link(
+            t, existing_links, invoices, expenses, investments, user_id, taken_ids
+        )
+        link = t.get("link")
+        if link and link.get("type") in ("invoice", "expense", "investment") and link.get("linked_id"):
+            taken_ids.add(link["linked_id"])
+        enriched.append(t)
     return enriched, False
 
 
@@ -1237,6 +1264,27 @@ async def set_transaction_link(tx_id: str, request: Request):
         require_owned_id("expenses", linked_id, user_id)
     elif link_type == "investment":
         require_owned_id("investments", linked_id, user_id)
+
+    # One-to-one: an invoice/expense/investment may be linked to at most one
+    # transaction. Reject if a DIFFERENT transaction already links this target.
+    if link_type in ("invoice", "expense", "investment"):
+        already = False
+        try:
+            dup = supabase.table("bank_transaction_links")\
+                .select("tx_id")\
+                .eq("user_id", user_id)\
+                .eq("linked_id", linked_id)\
+                .neq("tx_id", tx_id)\
+                .in_("link_type", ["invoice", "expense", "investment"])\
+                .limit(1).execute()
+            already = bool(dup.data)
+        except Exception as e:
+            print(f"[banking] duplicate-link check failed (allowing): {e}")
+        if already:
+            raise HTTPException(
+                status_code=409,
+                detail="already_linked_to_other_transaction",
+            )
 
     _persist_link(user_id, tx_id, link_type, linked_id, auto=False)
     if link_type == "invoice":
@@ -1519,15 +1567,18 @@ async def import_bank_statement(request: Request, file: UploadFile = File(...)):
         except Exception as e:
             print(f"[banking] import link lookup failed: {e}")
 
+    taken_ids = _confirmed_taken_ids(existing_links)
     auto_linked = 0
     suggested = 0
     for tx in parsed:
         if existing_links.get(tx.get("id")):
             continue
         _enrich_transaction_with_link(
-            tx, existing_links, invoices, expenses, investments, user_id,
+            tx, existing_links, invoices, expenses, investments, user_id, taken_ids,
         )
         link = tx.get("link") or {}
+        if link.get("type") in ("invoice", "expense", "investment") and link.get("linked_id"):
+            taken_ids.add(link["linked_id"])
         link_type = link.get("type") or ""
         if link_type in ("invoice", "expense", "investment"):
             auto_linked += 1
