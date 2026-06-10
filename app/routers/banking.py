@@ -39,7 +39,7 @@ The redirect URI registered in the TrueLayer Console must be exactly:
 """
 
 from fastapi import APIRouter, HTTPException, Request, Query, UploadFile, File
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Tuple, Dict, Any
 from urllib.parse import urlencode
@@ -142,6 +142,18 @@ def _live_enabled(user_id: str) -> bool:
     if not allow or "*" in allow:
         return True
     return bool(user_id) and user_id in allow
+
+
+def _has_cached_transactions(user_id: str) -> bool:
+    """True if the user has any rows in the bank_transactions cache
+    (live-synced OR file-imported). Drives the 'View transactions' entry
+    point in the app even when no bank is connected."""
+    try:
+        res = supabase.table("bank_transactions")\
+            .select("external_id").eq("user_id", user_id).limit(1).execute()
+        return bool(res.data)
+    except Exception:
+        return False
 
 
 # ─── Token encryption at rest ──────────────────────────────────
@@ -1077,25 +1089,31 @@ async def get_transactions(
     profile_result = supabase.table("user_profiles")\
         .select("tl_access_token")\
         .eq("id", bigdogg_user_id).execute()
-    if not profile_result.data or not profile_result.data[0].get("tl_access_token"):
-        return {"transactions": []}
+    has_connection = bool(
+        profile_result.data and profile_result.data[0].get("tl_access_token")
+    )
 
-    try:
-        access_token = await _get_user_access_token(bigdogg_user_id)
-    except HTTPException as e:
-        # 401 means refresh failed — surface as a structured response so
-        # the frontend can show a "reconnect needed" message instead of a
-        # generic error.
-        if e.status_code == 401:
-            return {"transactions": [], "reconnect_required": True}
-        raise
+    # Live-fetch only when a bank is connected. With no connection we still
+    # fall through to the bank_transactions cache below, so file-imported
+    # statements (PDF/MT940/CAMT) show in the same screen and can be matched.
+    normalized: List[dict] = []
+    if has_connection:
+        try:
+            access_token = await _get_user_access_token(bigdogg_user_id)
+        except HTTPException as e:
+            # 401 means refresh failed — surface as a structured response so
+            # the frontend can show a "reconnect needed" message instead of a
+            # generic error.
+            if e.status_code == 401:
+                return {"transactions": [], "reconnect_required": True}
+            raise
 
-    normalized = await _fetch_truelayer_transactions(access_token)
+        normalized = await _fetch_truelayer_transactions(access_token)
 
-    # Cache writes regardless of whether we found new rows — keeps the
-    # source-of-truth for the matcher up to date.
-    if normalized:
-        _cache_transactions(bigdogg_user_id, normalized)
+        # Cache writes regardless of whether we found new rows — keeps the
+        # source-of-truth for the matcher up to date.
+        if normalized:
+            _cache_transactions(bigdogg_user_id, normalized)
 
     invoices = (supabase.table("invoices").select(
         "id, invoice_number, total_incl_btw, status, client_name, "
@@ -1563,11 +1581,16 @@ async def banking_status(request: Request):
     the Settings card to render."""
     bigdogg_user_id = get_user_id(request)
     live_enabled = _live_enabled(bigdogg_user_id)
+    has_transactions = _has_cached_transactions(bigdogg_user_id)
     profile_result = supabase.table("user_profiles")\
         .select("tl_access_token, tl_connected_at, tl_token_expires_at, tl_provider_id")\
         .eq("id", bigdogg_user_id).execute()
     if not profile_result.data:
-        return {"connected": False, "live_enabled": live_enabled}
+        return {
+            "connected": False,
+            "live_enabled": live_enabled,
+            "has_transactions": has_transactions,
+        }
     profile = profile_result.data[0]
     return {
         "connected": bool(profile.get("tl_access_token")),
@@ -1575,7 +1598,160 @@ async def banking_status(request: Request):
         "token_expires_at": profile.get("tl_token_expires_at"),
         "provider_id": profile.get("tl_provider_id"),
         "live_enabled": live_enabled,
+        "has_transactions": has_transactions,
     }
+
+
+# ─── Linked-transactions report (PDF) ──────────────────────────
+_REPORT_MATCHED_TYPES = ("invoice", "expense", "investment")
+
+
+def _report_link_label(link: Optional[dict]) -> str:
+    """Human label for the 'Gekoppeld aan' column."""
+    if not link:
+        return "—"
+    t = link.get("type")
+    lbl = (link.get("linked_label") or "").strip()
+    if t == "invoice":
+        return f"Factuur {lbl}".strip()
+    if t == "expense":
+        return f"Kosten · {lbl}".strip()
+    if t == "investment":
+        return f"Investering · {lbl}".strip()
+    if t == "private":
+        return "Privé"
+    if t and t.startswith("suggested_"):
+        return f"Voorstel · {lbl}".strip()
+    return "—"
+
+
+def _report_rows_for_user(user_id: str, matched_only: bool) -> Tuple[List[dict], Dict[str, float]]:
+    """Build report rows (each cached transaction + its hydrated link) plus
+    matched-total sums. When matched_only is set, unmatched + private rows
+    are dropped so the export carries no personal transactions."""
+    cache = (supabase.table("bank_transactions").select(
+        "external_id, date, amount, currency, description, merchant"
+    ).eq("user_id", user_id).order("date", desc=True).limit(2000).execute().data) or []
+
+    invoices = (supabase.table("invoices").select(
+        "id, invoice_number").eq("user_id", user_id).execute().data) or []
+    expenses = (supabase.table("expenses").select(
+        "id, description").eq("user_id", user_id).execute().data) or []
+    investments = (supabase.table("investments").select(
+        "id, description").eq("user_id", user_id).execute().data) or []
+
+    tx_ids = [r["external_id"] for r in cache if r.get("external_id")]
+    existing_links: dict = {}
+    if tx_ids:
+        try:
+            links = supabase.table("bank_transaction_links").select(
+                "tx_id, link_type, linked_id, auto"
+            ).eq("user_id", user_id).in_("tx_id", tx_ids).execute()
+            for row in (links.data or []):
+                existing_links[row["tx_id"]] = row
+        except Exception as e:
+            print(f"[banking] report link lookup failed: {e}")
+
+    rows: List[dict] = []
+    totals = {"in": 0.0, "out": 0.0}
+    for r in cache:
+        link_row = existing_links.get(r["external_id"])
+        link = _hydrate_link(link_row, invoices, expenses, investments) if link_row else None
+        is_matched = (link or {}).get("type") in _REPORT_MATCHED_TYPES
+        if matched_only and not is_matched:
+            continue
+        amount = float(r.get("amount") or 0)
+        if is_matched:
+            totals["in" if amount >= 0 else "out"] += amount
+        rows.append({
+            "date": (r.get("date") or "")[:10],
+            "amount": amount,
+            "desc": (r.get("merchant") or r.get("description") or "").strip(),
+            "link_label": _report_link_label(link),
+        })
+    return rows, totals
+
+
+def _build_report_pdf(rows: List[dict], totals: Dict[str, float], matched_only: bool) -> bytes:
+    from io import BytesIO
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import (
+        SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer,
+    )
+
+    def eur(v: float) -> str:
+        sign = "-" if v < 0 else "+"
+        return f"{sign} € {abs(v):.2f}".replace(".", ",")
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=18 * mm, rightMargin=18 * mm,
+        topMargin=18 * mm, bottomMargin=18 * mm,
+    )
+    styles = getSampleStyleSheet()
+    elements = [
+        Paragraph("<b>BigDogg — Transactieoverzicht</b>", styles["Title"]),
+        Paragraph(
+            "Alleen gekoppelde transacties" if matched_only else "Alle transacties",
+            styles["Normal"],
+        ),
+        Spacer(1, 10),
+    ]
+
+    data = [["Datum", "Bedrag", "Omschrijving", "Gekoppeld aan"]]
+    for r in rows:
+        data.append([
+            r["date"], eur(r["amount"]),
+            (r["desc"] or "")[:48], (r["link_label"] or "—")[:40],
+        ])
+    if len(data) == 1:
+        data.append(["—", "—", "Geen transacties", "—"])
+
+    table = Table(data, colWidths=[22 * mm, 28 * mm, 73 * mm, 51 * mm], repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1B3A4B")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F5F3EF")]),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E2DDD6")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    elements.append(table)
+
+    if matched_only:
+        elements.append(Spacer(1, 12))
+        tin = f"€ {totals['in']:.2f}".replace(".", ",")
+        tout = f"€ {abs(totals['out']):.2f}".replace(".", ",")
+        elements.append(Paragraph(f"<b>Totaal ontvangen (gekoppeld):</b> {tin}", styles["Normal"]))
+        elements.append(Paragraph(f"<b>Totaal uitgegeven (gekoppeld):</b> {tout}", styles["Normal"]))
+
+    doc.build(elements)
+    return buf.getvalue()
+
+
+@router.get("/report")
+async def banking_report(request: Request, matched_only: bool = Query(False)):
+    """PDF overview of bank transactions and what each is linked to
+    (invoice / expense / investment). With matched_only=true, unmatched and
+    private rows are excluded — so the export contains no personal
+    transactions."""
+    user_id = get_user_id(request)
+    rows, totals = _report_rows_for_user(user_id, matched_only)
+    pdf = _build_report_pdf(rows, totals, matched_only)
+    fname = "bigdogg-transacties-gekoppeld.pdf" if matched_only else "bigdogg-transacties.pdf"
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 @router.delete("/disconnect")
