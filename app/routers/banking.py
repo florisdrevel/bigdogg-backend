@@ -1066,73 +1066,54 @@ async def reconcile_user_transactions(user_id: str) -> None:
 
 
 # ─── Transactions endpoint ─────────────────────────────────────
-@router.get("/transactions")
-async def get_transactions(
-    request: Request,
-    page_size: int = Query(100, ge=1, le=500),
-):
-    """Aggregate booked transactions across all connected accounts.
+async def _enriched_transactions_for_user(
+    user_id: str, page_size: int
+) -> Tuple[List[dict], bool]:
+    """Fetch + enrich a user's transactions. Shared by GET /transactions and
+    GET /report so both show IDENTICAL data (the report bug was reading only
+    the cache while the screen showed live data).
 
-    Flow:
-      1. Refresh the user's TrueLayer access token if needed.
-      2. Live-fetch transactions from TrueLayer (all accounts).
-      3. Upsert them into the bank_transactions cache so the matcher
-         and file-import paths see the same data.
-      4. Look up existing links + run the matcher to auto-link / suggest.
-      5. Return enriched list to the frontend.
-
-    Falls back to the cache (read-only) if TrueLayer returns an error
-    state — so a temporary aggregator outage doesn't blank the screen.
+    Live-fetches when a bank is connected (and caches); otherwise serves the
+    bank_transactions cache (file imports). Each tx gets its invoice/expense/
+    investment link via the matcher. Returns (enriched, reconnect_required).
     """
-    bigdogg_user_id = get_user_id(request)
-
     profile_result = supabase.table("user_profiles")\
         .select("tl_access_token")\
-        .eq("id", bigdogg_user_id).execute()
+        .eq("id", user_id).execute()
     has_connection = bool(
         profile_result.data and profile_result.data[0].get("tl_access_token")
     )
 
-    # Live-fetch only when a bank is connected. With no connection we still
-    # fall through to the bank_transactions cache below, so file-imported
-    # statements (PDF/MT940/CAMT) show in the same screen and can be matched.
     normalized: List[dict] = []
     if has_connection:
         try:
-            access_token = await _get_user_access_token(bigdogg_user_id)
+            access_token = await _get_user_access_token(user_id)
         except HTTPException as e:
-            # 401 means refresh failed — surface as a structured response so
-            # the frontend can show a "reconnect needed" message instead of a
-            # generic error.
             if e.status_code == 401:
-                return {"transactions": [], "reconnect_required": True}
+                return [], True
             raise
-
         normalized = await _fetch_truelayer_transactions(access_token)
-
-        # Cache writes regardless of whether we found new rows — keeps the
-        # source-of-truth for the matcher up to date.
         if normalized:
-            _cache_transactions(bigdogg_user_id, normalized)
+            _cache_transactions(user_id, normalized)
 
     invoices = (supabase.table("invoices").select(
         "id, invoice_number, total_incl_btw, status, client_name, "
-        "client_company, invoice_date").eq("user_id", bigdogg_user_id).execute().data) or []
+        "client_company, invoice_date").eq("user_id", user_id).execute().data) or []
     expenses = (supabase.table("expenses").select(
         "id, description, amount_ex_btw, btw_amount, expense_date"
-    ).eq("user_id", bigdogg_user_id).execute().data) or []
+    ).eq("user_id", user_id).execute().data) or []
     investments = (supabase.table("investments").select(
         "id, description, amount, purchase_date, category"
-    ).eq("user_id", bigdogg_user_id).execute().data) or []
+    ).eq("user_id", user_id).execute().data) or []
 
-    # If TrueLayer returned nothing (e.g. transient error), fall back to
-    # the cache so the screen isn't blank.
+    # No live rows (no connection, or transient error) → serve the cache so
+    # the screen/report isn't blank and file imports show.
     combined = normalized
     if not combined:
         try:
             cache_result = supabase.table("bank_transactions")\
                 .select("external_id, date, amount, currency, description, merchant")\
-                .eq("user_id", bigdogg_user_id)\
+                .eq("user_id", user_id)\
                 .order("date", desc=True)\
                 .limit(page_size).execute()
             for row in (cache_result.data or []):
@@ -1155,7 +1136,7 @@ async def get_transactions(
         try:
             links_result = supabase.table("bank_transaction_links")\
                 .select("tx_id, link_type, linked_id, auto")\
-                .eq("user_id", bigdogg_user_id)\
+                .eq("user_id", user_id)\
                 .in_("tx_id", tx_ids).execute()
             for row in (links_result.data or []):
                 existing_links[row["tx_id"]] = row
@@ -1163,9 +1144,36 @@ async def get_transactions(
             pass
 
     enriched = [
-        _enrich_transaction_with_link(t, existing_links, invoices, expenses, investments, bigdogg_user_id)
+        _enrich_transaction_with_link(t, existing_links, invoices, expenses, investments, user_id)
         for t in combined[:page_size]
     ]
+    return enriched, False
+
+
+@router.get("/transactions")
+async def get_transactions(
+    request: Request,
+    page_size: int = Query(100, ge=1, le=500),
+):
+    """Aggregate booked transactions across all connected accounts.
+
+    Flow:
+      1. Refresh the user's TrueLayer access token if needed.
+      2. Live-fetch transactions from TrueLayer (all accounts).
+      3. Upsert them into the bank_transactions cache so the matcher
+         and file-import paths see the same data.
+      4. Look up existing links + run the matcher to auto-link / suggest.
+      5. Return enriched list to the frontend.
+
+    Falls back to the cache (read-only) if TrueLayer returns an error
+    state — so a temporary aggregator outage doesn't blank the screen.
+    """
+    bigdogg_user_id = get_user_id(request)
+    enriched, reconnect_required = await _enriched_transactions_for_user(
+        bigdogg_user_id, page_size
+    )
+    if reconnect_required:
+        return {"transactions": [], "reconnect_required": True}
     return {"transactions": enriched}
 
 
@@ -1625,62 +1633,52 @@ def _report_link_label(link: Optional[dict]) -> str:
     return "—"
 
 
-def _report_rows_for_user(user_id: str, matched_only: bool) -> Tuple[List[dict], Dict[str, float]]:
-    """Build report rows (each cached transaction + its hydrated link) plus
-    matched-total sums. When matched_only is set, unmatched + private rows
-    are dropped so the export carries no personal transactions."""
-    cache = (supabase.table("bank_transactions").select(
-        "external_id, date, amount, currency, description, merchant"
-    ).eq("user_id", user_id).order("date", desc=True).limit(2000).execute().data) or []
-
-    invoices = (supabase.table("invoices").select(
-        "id, invoice_number").eq("user_id", user_id).execute().data) or []
-    expenses = (supabase.table("expenses").select(
-        "id, description").eq("user_id", user_id).execute().data) or []
-    investments = (supabase.table("investments").select(
-        "id, description").eq("user_id", user_id).execute().data) or []
-
-    tx_ids = [r["external_id"] for r in cache if r.get("external_id")]
-    existing_links: dict = {}
-    if tx_ids:
-        try:
-            links = supabase.table("bank_transaction_links").select(
-                "tx_id, link_type, linked_id, auto"
-            ).eq("user_id", user_id).in_("tx_id", tx_ids).execute()
-            for row in (links.data or []):
-                existing_links[row["tx_id"]] = row
-        except Exception as e:
-            print(f"[banking] report link lookup failed: {e}")
-
+def _report_rows_from_enriched(
+    enriched: List[dict], matched_only: bool
+) -> Tuple[List[dict], Dict[str, float]]:
+    """Build report rows from the SAME enriched transactions the screen
+    shows. When matched_only is set, unmatched + private rows are dropped so
+    the export carries no personal transactions."""
     rows: List[dict] = []
     totals = {"in": 0.0, "out": 0.0}
-    for r in cache:
-        link_row = existing_links.get(r["external_id"])
-        link = _hydrate_link(link_row, invoices, expenses, investments) if link_row else None
+    for tx in enriched:
+        link = tx.get("link")
         is_matched = (link or {}).get("type") in _REPORT_MATCHED_TYPES
         if matched_only and not is_matched:
             continue
-        amount = float(r.get("amount") or 0)
+        amount = float(tx.get("amount") or 0)
         if is_matched:
             totals["in" if amount >= 0 else "out"] += amount
         rows.append({
-            "date": (r.get("date") or "")[:10],
+            "date": (tx.get("date") or "")[:10],
             "amount": amount,
-            "desc": (r.get("merchant") or r.get("description") or "").strip(),
+            "desc": (tx.get("merchant") or tx.get("description") or "").strip(),
             "link_label": _report_link_label(link),
         })
     return rows, totals
 
 
-def _build_report_pdf(rows: List[dict], totals: Dict[str, float], matched_only: bool) -> bytes:
+def _build_report_pdf(
+    rows: List[dict], totals: Dict[str, float], matched_only: bool,
+    profile: Optional[dict] = None,
+) -> bytes:
+    """Branded PDF matching the annual/VAT report letterhead (business-name
+    header + gold rule + teal tables + footer)."""
     from io import BytesIO
+    from datetime import datetime as _dt
     from reportlab.lib.pagesizes import A4
     from reportlab.lib import colors
     from reportlab.lib.units import mm
-    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_RIGHT
     from reportlab.platypus import (
-        SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer,
+        SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, HRFlowable,
     )
+    from app.routers.pdf import TEAL, GOLD, LIGHT_GREY, MID_GREY, TEXT_SECONDARY
+
+    profile = profile or {}
+    business_name = (profile.get("business_name")
+                     or profile.get("full_name") or "BigDogg")
 
     def eur(v: float) -> str:
         sign = "-" if v < 0 else "+"
@@ -1689,17 +1687,40 @@ def _build_report_pdf(rows: List[dict], totals: Dict[str, float], matched_only: 
     buf = BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
-        leftMargin=18 * mm, rightMargin=18 * mm,
-        topMargin=18 * mm, bottomMargin=18 * mm,
+        leftMargin=20 * mm, rightMargin=20 * mm,
+        topMargin=20 * mm, bottomMargin=20 * mm,
     )
-    styles = getSampleStyleSheet()
-    elements = [
-        Paragraph("<b>BigDogg — Transactieoverzicht</b>", styles["Title"]),
-        Paragraph(
-            "Alleen gekoppelde transacties" if matched_only else "Alle transacties",
-            styles["Normal"],
+    page_width = A4[0] - 40 * mm
+
+    name_style = ParagraphStyle('Name', fontName='Helvetica-Bold', fontSize=20, textColor=TEAL)
+    title_style = ParagraphStyle('Title', fontName='Helvetica-Bold', fontSize=14, textColor=TEAL, alignment=TA_RIGHT, leading=18)
+    label_style = ParagraphStyle('Label', fontName='Helvetica-Bold', fontSize=9, textColor=TEXT_SECONDARY, leading=14)
+    value_style = ParagraphStyle('Value', fontName='Helvetica', fontSize=10, textColor=TEAL, leading=14)
+    total_style = ParagraphStyle('Total', fontName='Helvetica-Bold', fontSize=11, textColor=TEAL, leading=17)
+    footer_style = ParagraphStyle('Footer', fontName='Helvetica', fontSize=9, textColor=TEXT_SECONDARY, alignment=TA_CENTER)
+
+    subtitle = "Alleen gekoppelde transacties" if matched_only else "Alle transacties"
+    story = [
+        Table(
+            [[Paragraph(business_name, name_style),
+              Paragraph(f"Transactieoverzicht<br/>{subtitle}", title_style)]],
+            colWidths=[page_width * 0.55, page_width * 0.45],
+            style=TableStyle([
+                ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ]),
         ),
-        Spacer(1, 10),
+        Spacer(1, 2 * mm),
+        HRFlowable(width="100%", thickness=3, color=GOLD, spaceAfter=4 * mm),
+        Table(
+            [[[Paragraph('NAAM', label_style), Paragraph(profile.get('full_name', '—') or '—', value_style)],
+              [Paragraph('AANTAL', label_style), Paragraph(str(len(rows)), value_style)],
+              [Paragraph('GEGENEREERD', label_style), Paragraph(_dt.now().strftime('%d-%m-%Y'), value_style)]]],
+            colWidths=[page_width / 3] * 3,
+            style=TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP')]),
+        ),
+        Spacer(1, 4 * mm),
+        HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4 * mm),
     ]
 
     data = [["Datum", "Bedrag", "Omschrijving", "Gekoppeld aan"]]
@@ -1711,41 +1732,60 @@ def _build_report_pdf(rows: List[dict], totals: Dict[str, float], matched_only: 
     if len(data) == 1:
         data.append(["—", "—", "Geen transacties", "—"])
 
-    table = Table(data, colWidths=[22 * mm, 28 * mm, 73 * mm, 51 * mm], repeatRows=1)
+    table = Table(data, colWidths=[22 * mm, 28 * mm, 73 * mm, 47 * mm], repeatRows=1)
     table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1B3A4B")),
+        ("BACKGROUND", (0, 0), (-1, 0), TEAL),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F5F3EF")]),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E2DDD6")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [LIGHT_GREY, colors.white]),
+        ("GRID", (0, 0), (-1, -1), 0.25, MID_GREY),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
     ]))
-    elements.append(table)
+    story.append(table)
 
     if matched_only:
-        elements.append(Spacer(1, 12))
-        tin = f"€ {totals['in']:.2f}".replace(".", ",")
-        tout = f"€ {abs(totals['out']):.2f}".replace(".", ",")
-        elements.append(Paragraph(f"<b>Totaal ontvangen (gekoppeld):</b> {tin}", styles["Normal"]))
-        elements.append(Paragraph(f"<b>Totaal uitgegeven (gekoppeld):</b> {tout}", styles["Normal"]))
+        story.append(Spacer(1, 6 * mm))
+        story.append(Paragraph(
+            f"Totaal ontvangen (gekoppeld): {eur(totals['in']).replace('+ ', '')}", total_style))
+        story.append(Paragraph(
+            f"Totaal uitgegeven (gekoppeld): € {abs(totals['out']):.2f}".replace(".", ","), total_style))
 
-    doc.build(elements)
+    story.append(Spacer(1, 10 * mm))
+    story.append(Paragraph(
+        f"Gegenereerd door BigDogg · bigdogg.nl · {_dt.now().strftime('%d-%m-%Y')}",
+        footer_style))
+
+    doc.build(story)
     return buf.getvalue()
 
 
 @router.get("/report")
 async def banking_report(request: Request, matched_only: bool = Query(False)):
-    """PDF overview of bank transactions and what each is linked to
-    (invoice / expense / investment). With matched_only=true, unmatched and
-    private rows are excluded — so the export contains no personal
-    transactions."""
+    """Branded PDF of bank transactions and what each is linked to
+    (invoice / expense / investment), built from the SAME data as the
+    Transactions screen. With matched_only=true, unmatched and private rows
+    are excluded — so the export contains no personal transactions."""
     user_id = get_user_id(request)
-    rows, totals = _report_rows_for_user(user_id, matched_only)
-    pdf = _build_report_pdf(rows, totals, matched_only)
+    enriched, _ = await _enriched_transactions_for_user(user_id, 2000)
+    rows, totals = _report_rows_from_enriched(enriched, matched_only)
+
+    profile = {}
+    try:
+        pr = supabase.table("user_profiles")\
+            .select("business_name, full_name")\
+            .eq("id", user_id).limit(1).execute()
+        if pr.data:
+            profile = pr.data[0]
+    except Exception:
+        pass
+
+    pdf = _build_report_pdf(rows, totals, matched_only, profile)
     fname = "bigdogg-transacties-gekoppeld.pdf" if matched_only else "bigdogg-transacties.pdf"
     return Response(
         content=pdf,
