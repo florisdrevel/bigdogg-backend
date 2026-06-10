@@ -1665,27 +1665,28 @@ async def banking_status(request: Request):
 _REPORT_MATCHED_TYPES = ("invoice", "expense", "investment")
 
 
-def _report_link_label(link: Optional[dict]) -> str:
-    """Human label for the 'Gekoppeld aan' column."""
+def _report_link_label(link: Optional[dict], lang: str = "nl") -> str:
+    """Human label for the linked-to column (localised)."""
+    en = lang == "en"
     if not link:
         return "—"
     t = link.get("type")
     lbl = (link.get("linked_label") or "").strip()
     if t == "invoice":
-        return f"Factuur {lbl}".strip()
+        return (f"Invoice {lbl}" if en else f"Factuur {lbl}").strip()
     if t == "expense":
-        return f"Kosten · {lbl}".strip()
+        return (f"Expense · {lbl}" if en else f"Kosten · {lbl}").strip()
     if t == "investment":
-        return f"Investering · {lbl}".strip()
+        return (f"Investment · {lbl}" if en else f"Investering · {lbl}").strip()
     if t == "private":
-        return "Privé"
+        return "Private" if en else "Privé"
     if t and t.startswith("suggested_"):
-        return f"Voorstel · {lbl}".strip()
+        return (f"Suggestion · {lbl}" if en else f"Voorstel · {lbl}").strip()
     return "—"
 
 
 def _report_rows_from_enriched(
-    enriched: List[dict], matched_only: bool
+    enriched: List[dict], matched_only: bool, lang: str = "nl"
 ) -> Tuple[List[dict], Dict[str, float]]:
     """Build report rows from the SAME enriched transactions the screen
     shows. When matched_only is set, unmatched + private rows are dropped so
@@ -1704,17 +1705,17 @@ def _report_rows_from_enriched(
             "date": (tx.get("date") or "")[:10],
             "amount": amount,
             "desc": (tx.get("merchant") or tx.get("description") or "").strip(),
-            "link_label": _report_link_label(link),
+            "link_label": _report_link_label(link, lang),
         })
     return rows, totals
 
 
 def _build_report_pdf(
     rows: List[dict], totals: Dict[str, float], matched_only: bool,
-    profile: Optional[dict] = None,
+    profile: Optional[dict] = None, lang: str = "nl",
 ) -> bytes:
     """Branded PDF matching the annual/VAT report letterhead (business-name
-    header + gold rule + teal tables + footer)."""
+    header + gold rule + teal tables + footer). Localised via `lang`."""
     from io import BytesIO
     from datetime import datetime as _dt
     from reportlab.lib.pagesizes import A4
@@ -1750,11 +1751,16 @@ def _build_report_pdf(
     total_style = ParagraphStyle('Total', fontName='Helvetica-Bold', fontSize=11, textColor=TEAL, leading=17)
     footer_style = ParagraphStyle('Footer', fontName='Helvetica', fontSize=9, textColor=TEXT_SECONDARY, alignment=TA_CENTER)
 
-    subtitle = "Alleen gekoppelde transacties" if matched_only else "Alle transacties"
+    en = lang == "en"
+    title = "Transaction overview" if en else "Transactieoverzicht"
+    if matched_only:
+        subtitle = "Matched transactions only" if en else "Alleen gekoppelde transacties"
+    else:
+        subtitle = "All transactions" if en else "Alle transacties"
     story = [
         Table(
             [[Paragraph(business_name, name_style),
-              Paragraph(f"Transactieoverzicht<br/>{subtitle}", title_style)]],
+              Paragraph(f"{title}<br/>{subtitle}", title_style)]],
             colWidths=[page_width * 0.55, page_width * 0.45],
             style=TableStyle([
                 ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
@@ -1764,9 +1770,9 @@ def _build_report_pdf(
         Spacer(1, 2 * mm),
         HRFlowable(width="100%", thickness=3, color=GOLD, spaceAfter=4 * mm),
         Table(
-            [[[Paragraph('NAAM', label_style), Paragraph(profile.get('full_name', '—') or '—', value_style)],
-              [Paragraph('AANTAL', label_style), Paragraph(str(len(rows)), value_style)],
-              [Paragraph('GEGENEREERD', label_style), Paragraph(_dt.now().strftime('%d-%m-%Y'), value_style)]]],
+            [[[Paragraph('NAME' if en else 'NAAM', label_style), Paragraph(profile.get('full_name', '—') or '—', value_style)],
+              [Paragraph('COUNT' if en else 'AANTAL', label_style), Paragraph(str(len(rows)), value_style)],
+              [Paragraph('GENERATED' if en else 'GEGENEREERD', label_style), Paragraph(_dt.now().strftime('%d-%m-%Y'), value_style)]]],
             colWidths=[page_width / 3] * 3,
             style=TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP')]),
         ),
@@ -1774,14 +1780,15 @@ def _build_report_pdf(
         HRFlowable(width="100%", thickness=1, color=MID_GREY, spaceAfter=4 * mm),
     ]
 
-    data = [["Datum", "Bedrag", "Omschrijving", "Gekoppeld aan"]]
+    data = [(["Date", "Amount", "Description", "Linked to"] if en
+             else ["Datum", "Bedrag", "Omschrijving", "Gekoppeld aan"])]
     for r in rows:
         data.append([
             r["date"], eur(r["amount"]),
             (r["desc"] or "")[:48], (r["link_label"] or "—")[:40],
         ])
     if len(data) == 1:
-        data.append(["—", "—", "Geen transacties", "—"])
+        data.append(["—", "—", "No transactions" if en else "Geen transacties", "—"])
 
     table = Table(data, colWidths=[22 * mm, 28 * mm, 73 * mm, 47 * mm], repeatRows=1)
     table.setStyle(TableStyle([
@@ -1802,14 +1809,16 @@ def _build_report_pdf(
 
     if matched_only:
         story.append(Spacer(1, 6 * mm))
-        story.append(Paragraph(
-            f"Totaal ontvangen (gekoppeld): {eur(totals['in']).replace('+ ', '')}", total_style))
-        story.append(Paragraph(
-            f"Totaal uitgegeven (gekoppeld): € {abs(totals['out']):.2f}".replace(".", ","), total_style))
+        in_lbl = "Total received (matched)" if en else "Totaal ontvangen (gekoppeld)"
+        out_lbl = "Total spent (matched)" if en else "Totaal uitgegeven (gekoppeld)"
+        out_amt = f"€ {abs(totals['out']):.2f}".replace(".", ",")
+        story.append(Paragraph(f"{in_lbl}: {eur(totals['in']).replace('+ ', '')}", total_style))
+        story.append(Paragraph(f"{out_lbl}: {out_amt}", total_style))
 
     story.append(Spacer(1, 10 * mm))
+    gen_by = "Generated by BigDogg" if en else "Gegenereerd door BigDogg"
     story.append(Paragraph(
-        f"Gegenereerd door BigDogg · bigdogg.nl · {_dt.now().strftime('%d-%m-%Y')}",
+        f"{gen_by} · bigdogg.nl · {_dt.now().strftime('%d-%m-%Y')}",
         footer_style))
 
     doc.build(story)
@@ -1817,14 +1826,18 @@ def _build_report_pdf(
 
 
 @router.get("/report")
-async def banking_report(request: Request, matched_only: bool = Query(False)):
+async def banking_report(
+    request: Request,
+    matched_only: bool = Query(False),
+    lang: str = Query("nl"),
+):
     """Branded PDF of bank transactions and what each is linked to
     (invoice / expense / investment), built from the SAME data as the
-    Transactions screen. With matched_only=true, unmatched and private rows
-    are excluded — so the export contains no personal transactions."""
+    Transactions screen. Localised via `lang` (nl/en). With matched_only=true,
+    unmatched and private rows are excluded — no personal transactions."""
     user_id = get_user_id(request)
     enriched, _ = await _enriched_transactions_for_user(user_id, 2000)
-    rows, totals = _report_rows_from_enriched(enriched, matched_only)
+    rows, totals = _report_rows_from_enriched(enriched, matched_only, lang)
 
     profile = {}
     try:
@@ -1836,8 +1849,11 @@ async def banking_report(request: Request, matched_only: bool = Query(False)):
     except Exception:
         pass
 
-    pdf = _build_report_pdf(rows, totals, matched_only, profile)
-    fname = "bigdogg-transacties-gekoppeld.pdf" if matched_only else "bigdogg-transacties.pdf"
+    pdf = _build_report_pdf(rows, totals, matched_only, profile, lang)
+    if lang == "en":
+        fname = "bigdogg-transactions-matched.pdf" if matched_only else "bigdogg-transactions.pdf"
+    else:
+        fname = "bigdogg-transacties-gekoppeld.pdf" if matched_only else "bigdogg-transacties.pdf"
     return Response(
         content=pdf,
         media_type="application/pdf",
