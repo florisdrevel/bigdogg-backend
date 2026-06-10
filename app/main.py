@@ -80,21 +80,12 @@ app.include_router(downloads.router, prefix="/api/v1/downloads", tags=["download
 
 @app.get("/health")
 async def health():
-    # Expose the deployed commit + a build marker so a deploy can be
-    # verified from outside (Railway injects RAILWAY_GIT_COMMIT_SHA). The
-    # marker string bumps with each deploy-debug build so we can tell which
-    # code is actually running without an authenticated call.
+    # Deployed commit (Railway injects RAILWAY_GIT_COMMIT_SHA) kept for quick
+    # deploy verification — a commit SHA is not sensitive. The config
+    # booleans used during deploy debugging have been removed.
     return {
         "status": "healthy",
         "commit": (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "unknown")[:8],
-        "build_marker": "bank-default-open-v2",
-        # Non-secret config booleans for deploy debugging (no values leaked).
-        # bank_live_restricted=True means BANK_LIVE_USER_IDS is set to a
-        # non-empty allowlist (so the live flow is RESTRICTED, not open).
-        "bank_live_restricted": bool((os.getenv("BANK_LIVE_USER_IDS") or "").strip()),
-        "tl_enc_key_set": bool((os.getenv("TL_TOKEN_ENC_KEY") or "").strip()),
-        "tl_sandbox": (os.getenv("TRUELAYER_USE_SANDBOX") or "true").strip().lower()
-        in ("1", "true", "yes", "y"),
     }
 
 @app.get("/debug-headers")
