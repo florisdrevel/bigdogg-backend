@@ -6,6 +6,12 @@ from app.routers.pdf import TEAL, GOLD, LIGHT_GREY, MID_GREY, TEXT_SECONDARY
 from app.routers.subscription import require_active_paid
 from app.services.ai_quota import require_ai_quota, record_ai_usage
 from app.services.cron_auth import require_cron_secret
+from app.constants.tax_rates import (
+    estimate_income_tax_reserve,
+    zelfstandigenaftrek_for_year,
+    mkb_vrijstelling_for_year,
+    URENCRITERIUM_HOURS,
+)
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
@@ -199,6 +205,19 @@ def get_year_data(user_id: str, year: int):
             })
     total_depreciation = round(total_depreciation, 2)
 
+    # ── Conservative income-tax reserve ("Reserveer voor de belasting") ───────
+    # km_deduction is 0 until the kilometerregistratie feature ships; this is the
+    # single hook to wire it in then (sum of zakelijke km × rate for the year).
+    km_deduction = 0.0
+    urencriterium_met = total_hours >= URENCRITERIUM_HOURS
+    tax_reserve = estimate_income_tax_reserve(
+        total_profit=total_profit,
+        total_depreciation=total_depreciation,
+        km_deduction=km_deduction,
+        urencriterium_met=urencriterium_met,
+        year=year,
+    )
+
     return {
         "year": year,
         "quarters": quarters,
@@ -213,6 +232,7 @@ def get_year_data(user_id: str, year: int):
         "invoice_hours": invoice_hours,
         "total_depreciation": total_depreciation,
         "depreciation_items": depreciation_items,
+        "tax_reserve": tax_reserve,
     }
 
 async def get_ai_tax_tips(data_current, data_prev, profile, lang='nl', user_id: str = ""):
@@ -597,13 +617,62 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
     story.append(ib_table)
     story.append(Spacer(1, 2*mm))
 
+    _za = zelfstandigenaftrek_for_year(year)
+    _mkb_pct = mkb_vrijstelling_for_year(year) * 100
     if lang == 'en':
-        ib_note = ("💡 Enter your profit under 'Profit from business' in your income tax return on belastingdienst.nl. "
-                   "Don't forget to apply the self-employed deduction (€5,030 in 2026) and the SME profit exemption (14%).")
+        ib_note = (f"💡 Enter your profit under 'Profit from business' in your income tax return on belastingdienst.nl. "
+                   f"Don't forget to apply the self-employed deduction (€{_za:,.0f} in {year}) "
+                   f"and the SME profit exemption ({_mkb_pct:.1f}%).")
     else:
-        ib_note = ("💡 Vul de winst in bij 'Winst uit onderneming' in je IB aangifte op belastingdienst.nl. "
-                   "Vergeet niet de zelfstandigenaftrek (€5.030 in 2026) en eventuele MKB-winstvrijstelling (14%) toe te passen.")
+        _za_nl = f"{_za:,.0f}".replace(",", ".")
+        _mkb_nl = f"{_mkb_pct:.1f}".replace(".", ",")
+        ib_note = (f"💡 Vul de winst in bij 'Winst uit onderneming' in je IB aangifte op belastingdienst.nl. "
+                   f"Vergeet niet de zelfstandigenaftrek (€{_za_nl} in {year}) "
+                   f"en eventuele MKB-winstvrijstelling ({_mkb_nl}%) toe te passen.")
     story.append(Paragraph(ib_note, explain_style))
+
+    # ── Reserveer voor de belasting (conservative guideline) ──────────────────
+    tr = data_current.get('tax_reserve') or {}
+    reserve_amt = tr.get('reserve', 0) or 0
+    belastbare = tr.get('belastbare_winst', 0) or 0
+    story.append(Paragraph(_t('Reserveer voor de belasting', 'Set aside for income tax', lang), section_style))
+    reserve_rows = [
+        [_t('Belastbare winst (na aftrek & MKB-vrijstelling)', 'Taxable profit (after deductions & SME exemption)', lang),
+         f"€ {belastbare:,.2f}"],
+        [_t('Zelfstandigenaftrek', 'Self-employed deduction', lang),
+         f"€ {(tr.get('zelfstandigenaftrek', 0) or 0):,.2f}"],
+        [_t('MKB-winstvrijstelling', 'SME profit exemption', lang),
+         f"€ {(tr.get('mkb_winstvrijstelling', 0) or 0):,.2f}"],
+        [_t('Reserveer minimaal', 'Set aside at least', lang),
+         f"€ {reserve_amt:,.2f}"],
+    ]
+    reserve_table = Table(reserve_rows, colWidths=[page_width * 0.70, page_width * 0.30])
+    reserve_table.setStyle(TableStyle([
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+        ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#FEF9C3')),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('LEFTPADDING', (0, 0), (-1, -1), 8),
+        ('ROWBACKGROUNDS', (0, 0), (-1, -2), [LIGHT_GREY, colors.white]),
+        ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+        ('TEXTCOLOR', (0, 0), (-1, -1), TEAL),
+        ('GRID', (0, 0), (-1, -1), 0.5, MID_GREY),
+    ]))
+    story.append(reserve_table)
+    story.append(Spacer(1, 2*mm))
+    reserve_note = _t(
+        f"Reserveer minimaal ~€ {reserve_amt:,.2f} voor de inkomstenbelasting. "
+        "Dit is een richtlijn, geen belastingadvies — persoonlijke aftrekposten en "
+        "heffingskortingen kunnen dit bedrag verlagen. Bewust voorzichtig berekend "
+        "(zonder heffingskortingen), zodat je niet te weinig opzij zet.",
+        f"Set aside at least ~€ {reserve_amt:,.2f} for income tax. "
+        "This is a guideline, not tax advice — personal deductions and tax credits "
+        "may lower this amount. Deliberately calculated on the safe side (excluding "
+        "tax credits) so you don't reserve too little.",
+        lang,
+    )
+    story.append(Paragraph(reserve_note, explain_style))
 
     # ── AI Tax Tips ───────────────────────────────────────────────────────────
     story.append(Paragraph(_t('Persoonlijke belastingtips voor jou', 'Personal tax tips for you', lang), section_style))
@@ -662,10 +731,12 @@ async def download_annual_report(
     data_current = get_year_data(user_id, year)
     data_prev = get_year_data(user_id, year - 1)
     import asyncio
+    _mkb_pct_tips = mkb_vrijstelling_for_year(year) * 100
     if lang == 'en':
-        fallback_tips = "1. Check if you qualify for the self-employed deduction (zelfstandigenaftrek).\n2. Apply the SME profit exemption (MKB-winstvrijstelling) of 14%.\n3. Review all business costs for deductibility.\n4. Consider a pension reserve (FOR) to reduce taxable profit.\n5. Ensure all invoices are in your administration."
+        fallback_tips = f"1. Check if you qualify for the self-employed deduction (zelfstandigenaftrek).\n2. Apply the SME profit exemption (MKB-winstvrijstelling) of {_mkb_pct_tips:.1f}%.\n3. Review all business costs for deductibility.\n4. Consider a pension reserve (FOR) to reduce taxable profit.\n5. Ensure all invoices are in your administration."
     else:
-        fallback_tips = "1. Controleer of je in aanmerking komt voor de zelfstandigenaftrek.\n2. Pas de MKB-winstvrijstelling van 14% toe op je winst.\n3. Bekijk alle zakelijke kosten op aftrekbaarheid.\n4. Overweeg een fiscale oudedagsreserve (FOR) om belastbare winst te verlagen.\n5. Zorg dat alle facturen in je administratie zitten."
+        _mkb_nl_tips = f"{_mkb_pct_tips:.1f}".replace(".", ",")
+        fallback_tips = f"1. Controleer of je in aanmerking komt voor de zelfstandigenaftrek.\n2. Pas de MKB-winstvrijstelling van {_mkb_nl_tips}% toe op je winst.\n3. Bekijk alle zakelijke kosten op aftrekbaarheid.\n4. Overweeg een fiscale oudedagsreserve (FOR) om belastbare winst te verlagen.\n5. Zorg dat alle facturen in je administratie zitten."
     try:
         tax_tips = await asyncio.wait_for(
             get_ai_tax_tips(data_current, data_prev, profile, lang, user_id),

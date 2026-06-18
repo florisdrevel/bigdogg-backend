@@ -1,5 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request
 from app.database import supabase
+from app.constants.tax_rates import estimate_income_tax_reserve, URENCRITERIUM_HOURS
+from app.routers.hours import _calc_invoice_hours
 from datetime import date
 
 router = APIRouter()
@@ -132,6 +134,36 @@ async def get_annual_overview(request: Request, year: int = None):
     total_revenue = sum(q["revenue_ex_btw"] for q in quarters)
     total_expenses = sum(q["expenses_ex_btw"] for q in quarters)
     total_btw = sum(q["btw_to_pay"] for q in quarters)
+    total_profit = round(total_revenue - total_expenses, 2)
+
+    # ── Inputs for the conservative income-tax reserve ────────────────────────
+    # Depreciation (same rule as the annual report).
+    investments = supabase.table("investments").select("*").eq("user_id", user_id).execute()
+    total_depreciation = 0.0
+    for inv in (investments.data or []):
+        dep_years = inv.get("depreciation_years", 5) or 5
+        purchase_year = int((inv.get("purchase_date") or f"{year}-01-01")[:4])
+        if purchase_year <= year < purchase_year + dep_years:
+            total_depreciation += round(float(inv.get("amount", 0)) / dep_years, 2)
+    total_depreciation = round(total_depreciation, 2)
+
+    # Hours → urencriterium (manual entries + invoice-derived, mirrors /hours).
+    year_start, year_end = f"{year}-01-01", f"{year}-12-31"
+    manual_hrs = supabase.table("hours").select("hours").eq("user_id", user_id)\
+        .gte("date", year_start).lte("date", year_end).execute()
+    manual_hours = sum(float(h.get("hours") or 0) for h in (manual_hrs.data or []))
+    invoice_hours, _ = _calc_invoice_hours(user_id, year_start, year_end)
+    total_hours = round(manual_hours + invoice_hours, 2)
+    urencriterium_met = total_hours >= URENCRITERIUM_HOURS
+
+    # km_deduction is 0 until the kilometerregistratie feature ships (single hook).
+    tax_reserve = estimate_income_tax_reserve(
+        total_profit=total_profit,
+        total_depreciation=total_depreciation,
+        km_deduction=0.0,
+        urencriterium_met=urencriterium_met,
+        year=year,
+    )
 
     return {
         "year": year,
@@ -139,6 +171,10 @@ async def get_annual_overview(request: Request, year: int = None):
         "total_revenue_ex_btw": round(total_revenue, 2),
         "total_expenses_ex_btw": round(total_expenses, 2),
         "total_btw_to_pay": round(total_btw, 2),
-        "net_profit_indicative": round(total_revenue - total_expenses, 2),
+        "net_profit_indicative": total_profit,
+        "total_depreciation": total_depreciation,
+        "total_hours": total_hours,
+        "urencriterium_met": urencriterium_met,
+        "tax_reserve": tax_reserve,
     }
     
