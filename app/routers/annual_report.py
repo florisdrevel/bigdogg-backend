@@ -640,18 +640,20 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
                    f"en eventuele MKB-winstvrijstelling ({_mkb_nl}%) toe te passen.")
     story.append(Paragraph(ib_note, explain_style))
 
-    # ── Reserveer voor de belasting (conservative guideline) ──────────────────
+    # ── Reserveer voor de belasting (guideline) ───────────────────────────────
     tr = data_current.get('tax_reserve') or {}
     reserve_amt = tr.get('reserve', 0) or 0
     belastbare = tr.get('belastbare_winst', 0) or 0
+    bruto = tr.get('gross_tax', 0) or 0
+    korting = tr.get('heffingskortingen', 0) or 0
     story.append(Paragraph(_t('Reserveer voor de belasting', 'Set aside for income tax', lang), section_style))
     reserve_rows = [
         [_t('Belastbare winst (na aftrek & MKB-vrijstelling)', 'Taxable profit (after deductions & SME exemption)', lang),
          f"€ {belastbare:,.2f}"],
-        [_t('Zelfstandigenaftrek', 'Self-employed deduction', lang),
-         f"€ {(tr.get('zelfstandigenaftrek', 0) or 0):,.2f}"],
-        [_t('MKB-winstvrijstelling', 'SME profit exemption', lang),
-         f"€ {(tr.get('mkb_winstvrijstelling', 0) or 0):,.2f}"],
+        [_t('Inkomstenbelasting (incl. premies)', 'Income tax (incl. national insurance)', lang),
+         f"€ {bruto:,.2f}"],
+        [_t('Heffingskortingen', 'Tax credits', lang),
+         f"− € {korting:,.2f}"],
         [_t('Reserveer minimaal', 'Set aside at least', lang),
          f"€ {reserve_amt:,.2f}"],
     ]
@@ -670,17 +672,30 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
     ]))
     story.append(reserve_table)
     story.append(Spacer(1, 2*mm))
-    reserve_note = _t(
-        f"Reserveer minimaal ~€ {reserve_amt:,.2f} voor de inkomstenbelasting. "
-        "Dit is een richtlijn, geen belastingadvies — persoonlijke aftrekposten en "
-        "heffingskortingen kunnen dit bedrag verlagen. Bewust voorzichtig berekend "
-        "(zonder heffingskortingen), zodat je niet te weinig opzij zet.",
-        f"Set aside at least ~€ {reserve_amt:,.2f} for income tax. "
-        "This is a guideline, not tax advice — personal deductions and tax credits "
-        "may lower this amount. Deliberately calculated on the safe side (excluding "
-        "tax credits) so you don't reserve too little.",
-        lang,
-    )
+    _loon_caveat_nl = ("Heb je naast je onderneming ook loon uit dienstbetrekking? "
+                       "Dan zijn je heffingskortingen daar al (deels) verrekend en moet je waarschijnlijk meer reserveren.")
+    _loon_caveat_en = ("Do you also have income from employment alongside your business? "
+                       "Then your tax credits are already (partly) used against that salary, so you should likely set aside more.")
+    if reserve_amt > 0:
+        reserve_note = _t(
+            f"Reserveer minimaal ~€ {reserve_amt:,.2f} voor de inkomstenbelasting. "
+            f"Dit is een richtlijn, geen belastingadvies — gebaseerd op je winst, de "
+            f"ondernemersaftrek en de standaard heffingskortingen. {_loon_caveat_nl}",
+            f"Set aside at least ~€ {reserve_amt:,.2f} for income tax. "
+            f"This is a guideline, not tax advice — based on your profit, the "
+            f"entrepreneur deductions and the standard tax credits. {_loon_caveat_en}",
+            lang,
+        )
+    else:
+        reserve_note = _t(
+            "Op basis van je winst hoef je waarschijnlijk niets te reserveren voor de "
+            "inkomstenbelasting — je heffingskortingen dekken de verschuldigde belasting. "
+            f"Dit is een richtlijn, geen belastingadvies. {_loon_caveat_nl}",
+            "Based on your profit you likely don't need to set anything aside for income "
+            "tax — your tax credits cover the tax due. "
+            f"This is a guideline, not tax advice. {_loon_caveat_en}",
+            lang,
+        )
     story.append(Paragraph(reserve_note, explain_style))
 
     # ── AI Tax Tips ───────────────────────────────────────────────────────────

@@ -10,13 +10,19 @@ These figures change annually (usually announced on Prinsjesdag, effective
 decline. When a new tax year starts, add/confirm its entry in EVERY map below.
 Last verified for tax year: 2026.
 
-Design note — the reserve is deliberately CONSERVATIVE:
-  • It DOES apply the ondernemersaftrek (zelfstandigenaftrek + MKB-
-    winstvrijstelling) so the taxable base is realistic, BUT
-  • it does NOT credit any heffingskortingen (algemene heffingskorting /
-    arbeidskorting). Those are intentionally left out so the estimate errs on
-    the high side and protects users who ALSO have loondienst income — whose
-    kortingen are already consumed against that salary — from under-reserving.
+Design note — the reserve models a ZZP'er whose business profit is their MAIN
+income (the typical BigDogg user), so it stays sensible at every income level:
+  • applies the ondernemersaftrek (zelfstandigenaftrek when the urencriterium is
+    met, + MKB-winstvrijstelling), then
+  • applies the box-1 brackets, then
+  • SUBTRACTS the standard heffingskortingen (algemene heffingskorting +
+    arbeidskorting). At low profit these credits cancel the tax entirely, so a
+    €3.550 profit correctly yields a ~€0 reserve — not a nonsensical four-figure
+    one (the bug this replaced).
+
+Caveat (must be shown in the UI/PDF): someone who ALSO has loon uit
+dienstbetrekking has those heffingskortingen already used against that salary,
+so they should reserve MORE than this figure.
 
 This produces a GUIDELINE, never a tax assessment. Always present it as such.
 """
@@ -70,6 +76,29 @@ DEFAULT_BOX1_BRACKETS = [
     (None, 0.495),
 ]
 
+# ── Heffingskortingen (tax credits), per tax year — under AOW age ─────────────
+# Verified against the Belastingdienst for 2026. RE-CHECK EVERY YEAR.
+# Algemene heffingskorting: full up to `taper_start`, then linear down to €0.
+ALGEMENE_HEFFINGSKORTING_BY_YEAR = {
+    2026: {"max": 3115.0, "taper_start": 29736.0, "taper_rate": 0.06398},
+}
+DEFAULT_AHK = ALGEMENE_HEFFINGSKORTING_BY_YEAR[2026]
+
+# Arbeidskorting: piecewise on arbeidsinkomen. Segments are
+# (lower_bound, base_credit_at_lower_bound, marginal_rate_within_segment).
+# The final segment phases the credit out (negative rate); floored at €0.
+# 2026 (Belastingdienst, niet-AOW): 0–11.965 @8,324%; 11.965–25.845 €996+31,009%;
+# 25.845–45.592 €5.300+1,950%; 45.592–132.920 €5.685−6,510%.
+ARBEIDSKORTING_SEGMENTS_BY_YEAR = {
+    2026: [
+        (0.0, 0.0, 0.08324),
+        (11965.0, 996.0, 0.31009),
+        (25845.0, 5300.0, 0.01950),
+        (45592.0, 5685.0, -0.06510),
+    ],
+}
+DEFAULT_ARBEIDSKORTING_SEGMENTS = ARBEIDSKORTING_SEGMENTS_BY_YEAR[2026]
+
 
 def km_rate_for_year(year: int) -> float:
     return KM_RATE_BY_YEAR.get(year, DEFAULT_KM_RATE)
@@ -85,6 +114,28 @@ def mkb_vrijstelling_for_year(year: int) -> float:
 
 def box1_brackets_for_year(year: int):
     return BOX1_BRACKETS_BY_YEAR.get(year, DEFAULT_BOX1_BRACKETS)
+
+
+def algemene_heffingskorting_for_year(income: float, year: int) -> float:
+    """Algemene heffingskorting at the given (box-1) income, for `year`."""
+    p = ALGEMENE_HEFFINGSKORTING_BY_YEAR.get(year, DEFAULT_AHK)
+    income = max(0.0, income or 0.0)
+    if income <= p["taper_start"]:
+        return p["max"]
+    return max(0.0, p["max"] - p["taper_rate"] * (income - p["taper_start"]))
+
+
+def arbeidskorting_for_year(income: float, year: int) -> float:
+    """Arbeidskorting at the given arbeidsinkomen, for `year` (piecewise)."""
+    segments = ARBEIDSKORTING_SEGMENTS_BY_YEAR.get(year, DEFAULT_ARBEIDSKORTING_SEGMENTS)
+    income = max(0.0, income or 0.0)
+    credit = 0.0
+    for lower, base, rate in segments:
+        if income >= lower:
+            credit = base + rate * (income - lower)
+        else:
+            break
+    return max(0.0, credit)
 
 
 def _box1_tax(taxable: float, brackets) -> float:
@@ -143,7 +194,16 @@ def estimate_income_tax_reserve(
     mkb_vrijstelling = round(winst_na_aftrek * mkb_rate, 2)
     belastbare_winst = round(winst_na_aftrek - mkb_vrijstelling, 2)
 
-    reserve = round(_box1_tax(belastbare_winst, box1_brackets_for_year(year)), 2)
+    gross_tax = round(_box1_tax(belastbare_winst, box1_brackets_for_year(year)), 2)
+    # Heffingskortingen — computed on belastbare winst as a proxy for box-1
+    # income, assuming this profit is the user's MAIN income. At low profit
+    # these credits cancel the tax (→ €0). The UI/PDF carry a caveat telling
+    # users with loondienst income (whose credits are already used) to reserve
+    # more. Credits only offset tax due; the unused remainder is not paid out.
+    ahk = round(algemene_heffingskorting_for_year(belastbare_winst, year), 2)
+    ak = round(arbeidskorting_for_year(belastbare_winst, year), 2)
+    heffingskortingen = round(ahk + ak, 2)
+    reserve = max(0.0, round(gross_tax - heffingskortingen, 2))
     effective_rate = round(reserve / belastbare_winst, 4) if belastbare_winst > 0 else 0.0
 
     return {
@@ -156,6 +216,10 @@ def estimate_income_tax_reserve(
         "mkb_winstvrijstelling_rate": mkb_rate,
         "mkb_winstvrijstelling": mkb_vrijstelling,
         "belastbare_winst": belastbare_winst,
+        "gross_tax": gross_tax,
+        "algemene_heffingskorting": ahk,
+        "arbeidskorting": ak,
+        "heffingskortingen": heffingskortingen,
         "reserve": reserve,
         "effective_rate": effective_rate,
     }
