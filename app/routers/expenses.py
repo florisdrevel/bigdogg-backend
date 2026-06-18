@@ -177,7 +177,7 @@ Rules:
         if ext == "pdf" or content_type == "application/pdf":
             base64_data = base64.standard_b64encode(content).decode("utf-8")
             message = client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=settings.anthropic_model,
                 max_tokens=500,
                 messages=[{
                     "role": "user",
@@ -223,7 +223,7 @@ Rules:
 
             base64_data = base64.standard_b64encode(content).decode("utf-8")
             message = client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=settings.anthropic_model,
                 max_tokens=500,
                 messages=[{
                     "role": "user",

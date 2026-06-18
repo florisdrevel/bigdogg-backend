@@ -110,7 +110,7 @@ async def parse_statement(request: Request, file: UploadFile = File(...)):
 
     try:
         message = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=settings.anthropic_model,
             max_tokens=16000,
             messages=[{
                 "role": "user",

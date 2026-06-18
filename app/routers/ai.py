@@ -83,7 +83,7 @@ Use this exact format:
 
     try:
         message = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=settings.anthropic_model,
             max_tokens=1024,
             messages=[
                 {"role": "user", "content": data.prompt}
@@ -175,7 +175,7 @@ Use this exact format:
 
     try:
         message = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=settings.anthropic_model,
             max_tokens=1024,
             messages=[
                 {"role": "user", "content": data.prompt}

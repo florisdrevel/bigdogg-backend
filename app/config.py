@@ -12,6 +12,12 @@ class Settings:
     algorithm: str = os.getenv("ALGORITHM", "HS256")
     access_token_expire_minutes: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
+    # Single source of truth for the Claude model used across all AI features
+    # (invoice/quote gen, receipt + bank-statement parsing, annual tax tips).
+    # When Anthropic retires a model the old id starts returning 404 — bump
+    # this one value (or set ANTHROPIC_MODEL in the env) instead of editing
+    # every router. Verify current ids at platform.claude.com when changing.
+    anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
     stripe_secret_key: str = os.getenv("STRIPE_SECRET_KEY", "")
     stripe_webhook_secret: str = os.getenv("STRIPE_WEBHOOK_SECRET", "")
     stripe_connect_webhook_secret: str = os.getenv("STRIPE_CONNECT_WEBHOOK_SECRET", "")

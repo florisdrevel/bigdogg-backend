@@ -119,7 +119,7 @@ Rules:
         }
 
     message = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model=settings.anthropic_model,
         max_tokens=500,
         messages=[{
             "role": "user",
