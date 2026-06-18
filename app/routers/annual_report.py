@@ -12,6 +12,7 @@ from app.constants.tax_rates import (
     mkb_vrijstelling_for_year,
     URENCRITERIUM_HOURS,
 )
+from app.routers.trips import year_km_total
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
@@ -205,10 +206,11 @@ def get_year_data(user_id: str, year: int):
             })
     total_depreciation = round(total_depreciation, 2)
 
+    # ── Kilometerregistratie — deductible business-km allowance ───────────────
+    km_totals = year_km_total(user_id, year)
+    km_deduction = km_totals["km_deduction_eur"]
+
     # ── Conservative income-tax reserve ("Reserveer voor de belasting") ───────
-    # km_deduction is 0 until the kilometerregistratie feature ships; this is the
-    # single hook to wire it in then (sum of zakelijke km × rate for the year).
-    km_deduction = 0.0
     urencriterium_met = total_hours >= URENCRITERIUM_HOURS
     tax_reserve = estimate_income_tax_reserve(
         total_profit=total_profit,
@@ -232,6 +234,9 @@ def get_year_data(user_id: str, year: int):
         "invoice_hours": invoice_hours,
         "total_depreciation": total_depreciation,
         "depreciation_items": depreciation_items,
+        "total_business_km": km_totals["total_business_km"],
+        "km_rate": km_totals["km_rate"],
+        "km_deduction_eur": km_deduction,
         "tax_reserve": tax_reserve,
     }
 
@@ -595,7 +600,11 @@ def _generate_annual_pdf(data_current, data_prev, profile, tax_tips, lang='nl'):
         [_t('Omzet', 'Revenue', lang), _t('Totale omzet exclusief BTW', 'Total revenue excluding VAT', lang), f"€ {data_current['total_revenue']:,.2f}"],
         [_t('Kosten', 'Costs', lang), _t('Zakelijke kosten exclusief BTW', 'Business costs excluding VAT', lang), f"€ {data_current['total_expenses']:,.2f}"],
         [_t('Afschrijvingen', 'Depreciation', lang), _t('Jaarlijkse afschrijving investeringen', 'Annual investment depreciation', lang), f"€ {total_dep:,.2f}"],
-        [_t('Winst', 'Profit', lang), _t('Omzet minus kosten minus afschrijvingen', 'Revenue minus costs minus depreciation', lang), f"€ {round(data_current['total_profit'] - total_dep, 2):,.2f}"],
+        [_t('Zakelijke kilometers', 'Business kilometres', lang),
+         _t(f"{data_current.get('total_business_km', 0):,.0f} km × €{data_current.get('km_rate', 0):.2f}",
+            f"{data_current.get('total_business_km', 0):,.0f} km × €{data_current.get('km_rate', 0):.2f}", lang),
+         f"€ {data_current.get('km_deduction_eur', 0):,.2f}"],
+        [_t('Winst', 'Profit', lang), _t('Omzet minus kosten, afschrijvingen en kilometers', 'Revenue minus costs, depreciation and kilometres', lang), f"€ {round(data_current['total_profit'] - total_dep - data_current.get('km_deduction_eur', 0), 2):,.2f}"],
     ]
     ib_table = Table(ib_data, colWidths=[page_width*0.25, page_width*0.50, page_width*0.25])
     ib_table.setStyle(TableStyle([

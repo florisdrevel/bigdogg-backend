@@ -24,6 +24,17 @@ This produces a GUIDELINE, never a tax assessment. Always present it as such.
 # ── Urencriterium — hours that unlock the zelfstandigenaftrek ─────────────────
 URENCRITERIUM_HOURS = 1225  # verify yearly
 
+# ── Reiskostenvergoeding — deductible rate per zakelijke kilometer ────────────
+# Belastingdienst flat allowance for business km, per tax year. Was €0,21 in
+# 2023, raised to €0,23 from 2024. Verify yearly.
+KM_RATE_BY_YEAR = {
+    2023: 0.21,
+    2024: 0.23,
+    2025: 0.23,
+    2026: 0.23,  # verify yearly
+}
+DEFAULT_KM_RATE = 0.23  # latest known; used if the year is missing
+
 # ── Zelfstandigenaftrek (self-employed deduction), per tax year ───────────────
 # Flat amount, granted only if the urencriterium is met. On a scheduled decline.
 ZELFSTANDIGENAFTREK_BY_YEAR = {
@@ -58,6 +69,10 @@ DEFAULT_BOX1_BRACKETS = [
     (79137.0, 0.3756),
     (None, 0.495),
 ]
+
+
+def km_rate_for_year(year: int) -> float:
+    return KM_RATE_BY_YEAR.get(year, DEFAULT_KM_RATE)
 
 
 def zelfstandigenaftrek_for_year(year: int) -> float:

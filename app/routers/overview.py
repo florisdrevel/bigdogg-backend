@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Request
 from app.database import supabase
 from app.constants.tax_rates import estimate_income_tax_reserve, URENCRITERIUM_HOURS
 from app.routers.hours import _calc_invoice_hours
+from app.routers.trips import year_km_total
 from datetime import date
 
 router = APIRouter()
@@ -156,11 +157,13 @@ async def get_annual_overview(request: Request, year: int = None):
     total_hours = round(manual_hours + invoice_hours, 2)
     urencriterium_met = total_hours >= URENCRITERIUM_HOURS
 
-    # km_deduction is 0 until the kilometerregistratie feature ships (single hook).
+    # Deductible business-km allowance (0 until the km table is populated).
+    km_totals = year_km_total(user_id, year)
+
     tax_reserve = estimate_income_tax_reserve(
         total_profit=total_profit,
         total_depreciation=total_depreciation,
-        km_deduction=0.0,
+        km_deduction=km_totals["km_deduction_eur"],
         urencriterium_met=urencriterium_met,
         year=year,
     )
@@ -175,6 +178,8 @@ async def get_annual_overview(request: Request, year: int = None):
         "total_depreciation": total_depreciation,
         "total_hours": total_hours,
         "urencriterium_met": urencriterium_met,
+        "total_business_km": km_totals["total_business_km"],
+        "km_deduction_eur": km_totals["km_deduction_eur"],
         "tax_reserve": tax_reserve,
     }
     
