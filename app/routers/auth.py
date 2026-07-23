@@ -5,6 +5,7 @@ resend.api_key = settings.resend_api_key
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 from app.database import supabase
+from supabase import AuthApiError, AuthRetryableError
 from app.services.rate_limit import SlidingWindowLimiter, client_ip
 from datetime import datetime, timezone
 import hashlib
@@ -388,8 +389,20 @@ async def refresh_token(data: RefreshRequest):
         }
     except HTTPException:
         raise
-    except Exception as e:
+    except AuthApiError as e:
+        # A real rejection from Supabase (refresh token invalid/expired/
+        # revoked) — the session is genuinely gone. 401 tells the app to
+        # log the user out.
         raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
+    except AuthRetryableError as e:
+        # Supabase was unreachable/slow/rate-limited (network blip, 502-504,
+        # timeout) — NOT a rejected token. Must NOT be 401: the frontend
+        # treats 400/401/403 as "session expired" and force-logs-out the
+        # user, even with "keep me logged in" checked. 503 tells it to
+        # back off and retry instead.
+        raise HTTPException(status_code=503, detail="Auth service temporarily unavailable")
+    except Exception as e:
+        raise HTTPException(status_code=503, detail="Auth service temporarily unavailable")
 
 
 @router.post("/logout")
