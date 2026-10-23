@@ -17,6 +17,7 @@ from app.routers import share
 from app.routers import accountants
 from app.routers import bank
 from app.routers import downloads
+from app.routers import product_groups
 import os
 
 
@@ -45,6 +46,7 @@ app.add_middleware(
 
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(products.router, prefix="/api/v1/products", tags=["products"])
+app.include_router(product_groups.router, prefix="/api/v1/product-groups", tags=["product-groups"])
 app.include_router(clients.router, prefix="/api/v1/clients", tags=["clients"])
 app.include_router(invoices.router, prefix="/api/v1/invoices", tags=["invoices"])
 app.include_router(ai.router, prefix="/api/v1/ai", tags=["ai"])
