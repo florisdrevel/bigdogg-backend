@@ -47,17 +47,37 @@ def get_user_id(request: Request) -> str:
 
 def generate_invoice_number(user_id: str) -> str:
     year = date.today().year
+
+    # Optional per-user starting number. When set, the series begins at
+    # that value (e.g. 100001 -> 2026-100001) so a client can't read the
+    # invoice count off the number. The sequence stays sequential and
+    # uninterrupted (doorlopend) underneath — we only raise the floor.
+    start = 0
+    try:
+        pr = supabase.table("user_profiles")\
+            .select("invoice_number_start")\
+            .eq("id", user_id)\
+            .execute()
+        if pr.data and pr.data[0].get("invoice_number_start"):
+            start = int(pr.data[0]["invoice_number_start"])
+    except Exception:
+        start = 0
+
+    # Numeric max of this year's invoices (robust to varying digit counts).
     result = supabase.table("invoices")\
         .select("invoice_number")\
         .eq("user_id", user_id)\
         .like("invoice_number", f"{year}-%")\
-        .order("invoice_number", desc=True)\
-        .limit(1)\
         .execute()
-    if result.data:
-        last_num = int(result.data[0]["invoice_number"].split("-")[1])
-        return f"{year}-{str(last_num + 1).zfill(6)}"
-    return f"{year}-000001"
+    last_num = 0
+    for row in (result.data or []):
+        try:
+            last_num = max(last_num, int(row["invoice_number"].split("-")[1]))
+        except (IndexError, ValueError):
+            continue
+
+    next_num = max(last_num + 1, start)
+    return f"{year}-{str(next_num).zfill(6)}"
 
 
 @router.get("/")
