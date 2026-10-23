@@ -19,6 +19,12 @@ class ProfileUpdate(BaseModel):
     # Optional override for the "Ten name van" line on invoice emails.
     # Falls back to business_name / full_name when blank.
     bank_account_name: Optional[str] = None
+    # BIC/SWIFT — clients outside SEPA need this to make a transfer.
+    bic: Optional[str] = None
+    # Free-text footer appended to the invoice PDF, and a default message
+    # prefilled into the send-invoice dialog. Both optional.
+    invoice_footer: Optional[str] = None
+    invoice_default_message: Optional[str] = None
     language: Optional[str] = None
     onboarding_complete: Optional[bool] = None
     # Hex strings like "#1B3A4B". Used as the line/header color and the

@@ -10,6 +10,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.enums import TA_CENTER
 import io
 import urllib.request
+from xml.sax.saxutils import escape as xml_escape
 
 router = APIRouter()
 
@@ -171,6 +172,8 @@ def _generate_pdf(invoice, lines, profile, client, sender_email=''):
         sender_lines.append(Paragraph(f"BTW: {profile['btw_number']}", subtitle_style))
     if profile.get('iban'):
         sender_lines.append(Paragraph(f"IBAN: {profile['iban']}", subtitle_style))
+    if profile.get('bic'):
+        sender_lines.append(Paragraph(f"BIC: {profile['bic']}", subtitle_style))
     if sender_email:
         sender_lines.append(Paragraph(sender_email, subtitle_style))
 
@@ -279,7 +282,8 @@ def _generate_pdf(invoice, lines, profile, client, sender_email=''):
 
     footer_text = "Bedankt voor uw opdracht."
     if profile.get('iban'):
-        footer_text += f" Gelieve het bedrag over te maken op IBAN {profile['iban']}."
+        bic_suffix = f" (BIC: {profile['bic']})" if profile.get('bic') else ""
+        footer_text += f" Gelieve het bedrag over te maken op IBAN {profile['iban']}{bic_suffix}."
     if sender_email:
         footer_text += f" Bij vragen kunt u contact opnemen via {sender_email}."
     else:
@@ -288,6 +292,17 @@ def _generate_pdf(invoice, lines, profile, client, sender_email=''):
     story.append(Paragraph(footer_text, ParagraphStyle(
         'Footer', fontName='Helvetica', fontSize=9, textColor=TEXT_SECONDARY, alignment=TA_CENTER,
     )))
+
+    # User-defined footer note, appended below the standard payment line.
+    # Free text, so escape reportlab markup and keep the user's line breaks.
+    custom_footer = (profile.get('invoice_footer') or '').strip()
+    if custom_footer:
+        safe_footer = xml_escape(custom_footer).replace('\n', '<br/>')
+        story.append(Spacer(1, 3*mm))
+        story.append(Paragraph(safe_footer, ParagraphStyle(
+            'CustomFooter', fontName='Helvetica', fontSize=9, textColor=TEXT_SECONDARY,
+            alignment=TA_CENTER, leading=13,
+        )))
 
     doc.build(story)
     return buffer.getvalue()
