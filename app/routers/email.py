@@ -39,10 +39,28 @@ def _invoice_email_html(*, client_name: str, invoice_number: str,
                         total: str, due_date: str,
                         payment_link: str | None,
                         iban: str, bank_account_holder: str,
-                        sender_name: str, sender_email: str) -> str:
+                        sender_name: str, sender_email: str,
+                        bic: str = '', custom_message: str = '') -> str:
     """Branded HTML email body for outgoing invoice emails. Matches the
     teal-header + cream-card look used everywhere else (quote email,
     accountant invite, new-device notification)."""
+    # Optional personal note from the sender, shown under the greeting.
+    message_block = ""
+    if custom_message:
+        safe_msg = _esc(custom_message).replace('\n', '<br>')
+        message_block = (
+            f'<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;'
+            f'color:#1B3A4B;">{safe_msg}</p>'
+        )
+
+    # BIC row — shown in the payment block only when the sender has one.
+    bic_row = ""
+    if bic:
+        bic_row = f"""
+            <tr><td style="padding:4px 16px;color:#4A6572;font-size:13px;">
+              BIC: <strong style="color:#1B3A4B;">{_esc(bic)}</strong>
+            </td></tr>"""
+
     button_block = ""
     if payment_link:
         button_block = f"""
@@ -66,6 +84,7 @@ def _invoice_email_html(*, client_name: str, invoice_number: str,
         </td></tr>
         <tr><td style="padding:24px 28px 8px 28px;">
           <p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">Beste {_esc(client_name)},</p>
+          {message_block}
           <p style="margin:0 0 12px 0;font-size:15px;line-height:1.6;">
             Hierbij ontvangt u factuur
             <strong style="color:#1B3A4B;">{_esc(invoice_number)}</strong>
@@ -89,7 +108,7 @@ def _invoice_email_html(*, client_name: str, invoice_number: str,
             </td></tr>
             <tr><td style="padding:4px 16px;color:#4A6572;font-size:13px;">
               Ten name van: <strong style="color:#1B3A4B;">{_esc(bank_account_holder)}</strong>
-            </td></tr>
+            </td></tr>{bic_row}
             <tr><td style="padding:4px 16px 14px 16px;color:#4A6572;font-size:13px;">
               Onder vermelding van: <strong style="color:#1B3A4B;">{_esc(invoice_number)}</strong>
             </td></tr>
@@ -121,12 +140,16 @@ async def send_invoice_email(invoice_id: str, request: Request):
     # false the Stripe link is suppressed from the body even if the
     # invoice has one. Matches the per-send toggle in the Flutter app.
     include_payment_link = True
+    custom_message = ""
     try:
         body = await request.json()
-        if isinstance(body, dict) and "include_payment_link" in body:
-            include_payment_link = bool(body["include_payment_link"])
+        if isinstance(body, dict):
+            if "include_payment_link" in body:
+                include_payment_link = bool(body["include_payment_link"])
+            if body.get("message"):
+                custom_message = str(body["message"]).strip()
     except Exception:
-        # Empty / non-JSON body — keep the default.
+        # Empty / non-JSON body — keep the defaults.
         pass
 
     try:
@@ -179,6 +202,7 @@ async def send_invoice_email(invoice_id: str, request: Request):
         due_date = invoice['due_date']
         client_name = client.get('contact_name', '') or ''
         iban = profile.get('iban', '') or ''
+        bic = profile.get('bic', '') or ''
         bank_account_holder = (
             (profile.get('bank_account_name') or '').strip()
             or (profile.get('business_name') or '').strip()
@@ -214,8 +238,10 @@ async def send_invoice_email(invoice_id: str, request: Request):
                 f"Onder vermelding van: {invoice_number}"
             )
 
+        greeting_extra = f"{custom_message}\n\n" if custom_message else ""
         text_body = (
             f"Beste {client_name},\n\n"
+            f"{greeting_extra}"
             f"Hierbij ontvangt u factuur {invoice_number} voor een totaalbedrag van € {total}.\n\n"
             f"{payment_section}\n\n"
             f"De factuur is als PDF bijgevoegd bij deze e-mail.\n\n"
@@ -235,6 +261,8 @@ async def send_invoice_email(invoice_id: str, request: Request):
             bank_account_holder=bank_account_holder,
             sender_name=sender_name,
             sender_email=sender_email,
+            bic=bic,
+            custom_message=custom_message,
         )
 
         resend.Emails.send({
