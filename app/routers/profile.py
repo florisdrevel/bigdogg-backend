@@ -35,6 +35,9 @@ class ProfileUpdate(BaseModel):
     # the Stripe payment link. The per-send toggle in the send dialog
     # always wins; this is just the initial check state.
     default_exclude_payment_link: Optional[bool] = None
+    # Optional starting number for a masked invoice series (e.g. 100001).
+    # Null/0 keeps the plain sequential numbering.
+    invoice_number_start: Optional[int] = None
 
 
 def get_user_id(request: Request) -> str:
